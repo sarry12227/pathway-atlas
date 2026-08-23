@@ -6,8 +6,10 @@ import io
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -315,6 +317,108 @@ def _public_python_files():
 
 
 class PublicPackageBoundaryTest(unittest.TestCase):
+    def test_readme_clis_run_from_the_git_index_snapshot(self):
+        documents_available = importlib.util.find_spec("docx") is not None
+        readme = (ROOT / "README.md").read_text("utf-8")
+        commands = [
+            shlex.split(line.strip())
+            for line in readme.splitlines()
+            if line.strip().startswith("python scripts/")
+        ]
+        self.assertEqual(len(commands), 5)
+
+        tree = subprocess.run(
+            ["git", "write-tree"],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        with tempfile.TemporaryDirectory() as temporary:
+            temporary_path = Path(temporary)
+            archive = temporary_path / "public-package.zip"
+            snapshot = temporary_path / "snapshot"
+            subprocess.run(
+                ["git", "archive", "--format=zip", f"--output={archive}", tree],
+                cwd=ROOT,
+                check=True,
+                capture_output=True,
+            )
+            shutil.unpack_archive(archive, snapshot)
+
+            executed = 0
+            for command in commands:
+                if command[1] == "scripts/docx_export.py" and not documents_available:
+                    continue
+                with self.subTest(command=command):
+                    executed += 1
+                    completed = subprocess.run(
+                        [sys.executable, *command[1:]],
+                        cwd=snapshot,
+                        check=False,
+                        capture_output=True,
+                        text=True,
+                        encoding="utf-8",
+                        errors="replace",
+                    )
+                    self.assertEqual(
+                        completed.returncode,
+                        0,
+                        f"stdout={completed.stdout}\nstderr={completed.stderr}",
+                    )
+            self.assertEqual(executed, 5 if documents_available else 4)
+
+    def test_compliance_scan_has_minimal_price_and_privacy_boundaries(self):
+        from scripts.compliance_scan import contains_price_text, find_price_text
+
+        self.assertTrue(contains_price_text("方案优惠价 3999"))
+        self.assertEqual(find_price_text("方案优惠价 3999"), "优惠价 3999")
+        self.assertFalse(contains_price_text("香港学费 15万港币；院校层次 985"))
+        private_tail = r"，学生标识 PRIVATE-STUDENT；C:\Users\student\report.md"
+        self.assertEqual(
+            find_price_text("方案优惠价 3999" + private_tail),
+            "优惠价 3999",
+        )
+
+    def test_compliance_scan_supports_package_and_flat_imports(self):
+        package_module = importlib.import_module("scripts.compliance_scan")
+        self.assertFalse(package_module.contains_price_text("省排名 3000 位"))
+
+        flat_import = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import compliance_scan; "
+                "assert compliance_scan.contains_price_text('仅需 99')",
+            ],
+            cwd=ROOT / "scripts",
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(
+            flat_import.returncode,
+            0,
+            f"stdout={flat_import.stdout}\nstderr={flat_import.stderr}",
+        )
+
+    def test_compliance_scan_cli_does_not_echo_private_paths(self):
+        from scripts import compliance_scan
+
+        with tempfile.TemporaryDirectory() as temporary:
+            report = Path(temporary) / "private-student-report.md"
+            report.write_text("省排名 3000 位", encoding="utf-8")
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                success_code = compliance_scan.main([str(report)])
+                missing_code = compliance_scan.main([str(report.with_name("missing.md"))])
+
+        self.assertEqual(success_code, 0)
+        self.assertEqual(missing_code, 2)
+        self.assertNotIn(str(report.parent), stdout.getvalue())
+        self.assertNotIn(str(report.parent), stderr.getvalue())
+
     def test_legacy_school_cli_fails_closed_before_default_rank_estimator(self):
         from scripts import generate_report
 
