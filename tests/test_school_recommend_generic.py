@@ -174,6 +174,32 @@ class EvidenceAndCoverageTest(unittest.TestCase):
         self.assertEqual(result.coverage_status, EvidenceStatus.PARTIAL)
         self.assertIn("0分占位已剔除：1 行", result.warnings)
 
+    def test_zero_score_with_masked_rank_accumulates_both_risks(self):
+        row = admission_row(min_score=0, min_rank="6**")
+        result = recommend_schools([row], profile())
+        self.assertEqual(result.items, ())
+        self.assertEqual(result.zero_score_excluded_count, 1)
+        self.assertEqual(result.coverage_status, EvidenceStatus.MASKED)
+        self.assertIn("0分占位已剔除：1 行", result.warnings)
+        self.assertTrue(any("屏蔽值" in warning for warning in result.warnings))
+
+    def test_explicit_masked_zero_score_accumulates_both_risks(self):
+        row = admission_row(min_score=0, masked=True)
+        result = recommend_schools([row], profile())
+        self.assertEqual(result.items, ())
+        self.assertEqual(result.zero_score_excluded_count, 1)
+        self.assertEqual(result.coverage_status, EvidenceStatus.MASKED)
+        self.assertIn("0分占位已剔除：1 行", result.warnings)
+        self.assertTrue(any("屏蔽值" in warning for warning in result.warnings))
+
+    def test_non_strict_zero_like_values_are_masked_not_zero_placeholders(self):
+        for value in (False, 0.0, "0?"):
+            with self.subTest(value=value):
+                result = recommend_schools([admission_row(min_score=value)], profile())
+                self.assertEqual(result.items, ())
+                self.assertEqual(result.zero_score_excluded_count, 0)
+                self.assertEqual(result.coverage_status, EvidenceStatus.MASKED)
+
     def test_mixed_zero_placeholder_keeps_only_valid_items_and_legacy_count(self):
         zero = admission_row(school_name="占位大学", min_score=0)
         valid = admission_row(school_name="有效大学", school_code="D002")

@@ -389,20 +389,25 @@ def _recommend_core(
         else:
             verified_ranges.append((coverage_min, coverage_max))
 
+        min_score = _strict_int(row.get("min_score"))
+        zero_score = min_score is not None and min_score <= 0
+        if zero_score:
+            zero_score_excluded += 1
+            statuses.add(EvidenceStatus.PARTIAL)
+
         if any(bool(row.get(flag)) for flag in (
             "masked", "is_masked", "ocr_uncertain", "value_uncertain",
         )):
             statuses.add(EvidenceStatus.MASKED)
             continue
         min_rank = _strict_int(row.get("min_rank"))
-        min_score = _strict_int(row.get("min_score"))
         year = _strict_int(row.get("year"))
         if min_rank is None or min_score is None:
             statuses.add(EvidenceStatus.MASKED)
             continue
-        if min_score <= 0:
-            zero_score_excluded += 1
-            statuses.add(EvidenceStatus.PARTIAL)
+        if zero_score:
+            if min_rank < 1 or year is None:
+                statuses.add(EvidenceStatus.MISSING)
             continue
         if min_rank < 1 or year is None:
             statuses.add(EvidenceStatus.MISSING)
