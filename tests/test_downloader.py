@@ -51,7 +51,7 @@ class FakeHttpResponse:
 
 class SlowInjectedResponse(FakeHttpResponse):
     def read(self, amount=-1):
-        time.sleep(0.03)
+        time.sleep(0.3)
         return super().read(amount)
 
 
@@ -780,7 +780,7 @@ class DownloaderResponseTest(unittest.TestCase):
             download_public_file(
                 "https://public.example.test/data.csv",
                 self.workspace,
-                timeout=0.01,
+                timeout=0.1,
             )
 
         self.assertEqual(list(self.workspace.iterdir()), [])
