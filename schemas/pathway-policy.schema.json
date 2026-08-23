@@ -11,7 +11,8 @@
       "current_year_validity",
       "critical_constraint_completeness",
       "profile_policy_match",
-      "promise_language_gate"
+      "promise_language_gate",
+      "source_id_claim_gate"
     ]
   },
   "type": "object",

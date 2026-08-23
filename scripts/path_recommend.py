@@ -90,27 +90,52 @@ _EXACT_EVIDENCE_MINIMUMS = {
     EvidenceStatus.REFERENCE: 3,
 }
 _MODEL_METHODS = frozenset({"documented_rank_delta"})
-_PROMISE_TOKENS = frozenset(
+_PROMISE_COMPACT_TOKENS = frozenset(
     {
         "保录",
         "保证录取",
         "包录",
         "确保录取",
         "录取概率",
+        "录取几率",
+        "录取成功率",
         "成功率",
         "百分比承诺",
-        "收益",
-        "回报",
-        "roi",
+        "投资回报",
+        "投资收益",
+        "收益率",
+        "回报率",
+        "预计收益",
+        "预计回报",
+        "承诺回报",
         "returnoninvestment",
+        "investmentreturn",
         "admissionguarantee",
+        "guaranteedadmission",
+        "guaranteeadmission",
+        "admissionisguaranteed",
+        "admissionisguarantee",
         "successrate",
         "probability",
-        "percentage",
-        "percent",
     }
 )
 _PROMISE_ERROR = "output text contains unsupported promise language"
+_SOURCE_ID_PROMISE_ERROR = "source ID contains unsupported claim language"
+_SOURCE_ID_CLAIM_TOKENS = frozenset(
+    {
+        "admissionguarantee",
+        "guaranteedadmission",
+        "successrate",
+        "roi",
+    }
+)
+_PERCENT_TRANSLATION = str.maketrans(
+    {
+        "\u066a": "%",  # Arabic percent sign
+        "\ufe6a": "%",  # small percent sign
+        "\uff05": "%",  # full-width percent sign (also handled by NFKC)
+    }
+)
 
 
 def _json_safe(value: Any) -> Any:
@@ -176,15 +201,44 @@ def _text(value: Any, name: str, *, optional: bool = False) -> str | None:
     return normalized
 
 
-def _validate_output_text(value: str) -> None:
-    normalized = unicodedata.normalize("NFKC", value).casefold()
+def _claim_normal_forms(value: str) -> tuple[str, str, str]:
+    """Return punctuation-insensitive and percent-aware claim text forms."""
+
+    normalized = (
+        unicodedata.normalize("NFKC", value)
+        .casefold()
+        .translate(_PERCENT_TRANSLATION)
+    )
     compact = "".join(character for character in normalized if character.isalnum())
+    claim_stream = "".join(
+        character for character in normalized
+        if character.isalnum() or character == "%"
+    )
+    return normalized, compact, claim_stream
+
+
+def _validate_output_text(value: str) -> None:
+    normalized, compact, claim_stream = _claim_normal_forms(value)
+    chinese_admission_rate = re.search(
+        r"(?:预计)?录取(?:百分之)?[0-9零一二三四五六七八九十百两.]+(?:%|成)",
+        claim_stream,
+    )
+    english_roi = re.search(
+        r"(?<![a-z0-9])r[\W_]*o[\W_]*i(?![a-z0-9])",
+        normalized,
+    )
     if (
-        any(token in compact for token in _PROMISE_TOKENS)
-        or "百分之" in compact
-        or re.search(r"\d+(?:\.\d+)?\s*%", normalized) is not None
+        any(token in compact for token in _PROMISE_COMPACT_TOKENS)
+        or chinese_admission_rate is not None
+        or english_roi is not None
     ):
         raise ValueError(_PROMISE_ERROR)
+
+
+def _validate_source_id_claim(value: str) -> None:
+    _, compact, _ = _claim_normal_forms(value)
+    if any(token in compact for token in _SOURCE_ID_CLAIM_TOKENS):
+        raise ValueError(_SOURCE_ID_PROMISE_ERROR)
 
 
 def _output_text(value: Any, name: str, *, optional: bool = False) -> str | None:
@@ -235,6 +289,19 @@ def _output_string_tuple(
     normalized = _string_tuple(value, name, allow_empty=allow_empty)
     for item in normalized:
         _validate_output_text(item)
+    return normalized
+
+
+def _source_id_tuple(value: Any, name: str) -> tuple[str, ...]:
+    normalized = _string_tuple(
+        value,
+        name,
+        allow_empty=False,
+        safe_ids=True,
+        sort=True,
+    )
+    for item in normalized:
+        _validate_source_id_claim(item)
     return normalized
 
 
@@ -345,13 +412,7 @@ class PathwayPolicy(_Serializable):
         object.__setattr__(
             self,
             "policy_source_ids",
-            _string_tuple(
-                self.policy_source_ids,
-                "policy_source_ids",
-                allow_empty=False,
-                safe_ids=True,
-                sort=True,
-            ),
+            _source_id_tuple(self.policy_source_ids, "policy_source_ids"),
         )
         object.__setattr__(self, "evidence_status", _status(self.evidence_status))
         basis = _output_text(self.calculation_basis, "calculation_basis")
@@ -409,13 +470,7 @@ class RankAdjustmentModel(_Serializable):
         object.__setattr__(
             self,
             "source_ids",
-            _string_tuple(
-                self.source_ids,
-                "source_ids",
-                allow_empty=False,
-                safe_ids=True,
-                sort=True,
-            ),
+            _source_id_tuple(self.source_ids, "source_ids"),
         )
         object.__setattr__(self, "evidence_status", _status(self.evidence_status))
         pathway_types = _string_tuple(
@@ -483,13 +538,7 @@ class PathwayItem(_Serializable):
         object.__setattr__(
             self,
             "policy_source_ids",
-            _string_tuple(
-                self.policy_source_ids,
-                "policy_source_ids",
-                allow_empty=False,
-                safe_ids=True,
-                sort=True,
-            ),
+            _source_id_tuple(self.policy_source_ids, "policy_source_ids"),
         )
         object.__setattr__(self, "evidence_status", _status(self.evidence_status))
         if self.status == "formal":
@@ -516,6 +565,7 @@ class PathwayResult(_Serializable):
     formal_shortlist: tuple[str, ...] = ()
     target_rank: int | None = None
     transformation: str | None = None
+    model_source_ids: tuple[str, ...] = ()
     warnings: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
@@ -550,6 +600,8 @@ class PathwayResult(_Serializable):
                 raise ValueError("transformation requires a target_rank")
             if any(item.target_rank is not None for item in items):
                 raise ValueError("item target ranks require a result target_rank")
+            if self.model_source_ids:
+                raise ValueError("model_source_ids require a target_rank")
         else:
             target_rank = _strict_positive_int(self.target_rank, "target_rank")
             object.__setattr__(self, "target_rank", target_rank)
@@ -562,6 +614,13 @@ class PathwayResult(_Serializable):
                 for item in items
             ):
                 raise ValueError("formal item target ranks must match the result")
+        model_source_ids = (
+            _source_id_tuple(self.model_source_ids, "model_source_ids")
+            if self.model_source_ids else ()
+        )
+        if self.target_rank is not None and not model_source_ids:
+            raise ValueError("target_rank requires model_source_ids")
+        object.__setattr__(self, "model_source_ids", model_source_ids)
         object.__setattr__(
             self, "warnings", _output_string_tuple(self.warnings, "warnings")
         )
@@ -617,8 +676,8 @@ def evaluate_pathways(
             )
             transformation = (
                 f"模型 {model.model_id}：{model.method}；队列年份 "
-                f"{','.join(str(year) for year in model.cohort_years)}；来源 "
-                f"{','.join(model.source_ids)}；{profile.rank} + "
+                f"{','.join(str(year) for year in model.cohort_years)}；"
+                f"{profile.rank} + "
                 f"({model.rank_delta}) = {raw_target}；按一分一段位次域 "
                 f"[{model.score_table_rank_min}, {model.score_table_rank_max}] "
                 f"钳制为 {target_rank}"
@@ -636,6 +695,7 @@ def evaluate_pathways(
         ),
         target_rank=target_rank,
         transformation=transformation,
+        model_source_ids=model.source_ids if target_rank is not None else (),
         warnings=tuple(warnings),
     )
 

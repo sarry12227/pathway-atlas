@@ -558,8 +558,8 @@ class PathwayContractTest(unittest.TestCase):
 
         unsafe_texts = (
             "保 录", "保证-录取", "包/录", "确保·录取", "录取 概率",
-            "成功-率", "百分比承诺", "预计收 益", "承诺回-报", "80 %",
-            "百分之八十", "R.O.I", "Return-On Investment",
+            "成功-率", "百分比承诺", "预计收 益", "承诺回-报",
+            "R.O.I", "Return-On Investment",
             "ADMISSION_GUARANTEE", "success-rate", "proba bility",
         )
         for unsafe in unsafe_texts:
@@ -604,6 +604,94 @@ class PathwayContractTest(unittest.TestCase):
                 target_rank=1, transformation="预计收益 20%", warnings=(),
             )
 
+    def test_context_gate_rejects_exact_admission_and_return_claims(self):
+        """Catches word-order, Chinese-rate, and Unicode-percent bypasses."""
+
+        unsafe_claims = (
+            "guaranteed admission",
+            "admission is guaranteed",
+            "admission guarantee",
+            "录取几率八成",
+            "预计录取80%",
+            "录取80\u066a",
+            "success rate 80%",
+            "investment return 20%",
+            "ROI 20%",
+        )
+        for claim in unsafe_claims:
+            with self.subTest(claim=claim):
+                with self.assertRaisesRegex(
+                    ValueError, "output text contains unsupported promise language"
+                ):
+                    policy(calculation_basis=claim)
+
+    def test_context_gate_accepts_documented_policy_percentages(self):
+        """Catches reverting to a global percent/return substring ban."""
+
+        legitimate_facts = (
+            "高考成绩占85%",
+            "综合评价成绩占15%",
+            "学费补助20%",
+            "tuition subsidy 20%",
+            "service penalty is 20% of subsidy",
+        )
+        base_item = path_recommend.evaluate_pathways(profile(), (policy(),)).items[0]
+        for fact in legitimate_facts:
+            with self.subTest(fact=fact):
+                record = policy(calculation_basis=fact)
+                self.assertEqual(record.calculation_basis, fact)
+                self.assertEqual(replace(base_item, calculation_basis=fact).calculation_basis, fact)
+                result = path_recommend.PathwayResult(warnings=(fact,))
+                self.assertEqual(result.warnings, (fact,))
+                self.assertEqual(model(province=fact).province, fact)
+
+    def test_context_gate_applies_to_every_output_contract(self):
+        """Catches bypassing the shared gate outside policy calculation basis."""
+
+        claim = "admission is guaranteed"
+        item = path_recommend.evaluate_pathways(profile(), (policy(),)).items[0]
+        constructors = (
+            lambda: policy(title=claim),
+            lambda: model(province=claim),
+            lambda: replace(item, title=claim),
+            lambda: path_recommend.PathwayResult(warnings=(claim,)),
+        )
+        for constructor in constructors:
+            with self.subTest(constructor=constructor):
+                with self.assertRaisesRegex(
+                    ValueError, "output text contains unsupported promise language"
+                ):
+                    constructor()
+
+    def test_marketing_source_ids_are_rejected_and_model_sources_stay_structured(self):
+        """Catches marketing slugs and source IDs leaking into prose output."""
+
+        unsafe_source_ids = (
+            "admission-guarantee",
+            "guaranteed-admission",
+            "success-rate",
+            "roi",
+        )
+        for source_id in unsafe_source_ids:
+            with self.subTest(source_id=source_id):
+                with self.assertRaisesRegex(
+                    ValueError, "source ID contains unsupported claim language"
+                ):
+                    policy(policy_source_ids=(source_id,))
+                with self.assertRaisesRegex(
+                    ValueError, "source ID contains unsupported claim language"
+                ):
+                    model(source_ids=(source_id, "safe-source"))
+
+        documented_model = model()
+        result = path_recommend.evaluate_pathways(
+            profile(), (policy(),), documented_model
+        )
+        self.assertEqual(result.model_source_ids, documented_model.source_ids)
+        for source_id in documented_model.source_ids:
+            self.assertNotIn(source_id, result.transformation)
+            self.assertNotIn(source_id, result.items[0].calculation_basis)
+
     def test_result_target_requires_at_least_one_matching_formal_item(self):
         """Catches a global target with empty or all-pending output."""
 
@@ -628,6 +716,7 @@ class PathwayContractTest(unittest.TestCase):
             formal_shortlist=(with_target.policy_id,),
             target_rank=1,
             transformation="documented transformation",
+            model_source_ids=("documented-model-source",),
             warnings=(),
         )
         self.assertEqual(result.target_rank, 1)
@@ -704,7 +793,7 @@ class PathwayPolicySchemaTest(unittest.TestCase):
             {
                 "source_threshold_by_status", "current_year_validity",
                 "critical_constraint_completeness", "profile_policy_match",
-                "promise_language_gate",
+                "promise_language_gate", "source_id_claim_gate",
             },
         )
 
