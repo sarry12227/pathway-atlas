@@ -80,6 +80,7 @@ socket.create_connection = _blocked_network("create_connection")
 socket.getaddrinfo = _blocked_network("getaddrinfo")
 socket.gethostbyname = _blocked_network("gethostbyname")
 socket.gethostbyname_ex = _blocked_network("gethostbyname_ex")
+socket.gethostbyaddr = _blocked_network("gethostbyaddr")
 socket.getnameinfo = _blocked_network("getnameinfo")
 socket.socket.connect = _blocked_network("socket.connect")
 socket.socket.connect_ex = _blocked_network("socket.connect_ex")
@@ -295,6 +296,7 @@ Path(os.environ["SHENGXUE_SENTINEL_ACTIVE"]).write_text("active", encoding="utf-
             "getaddrinfo": "socket.getaddrinfo('localhost', 80)",
             "gethostbyname": "socket.gethostbyname('localhost')",
             "gethostbyname_ex": "socket.gethostbyname_ex('localhost')",
+            "gethostbyaddr": "socket.gethostbyaddr('127.0.0.1')",
             "getnameinfo": "socket.getnameinfo(('127.0.0.1', 80), 0)",
             "socket.connect": "socket.socket().connect(('127.0.0.1', 9))",
             "socket.connect_ex": "socket.socket().connect_ex(('127.0.0.1', 9))",
@@ -313,6 +315,14 @@ Path(os.environ["SHENGXUE_SENTINEL_ACTIVE"]).write_text("active", encoding="utf-
                     expected_network_hook=hook,
                 )
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+        indirect = self._run(
+            "-c",
+            canary,
+            "import socket\nsocket.getfqdn('127.0.0.1')",
+            expected_network_hook="gethostbyaddr",
+        )
+        self.assertEqual(indirect.returncode, 0, indirect.stdout + indirect.stderr)
 
     def test_preflight_and_compliance_public_clis_stay_offline_and_private(self):
         preflight = self._script("preflight.py")
