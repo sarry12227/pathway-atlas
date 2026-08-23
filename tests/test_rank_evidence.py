@@ -7,6 +7,7 @@ import json
 import math
 import os
 import re
+import subprocess
 import sys
 import unittest
 from dataclasses import FrozenInstanceError, replace
@@ -131,6 +132,76 @@ def anchor(
 
 
 class RankAnchorContractTest(unittest.TestCase):
+    def test_schema_dotted_locators_import_and_estimator_performs_no_io(self):
+        code = r'''
+import importlib
+import json
+from pathlib import Path
+from unittest import mock
+
+root = Path.cwd()
+schema = json.loads((root / "schemas" / "rank-anchor.schema.json").read_text(encoding="utf-8"))
+resolved = {}
+for key in ("anchor", "estimate"):
+    module_name, attribute = schema["x-semantic-validator"][key].rsplit(".", 1)
+    resolved[key] = getattr(importlib.import_module(module_name), attribute)
+
+from scripts.contracts import EvidenceStatus
+from scripts.rank_calc import RankScope
+
+def make(anchor_id, year):
+    return resolved["anchor"](
+        anchor_id=anchor_id,
+        year=year,
+        school_name="Synthetic School",
+        scope_type=RankScope.WHOLE_SCHOOL,
+        scope_value="whole school",
+        school_rank=100,
+        province_rank=5000,
+        school_score=None,
+        source_ids=(f"source-{year}",),
+        evidence_status=EvidenceStatus.OFFICIAL,
+        coverage_status=EvidenceStatus.OFFICIAL,
+        coverage_min_school_rank=1,
+        coverage_max_school_rank=1000,
+    )
+
+with mock.patch("builtins.open", side_effect=AssertionError("estimator attempted I/O")):
+    result = resolved["estimate"]((make("a", 2024), make("b", 2025)), None, 120)
+assert result.status == EvidenceStatus.INFERRED
+print("package-locators-ok")
+'''
+        process = subprocess.run(
+            [sys.executable, "-c", code],
+            cwd=SKILL_ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        self.assertEqual(process.returncode, 0, process.stderr)
+        self.assertEqual(process.stdout.strip(), "package-locators-ok")
+
+    def test_flat_scripts_path_import_remains_supported_in_isolated_process(self):
+        code = r'''
+import sys
+from pathlib import Path
+root = Path.cwd()
+sys.path.insert(0, str(root / "scripts"))
+from rank_calc import RankAnchor, estimate_rank_from_anchors
+assert RankAnchor.__module__ == "rank_calc"
+assert estimate_rank_from_anchors.__module__ == "rank_calc"
+print("flat-import-ok")
+'''
+        process = subprocess.run(
+            [sys.executable, "-c", code],
+            cwd=SKILL_ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        self.assertEqual(process.returncode, 0, process.stderr)
+        self.assertEqual(process.stdout.strip(), "flat-import-ok")
+
     def test_anchor_snapshots_mutable_source_ids_and_serializes_json_safely(self):
         source_ids = ["source-b", "source-a"]
         item = anchor("anchor-a", 2025, source_ids=source_ids, school_score=610.5)
@@ -307,6 +378,79 @@ class RankEvidenceTest(unittest.TestCase):
             estimate.rejection_reasons, ("input_outside_verified_coverage",)
         )
         self.assertEqual(estimate.contributing_years, (2024, 2025))
+
+    def test_outside_reason_requires_coverage_to_be_the_actual_threshold_blocker(self):
+        cases = (
+            (
+                "overlapping_same_year_sources",
+                (
+                    anchor("shared-a", 2025, source_ids=("shared",)),
+                    anchor("shared-b", 2025, source_ids=("shared",)),
+                    replace(
+                        anchor("outside-independent", 2025, source_ids=("independent",)),
+                        coverage_max_school_rank=100,
+                    ),
+                ),
+            ),
+            (
+                "mixed_school",
+                (
+                    anchor("inside", 2024),
+                    replace(
+                        anchor("outside-school", 2025, school_name="另一中学"),
+                        coverage_max_school_rank=100,
+                    ),
+                ),
+            ),
+            (
+                "mixed_scope",
+                (
+                    anchor("inside", 2024),
+                    replace(
+                        anchor(
+                            "outside-scope",
+                            2025,
+                            scope_type=RankScope.CLASS,
+                            scope_value="高三一班",
+                        ),
+                        coverage_max_school_rank=100,
+                    ),
+                ),
+            ),
+            (
+                "same_year_value_conflict",
+                (
+                    anchor("inside", 2025, province_rank=5000),
+                    replace(
+                        anchor("outside-conflict", 2025, province_rank=5100),
+                        coverage_max_school_rank=100,
+                    ),
+                ),
+            ),
+        )
+        for name, anchors in cases:
+            with self.subTest(name=name):
+                estimate = estimate_rank_from_anchors(anchors, None, 120)
+                self.assertEqual(estimate.status, EvidenceStatus.MISSING)
+                self.assertEqual(
+                    estimate.reason_code, "insufficient_comparable_anchors"
+                )
+                self.assertIn(
+                    "input_outside_verified_coverage", estimate.rejection_reasons
+                )
+                self.assertIsNone(estimate.lower_rank)
+
+    def test_outside_reason_is_causal_when_restored_second_year_would_qualify(self):
+        anchors = (
+            anchor("inside", 2024),
+            replace(anchor("outside", 2025), coverage_max_school_rank=100),
+        )
+
+        estimate = estimate_rank_from_anchors(anchors, None, 120)
+
+        self.assertEqual(estimate.status, EvidenceStatus.MISSING)
+        self.assertEqual(estimate.reason_code, "input_outside_verified_coverage")
+        self.assertIsNone(estimate.lower_rank)
 
     def test_verified_coverage_boundaries_are_inclusive(self):
         anchors = (

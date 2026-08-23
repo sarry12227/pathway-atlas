@@ -23,9 +23,24 @@ from datetime import date
 from enum import Enum
 from typing import Iterable, Optional
 
-from contracts import EvidenceStatus
-from data_loader import (DEFAULT_DATA_ROOT, load_province_config, load_schools,
-                         load_xibao, load_yifenyiduan)
+if __package__:
+    from .contracts import EvidenceStatus
+    from .data_loader import (
+        DEFAULT_DATA_ROOT,
+        load_province_config,
+        load_schools,
+        load_xibao,
+        load_yifenyiduan,
+    )
+else:  # Direct ``python scripts/*.py`` and flat scripts-path compatibility.
+    from contracts import EvidenceStatus
+    from data_loader import (
+        DEFAULT_DATA_ROOT,
+        load_province_config,
+        load_schools,
+        load_xibao,
+        load_yifenyiduan,
+    )
 
 MIN_ANCHORS_DEFAULT = 2  # 少于 2 个锚点无法插值/外推，视为该年不可用
 
@@ -383,6 +398,35 @@ def _three_independent_anchors(anchors: list[RankAnchor]) -> tuple[RankAnchor, .
     return ()
 
 
+def _qualifies_comparable_anchor_set(anchors: Iterable[RankAnchor]) -> bool:
+    """Return whether anchors pass every non-coverage estimation threshold."""
+
+    items = tuple(anchors)
+    if not items:
+        return False
+    if len(
+        {(item.school_name, item.scope_type, item.scope_value) for item in items}
+    ) != 1:
+        return False
+    by_year: dict[int, list[RankAnchor]] = {}
+    for item in items:
+        by_year.setdefault(item.year, []).append(item)
+    if any(
+        len(
+            {
+                (item.school_rank, item.province_rank, item.school_score)
+                for item in year_items
+            }
+        )
+        != 1
+        for year_items in by_year.values()
+    ):
+        return False
+    if len(by_year) >= 2:
+        return True
+    return bool(_three_independent_anchors(next(iter(by_year.values()))))
+
+
 def _integer_median(values: list[int]) -> int:
     ordered = sorted(values)
     middle = len(ordered) // 2
@@ -440,6 +484,7 @@ def estimate_rank_from_anchors(
         anchor_by_id[item.anchor_id] = item
 
     usable: list[RankAnchor] = []
+    coverage_rejected: list[RankAnchor] = []
     rejection_reasons: list[str] = []
     seen_anchor_ids: set[str] = set()
     for item in sorted(input_anchors, key=lambda value: (value.year, value.anchor_id)):
@@ -459,6 +504,7 @@ def estimate_rank_from_anchors(
             <= item.coverage_max_school_rank
         ):
             rejection_reasons.append("input_outside_verified_coverage")
+            coverage_rejected.append(item)
             continue
         usable.append(item)
 
@@ -466,7 +512,8 @@ def estimate_rank_from_anchors(
     rejected = tuple(sorted(rejection_reasons))
     insufficient_reason = (
         "input_outside_verified_coverage"
-        if "input_outside_verified_coverage" in rejection_reasons
+        if coverage_rejected
+        and _qualifies_comparable_anchor_set((*usable, *coverage_rejected))
         else "insufficient_comparable_anchors"
     )
     if not usable:
