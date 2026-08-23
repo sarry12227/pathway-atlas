@@ -1,0 +1,1 @@
+{"available_capabilities":["browse","search"],"degradations":["skip-image-tables"],"host_capabilities":["browse","search"],"missing_capabilities":["vision"],"optional_modules":[],"python_version":"3.10.0","tier":"standard"}
