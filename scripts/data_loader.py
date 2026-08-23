@@ -5,8 +5,10 @@
 一律明确报错并指明缺哪份数据，绝不静默返回空推荐。
 """
 import csv
+import io
 import json
 import os
+import stat
 import warnings
 from pathlib import Path
 
@@ -44,9 +46,117 @@ FLOAT_FIELDS = {
 # M5 多元路径三表（无科目组维度，样本按物理类整理，见 data/hubei/README.md）
 PATH_TABLES = ("qiangji", "zongping", "gangao")
 
+MAX_CSV_BYTES = 16 * 1024 * 1024
+MAX_CSV_ROWS = 250_000
+_REPARSE_POINT = 0x0400
+
 
 class DataError(Exception):
     """数据缺失/损坏的业务错误，message 必须指明缺哪份数据。"""
+
+
+def _read_csv_records(path: os.PathLike[str] | str) -> tuple[tuple[str, ...], list[dict[str, str]]]:
+    """Read one bounded, strict UTF-8 regular CSV without following links."""
+
+    candidate = Path(path)
+    try:
+        absolute = Path(os.path.abspath(os.fspath(candidate)))
+        before = os.lstat(absolute)
+        attributes = getattr(before, "st_file_attributes", 0)
+        if (
+            absolute.resolve(strict=True) != absolute
+            or not stat.S_ISREG(before.st_mode)
+            or stat.S_ISLNK(before.st_mode)
+            or attributes & _REPARSE_POINT
+        ):
+            raise DataError(f"CSV 必须是真实普通文件，不能是链接或重解析点：{absolute}")
+        if before.st_size > MAX_CSV_BYTES:
+            raise DataError(f"CSV 超过 {MAX_CSV_BYTES} 字节上限：{absolute}")
+
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(absolute, flags)
+        try:
+            opened = os.fstat(descriptor)
+            if (opened.st_dev, opened.st_ino, opened.st_size) != (
+                before.st_dev,
+                before.st_ino,
+                before.st_size,
+            ):
+                raise DataError(f"CSV 在读取期间发生变化：{absolute}")
+            chunks: list[bytes] = []
+            total = 0
+            while True:
+                chunk = os.read(descriptor, 64 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > MAX_CSV_BYTES:
+                    raise DataError(f"CSV 超过 {MAX_CSV_BYTES} 字节上限：{absolute}")
+                chunks.append(chunk)
+        finally:
+            os.close(descriptor)
+
+        after = os.lstat(absolute)
+        if (
+            (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+            != (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+        ):
+            raise DataError(f"CSV 在读取期间发生变化：{absolute}")
+        text = b"".join(chunks).decode("utf-8")
+        reader = csv.reader(io.StringIO(text, newline=""), strict=True)
+        try:
+            header_row = next(reader)
+        except StopIteration:
+            return (), []
+        headers = tuple(header_row)
+        if any(not field or field != field.strip() for field in headers):
+            raise DataError(f"CSV 表头包含空字段或首尾空白：{absolute}")
+        if len(headers) != len(set(headers)):
+            raise DataError(f"CSV 表头包含重复字段：{absolute}")
+
+        rows: list[dict[str, str]] = []
+        for number, values in enumerate(reader, start=2):
+            if number > MAX_CSV_ROWS + 1:
+                raise DataError(f"CSV 超过 {MAX_CSV_ROWS} 行上限：{absolute}")
+            if len(values) != len(headers):
+                raise DataError(f"CSV 第 {number} 行列数与表头不一致：{absolute}")
+            rows.append(dict(zip(headers, values)))
+        return headers, rows
+    except DataError:
+        raise
+    except UnicodeDecodeError as error:
+        raise DataError(f"CSV 不是严格 UTF-8：{absolute}") from error
+    except csv.Error as error:
+        raise DataError(f"CSV 格式损坏：{absolute}") from error
+    except (OSError, RuntimeError, TypeError, ValueError) as error:
+        raise DataError(f"CSV 无法安全读取：{candidate}") from error
+
+
+def _normalize_alias(
+    row: dict[str, str], canonical: str, alias: str
+) -> dict[str, str]:
+    normalized = dict(row)
+    canonical_present = canonical in normalized
+    alias_present = alias in normalized
+    canonical_value = normalized.get(canonical, "").strip()
+    alias_value = normalized.get(alias, "").strip()
+    if canonical_present and alias_present and canonical_value != alias_value:
+        raise DataError(f"字段 {canonical} 与迁移别名 {alias} 冲突")
+    normalized[canonical] = canonical_value if canonical_present else alias_value
+    normalized.pop(alias, None)
+    return normalized
+
+
+def _normalize_admission_row(row: dict[str, str]) -> dict[str, str]:
+    normalized = _normalize_alias(row, "remarks", "remark")
+    return _normalize_alias(normalized, "program_group", "major_group_name")
+
+
+def load_admission_rows(path: os.PathLike[str] | str) -> list[dict[str, str]]:
+    """Load admission rows with canonical ``remarks``/``program_group`` fields."""
+
+    _headers, rows = _read_csv_records(path)
+    return [_normalize_admission_row(row) for row in rows]
 
 
 def get_province_dir(province: str, root: os.PathLike[str] | str = DEFAULT_DATA_ROOT) -> Path:
@@ -68,7 +178,7 @@ def get_province_dir(province: str, root: os.PathLike[str] | str = DEFAULT_DATA_
     try:
         return _resolve_legacy_province_dir(root, province.strip())
     except ProvinceRegistryError as error:
-        raise DataError(str(error)) from error
+        raise DataError(f"province.json 元数据解析失败：{error}") from error
 
 
 def _province_dir(province: str, root: os.PathLike[str] | str) -> str:
@@ -110,17 +220,22 @@ def _load_csv(province_dir: Path, table: str, province_label: str,
                         f"请先按省份接入文档准备该数据文件")
     fields = int_fields or INT_FIELDS.get(table, ())
     float_fields = FLOAT_FIELDS.get(table, ())
+    if table == "tou_dang":
+        raw_rows = load_admission_rows(path)
+    else:
+        _headers, raw_rows = _read_csv_records(path)
     rows = []
-    with path.open(newline="", encoding="utf-8") as f:
-        for raw in csv.DictReader(f):
-            row = dict(raw)
-            for field in fields:
-                value = row.get(field)
-                row[field] = int(value) if value not in (None, "") else None
-            for field in float_fields:
-                value = row.get(field)
-                row[field] = float(value) if value not in (None, "") else None
-            rows.append(row)
+    for raw in raw_rows:
+        row = dict(raw)
+        for field in fields:
+            value = row.get(field)
+            row[field] = int(value) if value not in (None, "") else None
+        for field in float_fields:
+            value = row.get(field)
+            row[field] = float(value) if value not in (None, "") else None
+        if table == "tou_dang":
+            row["major_group_name"] = row.get("program_group", "")
+        rows.append(row)
     if not rows and required:
         raise DataError(f"数据文件为空：{path}（{province_label} {table}），"
                         f"不输出空推荐，请先导入数据")
