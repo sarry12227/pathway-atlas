@@ -205,6 +205,19 @@ class ValidateEvidenceCliTest(unittest.TestCase):
         self.assertEqual(result.returncode, 2, result.stderr)
         self.assertIn("schema", {item["code"] for item in summary["errors"]})
 
+    def test_empty_port_b_roots_fail_cli_without_echoing_urls(self):
+        bundle = self.copy_fixture("three-source-consensus")
+        roots = ("https://alpha.test:/original", "https://beta.test:/original")
+        self.configure_two_source_b_fact(bundle, roots)
+
+        result, summary = self.run_cli(bundle)
+
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("schema", {item["code"] for item in summary["errors"]})
+        for root in roots:
+            self.assertNotIn(root, result.stdout)
+            self.assertNotIn(root, result.stderr)
+
     def test_two_independent_http_b_roots_still_pass_cli_replay(self):
         bundle = self.copy_fixture("three-source-consensus")
         self.configure_two_source_b_fact(

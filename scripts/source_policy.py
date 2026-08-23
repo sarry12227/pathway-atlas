@@ -151,6 +151,8 @@ def _public_http_parts(url: str) -> tuple[Any, str, int | None] | None:
         port = parsed.port
     except ValueError:
         return None
+    if _authority_has_empty_port(parsed.netloc):
+        return None
     if (
         parsed.scheme.casefold() not in {"http", "https"}
         or parsed.hostname is None
@@ -181,6 +183,16 @@ def _public_http_parts(url: str) -> tuple[Any, str, int | None] | None:
         ):
             return None
     return parsed, hostname, port
+
+
+def _authority_has_empty_port(netloc: str) -> bool:
+    """Detect a present-but-empty port in an already parsed authority."""
+
+    authority = netloc.rsplit("@", 1)[-1]
+    if authority.startswith("["):
+        closing_bracket = authority.rfind("]")
+        return closing_bracket >= 0 and authority[closing_bracket + 1 :] == ":"
+    return authority.endswith(":")
 
 
 def deduplicate_candidates(

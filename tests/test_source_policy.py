@@ -241,6 +241,31 @@ class SourcePolicyTest(unittest.TestCase):
             with self.subTest(invalid=invalid):
                 self.assertEqual(canonicalize_provenance_url(invalid), "")
 
+    def test_explicit_empty_ports_are_invalid_without_rejecting_real_ports(self):
+        for invalid in (
+            "https://alpha.test:/original",
+            "https://[2001:db8::1]:/original",
+        ):
+            with self.subTest(invalid=invalid):
+                self.assertEqual(canonicalize_provenance_url(invalid), "")
+
+        self.assertEqual(
+            canonicalize_provenance_url("https://alpha.test/original"),
+            "https://alpha.test/original",
+        )
+        self.assertEqual(
+            canonicalize_provenance_url("https://alpha.test:8443/original"),
+            "https://alpha.test:8443/original",
+        )
+        self.assertEqual(
+            canonicalize_provenance_url("https://alpha.test:443/original"),
+            "https://alpha.test/original",
+        )
+        self.assertEqual(
+            canonicalize_provenance_url("https://[2001:db8::1]/original"),
+            "https://[2001:db8::1]/original",
+        )
+
     def test_opaque_b_citation_roots_cannot_be_corroborated(self):
         fact = evaluate_claims(
             "min_score",
@@ -248,6 +273,27 @@ class SourcePolicyTest(unittest.TestCase):
             [
                 self.candidate("b1", tier=SourceTier.B, citation_root="opaque-root-one"),
                 self.candidate("b2", tier=SourceTier.B, citation_root="opaque-root-two"),
+            ],
+        )
+
+        self.assertEqual(fact.status, EvidenceStatus.MISSING)
+        self.assertIsNone(fact.value)
+
+    def test_empty_port_b_citation_roots_cannot_be_corroborated(self):
+        fact = evaluate_claims(
+            "min_score",
+            [self.claim("b1", 588), self.claim("b2", 588)],
+            [
+                self.candidate(
+                    "b1",
+                    tier=SourceTier.B,
+                    citation_root="https://alpha.test:/original",
+                ),
+                self.candidate(
+                    "b2",
+                    tier=SourceTier.B,
+                    citation_root="https://beta.test:/original",
+                ),
             ],
         )
 
