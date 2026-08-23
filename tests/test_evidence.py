@@ -118,6 +118,12 @@ class EvidenceStoreTest(unittest.TestCase):
             "身份证",
             "身份证号",
             "地址",
+            "电话",
+            "联系电话",
+            "手机",
+            "联系手机",
+            "住址",
+            "家庭住址",
         )
         for key in forbidden_keys:
             with self.subTest(key=key):
@@ -126,6 +132,76 @@ class EvidenceStoreTest(unittest.TestCase):
                 with self.assertRaises(EvidencePrivacyError) as raised:
                     store.add_context({"nested": [{key: value}]})
                 self.assertNotIn(value, str(raised.exception))
+
+    def test_fact_field_cannot_be_a_pii_key_or_echo_its_value(self):
+        for field in ("student_name", "电话", "家庭住址"):
+            with self.subTest(field=field):
+                store = EvidenceStore.create(self.root, self.report)
+                store.add_candidate(self.candidate("s1"))
+                value = "不应回显的个人信息"
+                fact = EvidenceFact(
+                    fact_id="fact-001",
+                    field=field,
+                    value=value,
+                    unit=None,
+                    status=EvidenceStatus.REFERENCE,
+                    source_ids=("s1",),
+                    method="test",
+                    notes="",
+                )
+                with self.assertRaises(EvidencePrivacyError) as raised:
+                    store.add_fact(fact)
+                self.assertNotIn(value, str(raised.exception))
+
+    def test_ingestion_snapshots_nested_fact_and_context_data(self):
+        store = EvidenceStore.create(self.root, self.report)
+        store.add_candidate(self.candidate("s1"))
+        fact_value = {"scores": [588]}
+        context = {"query": {"terms": ["example"]}}
+        fact = EvidenceFact(
+            fact_id="fact-001",
+            field="min_score",
+            value=fact_value,
+            unit=None,
+            status=EvidenceStatus.REFERENCE,
+            source_ids=("s1",),
+            method="test",
+            notes="",
+        )
+
+        store.add_fact(fact)
+        store.add_context(context)
+        fact_value["scores"].append(999)
+        fact_value["student_name"] = "不应写入"
+        context["query"]["terms"].append("mutated")
+        context["query"]["student_name"] = "不应写入"
+
+        manifest = store.finalize()
+        facts = (store.session_path / manifest.facts_filename).read_text("utf-8")
+        contexts = (store.session_path / "context.jsonl").read_text("utf-8")
+        self.assertIn('"scores":[588]', facts)
+        self.assertNotIn("999", facts)
+        self.assertNotIn("student_name", facts)
+        self.assertIn('"terms":["example"]', contexts)
+        self.assertNotIn("mutated", contexts)
+        self.assertNotIn("student_name", contexts)
+
+        baseline = EvidenceStore.create(self.root, self.report)
+        baseline.add_candidate(self.candidate("s1"))
+        baseline.add_fact(
+            EvidenceFact(
+                fact_id="fact-001",
+                field="min_score",
+                value={"scores": [588]},
+                unit=None,
+                status=EvidenceStatus.REFERENCE,
+                source_ids=("s1",),
+                method="test",
+                notes="",
+            )
+        )
+        baseline.add_context({"query": {"terms": ["example"]}})
+        self.assertEqual(manifest.manifest_hash, baseline.finalize().manifest_hash)
 
     def test_safe_non_pii_keys_are_accepted(self):
         store = EvidenceStore.create(self.root, self.report)
@@ -180,6 +256,74 @@ class EvidenceStoreTest(unittest.TestCase):
 
         with self.assertRaises(EvidencePathError):
             store.raw_path_for("s1")
+
+    def test_raw_path_rejects_a_directory_swap_before_mkdir(self):
+        store = EvidenceStore.create(self.root, self.report)
+        store.add_candidate(self.candidate("s1"))
+        outside = self.root / "outside"
+        outside.mkdir()
+        raw = store.session_path / "raw"
+
+        def swap_raw(stage):
+            if stage != "before-raw-mkdir":
+                return
+            raw.rmdir()
+            try:
+                raw.symlink_to(outside, target_is_directory=True)
+            except OSError as error:
+                self.skipTest(f"symlinks unavailable: {type(error).__name__}")
+
+        store._operation_hook = swap_raw
+        with self.assertRaises(EvidencePathError):
+            store.raw_path_for("s1")
+        self.assertFalse((outside / "s1").exists())
+
+    def test_finalize_rejects_normalized_directory_swap_before_write(self):
+        store = EvidenceStore.create(self.root, self.report)
+        store.add_candidate(self.candidate("s1"))
+        store.add_fact(self.fact("score-001", ("s1",)))
+        outside = self.root / "outside"
+        outside.mkdir()
+        normalized = store.session_path / "normalized"
+
+        def swap_normalized(stage):
+            if stage != "before-open:normalized/facts.jsonl":
+                return
+            normalized.rmdir()
+            try:
+                normalized.symlink_to(outside, target_is_directory=True)
+            except OSError as error:
+                self.skipTest(f"symlinks unavailable: {type(error).__name__}")
+
+        store._operation_hook = swap_normalized
+        with self.assertRaises(EvidencePathError):
+            store.finalize()
+        self.assertFalse((store.session_path / "manifest.json").exists())
+        self.assertFalse((outside / "facts.jsonl").exists())
+
+    def test_finalize_rejects_normalized_directory_swap_before_replace(self):
+        store = EvidenceStore.create(self.root, self.report)
+        store.add_candidate(self.candidate("s1"))
+        store.add_fact(self.fact("score-001", ("s1",)))
+        outside = self.root / "outside"
+        outside.mkdir()
+        normalized = store.session_path / "normalized"
+        moved_normalized = store.session_path / "normalized-before-swap"
+
+        def swap_normalized(stage):
+            if stage != "before-replace:normalized/facts.jsonl":
+                return
+            normalized.rename(moved_normalized)
+            try:
+                normalized.symlink_to(outside, target_is_directory=True)
+            except OSError as error:
+                self.skipTest(f"symlinks unavailable: {type(error).__name__}")
+
+        store._operation_hook = swap_normalized
+        with self.assertRaises(EvidencePathError):
+            store.finalize()
+        self.assertFalse((store.session_path / "manifest.json").exists())
+        self.assertFalse((outside / "facts.jsonl").exists())
 
     def test_writes_after_finalize_fail_closed(self):
         store = EvidenceStore.create(self.root, self.report)
