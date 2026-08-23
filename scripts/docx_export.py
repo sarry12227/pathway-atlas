@@ -533,15 +533,18 @@ def _document_text(document):
 
 
 def _save(document, output):
-    with tempfile.NamedTemporaryFile(
-        dir=output.parent, suffix=".source.docx", delete=False
-    ) as handle:
-        source_path = Path(handle.name)
-    with tempfile.NamedTemporaryFile(
-        dir=output.parent, suffix=".ready.docx", delete=False
-    ) as handle:
-        ready_path = Path(handle.name)
+    source_path = None
+    ready_path = None
+    primary_error = None
     try:
+        with tempfile.NamedTemporaryFile(
+            dir=output.parent, suffix=".source.docx", delete=False
+        ) as handle:
+            source_path = Path(handle.name)
+        with tempfile.NamedTemporaryFile(
+            dir=output.parent, suffix=".ready.docx", delete=False
+        ) as handle:
+            ready_path = Path(handle.name)
         document.save(source_path)
         # Finish and close the deterministic ZIP under a private same-directory
         # name. The public destination cannot expose partial bytes.
@@ -560,9 +563,21 @@ def _save(document, output):
         # one exclusive operation on Windows and POSIX. Existing destinations
         # raise FileExistsError and are never opened, replaced, or deleted.
         os.link(ready_path, output)
+    except BaseException as error:
+        primary_error = error
+        raise
     finally:
-        source_path.unlink(missing_ok=True)
-        ready_path.unlink(missing_ok=True)
+        cleanup_error = None
+        for temporary_path in (source_path, ready_path):
+            if temporary_path is None:
+                continue
+            try:
+                temporary_path.unlink(missing_ok=True)
+            except OSError as error:
+                if cleanup_error is None:
+                    cleanup_error = error
+        if primary_error is None and cleanup_error is not None:
+            raise cleanup_error
 
 
 def _output_path(model, output):

@@ -395,6 +395,71 @@ class DocxStructureTest(unittest.TestCase):
             self.assertFalse(output.exists())
             self.assertEqual(list(Path(temporary).iterdir()), [])
 
+    def test_first_private_temp_is_removed_when_second_creation_fails(self):
+        """Catches temp ownership beginning only after both files exist."""
+        real_named_temporary_file = docx_export.tempfile.NamedTemporaryFile
+        created_paths = []
+
+        def fail_second_creation(*args, **kwargs):
+            if created_paths:
+                raise OSError("synthetic second temp creation failure")
+            handle = real_named_temporary_file(*args, **kwargs)
+            created_paths.append(Path(handle.name))
+            return handle
+
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "never-published.docx"
+            with mock.patch.object(
+                docx_export.tempfile,
+                "NamedTemporaryFile",
+                side_effect=fail_second_creation,
+            ):
+                with self.assertRaisesRegex(
+                    OSError, "synthetic second temp creation failure"
+                ):
+                    docx_export.export_docx(model(), output)
+
+            self.assertEqual(len(created_paths), 1)
+            self.assertFalse(output.exists())
+            self.assertEqual(list(Path(temporary).glob("*.source.docx")), [])
+            self.assertEqual(list(Path(temporary).glob("*.ready.docx")), [])
+
+    def test_cleanup_continues_without_overriding_the_publish_error(self):
+        """Catches one unlink failure masking the cause and skipping its peer."""
+        real_unlink = docx_export.Path.unlink
+        cleanup_attempts = []
+
+        def fail_source_cleanup(path, *args, **kwargs):
+            cleanup_attempts.append(path)
+            if path.name.endswith(".source.docx"):
+                raise OSError("synthetic source cleanup failure")
+            return real_unlink(path, *args, **kwargs)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "never-published.docx"
+            try:
+                with mock.patch.object(
+                    docx_export.os,
+                    "link",
+                    side_effect=OSError("synthetic publish failure"),
+                ), mock.patch.object(
+                    docx_export.Path,
+                    "unlink",
+                    autospec=True,
+                    side_effect=fail_source_cleanup,
+                ):
+                    with self.assertRaisesRegex(OSError, "synthetic publish failure"):
+                        docx_export.export_docx(model(), output)
+
+                self.assertEqual(len(cleanup_attempts), 2)
+                self.assertTrue(cleanup_attempts[0].name.endswith(".source.docx"))
+                self.assertTrue(cleanup_attempts[1].name.endswith(".ready.docx"))
+                self.assertFalse(cleanup_attempts[1].exists())
+                self.assertFalse(output.exists())
+            finally:
+                for path in cleanup_attempts:
+                    real_unlink(path, missing_ok=True)
+
 
 if __name__ == "__main__":
     unittest.main()
