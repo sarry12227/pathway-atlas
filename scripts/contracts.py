@@ -51,6 +51,10 @@ def _json_safe(value: Any) -> Any:
         return value
     if isinstance(value, tuple):
         return [_json_safe(item) for item in value]
+    if isinstance(value, frozenset):
+        if not all(isinstance(item, str) for item in value):
+            raise TypeError("frozenset contract values must contain only strings")
+        return sorted(value)
     if isinstance(value, list):
         return [_json_safe(item) for item in value]
     if isinstance(value, dict):
@@ -145,6 +149,77 @@ class EvidenceManifest(_Serializable):
     manifest_hash: str = ""
 
 
+@dataclass(frozen=True)
+class RecommendationProfile(_Serializable):
+    """Normalized, privacy-minimal inputs for ordinary-batch matching."""
+
+    rank: int
+    target_province: str
+    subject_group: str = ""
+    secondary_subjects: frozenset[str] = field(default_factory=frozenset)
+    target_major_categories: tuple[str, ...] = ()
+    target_cities: tuple[str, ...] = ()
+    target_schools: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if isinstance(self.secondary_subjects, str):
+            raise TypeError("secondary_subjects must be a collection of strings")
+        object.__setattr__(self, "secondary_subjects",
+                           frozenset(self.secondary_subjects))
+        for name in ("target_major_categories", "target_cities", "target_schools"):
+            value = getattr(self, name)
+            if isinstance(value, str):
+                raise TypeError(f"{name} must be a collection of strings")
+            object.__setattr__(self, name, tuple(value))
+
+
+@dataclass(frozen=True)
+class RecommendationMajorGroup(_Serializable):
+    major_group_name: str
+    major_group_code: str
+    min_score: int
+    min_rank: int
+    majors: str
+
+
+@dataclass(frozen=True)
+class RecommendationItem(_Serializable):
+    """One deterministic school recommendation with field-level provenance."""
+
+    school_name: str
+    school_level: str
+    city: str
+    school_province: str
+    province_match: bool
+    subject_match: bool
+    min_score: int
+    min_rank: int
+    delta: int
+    related_majors: str
+    remarks: str
+    major_groups: tuple[RecommendationMajorGroup, ...]
+    match_reason: str
+    recommend_level: str
+    strategy: str
+    data_year: int
+    source_ids: tuple[str, ...]
+    evidence_status: EvidenceStatus
+
+
+@dataclass(frozen=True)
+class RecommendationResult(_Serializable):
+    """Immutable school-matching result with explicit evidence coverage."""
+
+    items: tuple[RecommendationItem, ...] = ()
+    excluded_by_subject_count: int = 0
+    input_years: tuple[int, ...] = ()
+    usable_years: tuple[int, ...] = ()
+    verified_rank_coverage: tuple[int, int] | None = None
+    coverage_status: EvidenceStatus = EvidenceStatus.MISSING
+    empty_reason: str | None = None
+    warnings: tuple[str, ...] = ()
+
+
 __all__ = [
     "CapabilityReport",
     "CapabilityTier",
@@ -152,6 +227,10 @@ __all__ = [
     "EvidenceManifest",
     "EvidenceStatus",
     "FactClaim",
+    "RecommendationItem",
+    "RecommendationMajorGroup",
+    "RecommendationProfile",
+    "RecommendationResult",
     "SourceCandidate",
     "SourceTier",
 ]
