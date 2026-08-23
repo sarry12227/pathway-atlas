@@ -723,6 +723,13 @@ class PathwayContractTest(unittest.TestCase):
             "admissionrate",
             "chanceofadmission",
             "likelihoodofadmission",
+            "admission-is-guarantee",
+            "admissionisguarantee",
+            "probabilityadmission",
+            "chance-admission",
+            "chanceadmission",
+            "likelihood-admission",
+            "likelihoodadmission",
         )
         base_item = path_recommend.evaluate_pathways(
             profile(), (policy(),), model()

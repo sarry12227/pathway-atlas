@@ -90,7 +90,7 @@ _EXACT_EVIDENCE_MINIMUMS = {
     EvidenceStatus.REFERENCE: 3,
 }
 _MODEL_METHODS = frozenset({"documented_rank_delta"})
-_PROMISE_COMPACT_TOKENS = frozenset(
+_CHINESE_OUTPUT_CLAIMS = frozenset(
     {
         "保录",
         "保证录取",
@@ -108,61 +108,47 @@ _PROMISE_COMPACT_TOKENS = frozenset(
         "预计收益",
         "预计回报",
         "承诺回报",
-        "returnoninvestment",
-        "investmentreturn",
-        "admissionguarantee",
-        "guaranteedadmission",
-        "guaranteeadmission",
-        "admissionisguaranteed",
-        "admissionisguarantee",
-        "successrate",
-        "probability",
     }
 )
 _PROMISE_ERROR = "output text contains unsupported promise language"
 _SOURCE_ID_PROMISE_ERROR = "source ID contains unsupported claim language"
-_SOURCE_ID_CLAIM_SEGMENTS = frozenset(
-    {
-        "admissionguarantee",
-        "guaranteedadmission",
-        "guaranteeadmission",
-        "admissionisguaranteed",
-        "successrate",
-        "returnoninvestment",
-        "investmentreturn",
-        "admissionrate",
-        "rateadmission",
-        "rateofadmission",
-        "admissionprobability",
-        "probabilityofadmission",
-        "admissionchance",
-        "chanceofadmission",
-        "admissionlikelihood",
-        "likelihoodofadmission",
-        "probability",
-        "roi",
-    }
+_ENGLISH_CLAIM_PHRASES = (
+    ("admission", "guarantee"),
+    ("guarantee", "admission"),
+    ("guaranteed", "admission"),
+    ("admission", "guaranteed"),
+    ("admission", "is", "guarantee"),
+    ("admission", "is", "guaranteed"),
+    ("admission", "rate"),
+    ("rate", "admission"),
+    ("rate", "of", "admission"),
+    ("probability",),
+    ("admission", "probability"),
+    ("probability", "admission"),
+    ("probability", "of", "admission"),
+    ("admission", "chance"),
+    ("chance", "admission"),
+    ("chance", "of", "admission"),
+    ("admission", "likelihood"),
+    ("likelihood", "admission"),
+    ("likelihood", "of", "admission"),
+    ("success", "rate"),
+    ("return", "on", "investment"),
+    ("investment", "return"),
+    ("r", "o", "i"),
 )
-_SOURCE_ID_CLAIM_PHRASES = frozenset(
-    {
-        ("admission", "is", "guaranteed"),
-        ("admission", "guarantee"),
-        ("guarantee", "admission"),
-        ("guaranteed", "admission"),
-        ("return", "on", "investment"),
-        ("investment", "return"),
-        ("success", "rate"),
-        ("r", "o", "i"),
-        ("admission", "rate"),
-        ("rate", "admission"),
-        ("rate", "of", "admission"),
-        ("admission", "probability"),
-        ("probability", "of", "admission"),
-        ("admission", "chance"),
-        ("chance", "of", "admission"),
-        ("admission", "likelihood"),
-        ("likelihood", "of", "admission"),
-    }
+_ENGLISH_CLAIM_COMPACT = frozenset(
+    "".join(phrase) for phrase in _ENGLISH_CLAIM_PHRASES
+)
+_ROI_CLAIM_TOKENS = next(
+    phrase for phrase in _ENGLISH_CLAIM_PHRASES if "".join(phrase) == "roi"
+)
+_ENGLISH_OUTPUT_COMPACT_CLAIMS = frozenset(
+    claim for claim in _ENGLISH_CLAIM_COMPACT if claim != "roi"
+)
+_ROI_PATTERN_BODY = r"\s*".join(re.escape(token) for token in _ROI_CLAIM_TOKENS)
+_ROI_OUTPUT_PATTERN = re.compile(
+    rf"(?<![a-z0-9]){_ROI_PATTERN_BODY}(?=[0-9%]|[^a-z0-9]|$)"
 )
 _UNICODE_PERCENT_SIGNS = frozenset({"%", "\u066a", "\ufe6a", "\uff05"})
 _CHINESE_NUMBER = r"[0-9零〇一二三四五六七八九十百千万两]+(?:\.[0-9]+)?"
@@ -191,24 +177,6 @@ _CHINESE_REVERSE_ADMISSION_RATE_TERMS = (
     "可能性录取",
     "把握录取",
 )
-_ENGLISH_ADMISSION_RATE_TERMS = frozenset(
-    {
-        "admissionrate",
-        "rateadmission",
-        "rateofadmission",
-        "admissionprobability",
-        "probabilityadmission",
-        "probabilityofadmission",
-        "admissionchance",
-        "chanceadmission",
-        "chanceofadmission",
-        "admissionlikelihood",
-        "likelihoodadmission",
-        "likelihoodofadmission",
-    }
-)
-
-
 def _json_safe(value: Any) -> Any:
     if isinstance(value, Enum):
         return value.value
@@ -303,21 +271,17 @@ def _contains_admission_rate_claim(compact: str) -> bool:
         return True
     if any(term in compact for term in _CHINESE_REVERSE_ADMISSION_RATE_TERMS):
         return True
-    if any(term in compact for term in _ENGLISH_ADMISSION_RATE_TERMS):
-        return True
     return any(pattern.search(compact) for pattern in _NUMERIC_ADMISSION_PATTERNS)
 
 
 def _validate_output_text(value: str) -> None:
     normalized = _normalize_claim_text(value)
     compact = _compact_claim_text(normalized)
-    english_roi = re.search(
-        r"(?<![a-z0-9])r\s*o\s*i(?=[0-9%]|[^a-z0-9]|$)", normalized
-    )
     if (
-        any(token in compact for token in _PROMISE_COMPACT_TOKENS)
+        any(token in compact for token in _CHINESE_OUTPUT_CLAIMS)
+        or any(token in compact for token in _ENGLISH_OUTPUT_COMPACT_CLAIMS)
         or _contains_admission_rate_claim(compact)
-        or english_roi is not None
+        or _ROI_OUTPUT_PATTERN.search(normalized) is not None
     ):
         raise ValueError(_PROMISE_ERROR)
 
@@ -328,9 +292,9 @@ def _validate_source_id_claim(value: str) -> None:
         for segment in re.split(r"[-._:]+", value)
         if segment
     )
-    if any(segment in _SOURCE_ID_CLAIM_SEGMENTS for segment in segments):
+    if any(segment in _ENGLISH_CLAIM_COMPACT for segment in segments):
         raise ValueError(_SOURCE_ID_PROMISE_ERROR)
-    for phrase in _SOURCE_ID_CLAIM_PHRASES:
+    for phrase in _ENGLISH_CLAIM_PHRASES:
         width = len(phrase)
         if any(
             segments[index:index + width] == phrase
