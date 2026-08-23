@@ -129,6 +129,16 @@ _SOURCE_ID_CLAIM_SEGMENTS = frozenset(
         "admissionisguaranteed",
         "successrate",
         "returnoninvestment",
+        "investmentreturn",
+        "admissionrate",
+        "rateadmission",
+        "rateofadmission",
+        "admissionprobability",
+        "probabilityofadmission",
+        "admissionchance",
+        "chanceofadmission",
+        "admissionlikelihood",
+        "likelihoodofadmission",
         "probability",
         "roi",
     }
@@ -140,15 +150,31 @@ _SOURCE_ID_CLAIM_PHRASES = frozenset(
         ("guarantee", "admission"),
         ("guaranteed", "admission"),
         ("return", "on", "investment"),
+        ("investment", "return"),
         ("success", "rate"),
+        ("r", "o", "i"),
+        ("admission", "rate"),
+        ("rate", "admission"),
+        ("rate", "of", "admission"),
+        ("admission", "probability"),
+        ("probability", "of", "admission"),
+        ("admission", "chance"),
+        ("chance", "of", "admission"),
+        ("admission", "likelihood"),
+        ("likelihood", "of", "admission"),
     }
 )
 _UNICODE_PERCENT_SIGNS = frozenset({"%", "\u066a", "\ufe6a", "\uff05"})
 _CHINESE_NUMBER = r"[0-9零〇一二三四五六七八九十百千万两]+(?:\.[0-9]+)?"
-_RATE_FORM_PATTERNS = (
-    re.compile(rf"百分之{_CHINESE_NUMBER}"),
-    re.compile(r"[0-9]+(?:\.[0-9]+)?%"),
-    re.compile(rf"{_CHINESE_NUMBER}成"),
+_PERCENT_OF_FORM = rf"百分之{_CHINESE_NUMBER}"
+_PERCENT_SYMBOL_FORM = r"[0-9]+(?:\.[0-9]+)?%"
+_CHENG_FORM = rf"{_CHINESE_NUMBER}成"
+_RATE_FORM = rf"(?:{_PERCENT_OF_FORM}|{_PERCENT_SYMBOL_FORM}|{_CHENG_FORM})"
+_NUMERIC_ADMISSION_PATTERNS = (
+    re.compile(rf"(?:预计|预估|预测)?录取(?:is)?{_RATE_FORM}"),
+    re.compile(rf"{_RATE_FORM}录取(?:把握|概率|几率|可能性)?"),
+    re.compile(rf"admission(?:is)?{_RATE_FORM}"),
+    re.compile(rf"{_RATE_FORM}admission(?:rate|probability|chance|likelihood)?"),
 )
 _CHINESE_ADMISSION_RATE_TERMS = (
     "录取率",
@@ -272,14 +298,6 @@ def _compact_claim_text(normalized: str) -> str:
     )
 
 
-def _spans_are_near(left: tuple[int, int], right: tuple[int, int]) -> bool:
-    if left[1] <= right[0]:
-        return right[0] - left[1] <= 8
-    if right[1] <= left[0]:
-        return left[0] - right[1] <= 8
-    return True
-
-
 def _contains_admission_rate_claim(compact: str) -> bool:
     if any(term in compact for term in _CHINESE_ADMISSION_RATE_TERMS):
         return True
@@ -287,24 +305,15 @@ def _contains_admission_rate_claim(compact: str) -> bool:
         return True
     if any(term in compact for term in _ENGLISH_ADMISSION_RATE_TERMS):
         return True
-
-    admissions = tuple(re.finditer("录取", compact))
-    rate_forms = tuple(
-        match
-        for pattern in _RATE_FORM_PATTERNS
-        for match in pattern.finditer(compact)
-    )
-    return any(
-        _spans_are_near(admission.span(), rate_form.span())
-        for admission in admissions
-        for rate_form in rate_forms
-    )
+    return any(pattern.search(compact) for pattern in _NUMERIC_ADMISSION_PATTERNS)
 
 
 def _validate_output_text(value: str) -> None:
     normalized = _normalize_claim_text(value)
     compact = _compact_claim_text(normalized)
-    english_roi = re.search(r"(?:^|\s)r\s*o\s*i(?:$|\s)", normalized)
+    english_roi = re.search(
+        r"(?<![a-z0-9])r\s*o\s*i(?=[0-9%]|[^a-z0-9]|$)", normalized
+    )
     if (
         any(token in compact for token in _PROMISE_COMPACT_TOKENS)
         or _contains_admission_rate_claim(compact)
@@ -314,7 +323,11 @@ def _validate_output_text(value: str) -> None:
 
 
 def _validate_source_id_claim(value: str) -> None:
-    segments = tuple(segment.casefold() for segment in re.split(r"[-._:]", value))
+    segments = tuple(
+        segment.casefold()
+        for segment in re.split(r"[-._:]+", value)
+        if segment
+    )
     if any(segment in _SOURCE_ID_CLAIM_SEGMENTS for segment in segments):
         raise ValueError(_SOURCE_ID_PROMISE_ERROR)
     for phrase in _SOURCE_ID_CLAIM_PHRASES:

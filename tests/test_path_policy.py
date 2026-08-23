@@ -636,6 +636,11 @@ class PathwayContractTest(unittest.TestCase):
             "chance of admission",
             "admission likelihood",
             "likelihood of admission",
+            "admission 80%",
+            "admission is 80%",
+            "80% admission chance",
+            "ROI20%",
+            "R.O.I.20%",
         )
         for claim in unsafe_claims:
             with self.subTest(claim=claim):
@@ -656,6 +661,8 @@ class PathwayContractTest(unittest.TestCase):
             "收益补助已明确",
             "回报材料已提交",
             "毕业后回报家乡",
+            "录取后学费补助20%",
+            "被录取后可享受学费减免百分之二十",
         )
         base_item = path_recommend.evaluate_pathways(profile(), (policy(),)).items[0]
         for fact in legitimate_facts:
@@ -675,6 +682,7 @@ class PathwayContractTest(unittest.TestCase):
             "admission is guaranteed",
             "历史录取率80%",
             "likelihood of admission",
+            "ROI20%",
         ):
             constructors = (
                 lambda: policy(title=claim),
@@ -704,6 +712,17 @@ class PathwayContractTest(unittest.TestCase):
             "admissionguarantee",
             "successrate",
             "returnoninvestment",
+            "admission--guarantee",
+            "return--on--investment",
+            "r-o-i",
+            "investment-return",
+            "investmentreturn",
+            "admission-rate",
+            "chance-of-admission",
+            "likelihood-of-admission",
+            "admissionrate",
+            "chanceofadmission",
+            "likelihoodofadmission",
         )
         base_item = path_recommend.evaluate_pathways(
             profile(), (policy(),), model()
