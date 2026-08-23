@@ -33,6 +33,7 @@ _DISCLAIMER = ("根据往年数据估算，该成绩折合今年高考省排约{
                "该成绩仅供参考，一切以实际高考成绩为准。")
 
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+_REASON_CODE = re.compile(r"^[a-z][a-z0-9_-]{0,127}$")
 _ACCEPTED_EXACT_STATUSES = frozenset(
     {
         EvidenceStatus.OFFICIAL,
@@ -56,6 +57,14 @@ def _positive_int(value, name: str) -> int:
         raise TypeError(f"{name} must be a positive integer")
     if value < 1:
         raise ValueError(f"{name} must be a positive integer")
+    return value
+
+
+def _nonnegative_int(value, name: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise TypeError(f"{name} must be a non-negative integer")
+    if value < 0:
+        raise ValueError(f"{name} must be a non-negative integer")
     return value
 
 
@@ -155,6 +164,8 @@ class RankAnchor:
         maximum = self.coverage_max_school_rank
         if (minimum is None) != (maximum is None):
             raise ValueError("coverage rank bounds must be both present or both absent")
+        if self.coverage_status in _ACCEPTED_EXACT_STATUSES and minimum is None:
+            raise ValueError("accepted exact coverage requires explicit rank bounds")
         if minimum is not None and maximum is not None:
             _positive_int(minimum, "coverage_min_school_rank")
             _positive_int(maximum, "coverage_max_school_rank")
@@ -206,6 +217,20 @@ class RankEstimate:
         object.__setattr__(
             self, "status", _enum_value(self.status, EvidenceStatus, "status")
         )
+        if self.status not in {
+            EvidenceStatus.INFERRED,
+            EvidenceStatus.MISSING,
+            EvidenceStatus.CONFLICT,
+        }:
+            raise ValueError("rank estimate status must be inferred, missing, or conflict")
+        _nonempty_string(self.method, "method")
+        _nonempty_string(self.confidence, "confidence")
+        _nonnegative_int(self.input_anchor_count, "input_anchor_count")
+        _nonnegative_int(self.usable_anchor_count, "usable_anchor_count")
+        _nonnegative_int(self.rejected_anchor_count, "rejected_anchor_count")
+        if self.usable_anchor_count + self.rejected_anchor_count != self.input_anchor_count:
+            raise ValueError("anchor counts must reconcile")
+
         for field_name in (
             "rejection_reasons",
             "reasons",
@@ -221,6 +246,74 @@ class RankEstimate:
             except TypeError as exc:
                 raise TypeError(f"{field_name} must be a collection") from exc
             object.__setattr__(self, field_name, snapshot)
+
+        for field_name in ("rejection_reasons", "reasons"):
+            for item in getattr(self, field_name):
+                if not isinstance(item, str):
+                    raise TypeError(f"{field_name} must contain only strings")
+                if not _REASON_CODE.fullmatch(item):
+                    raise ValueError(f"{field_name} must contain stable reason codes")
+        for field_name in ("contributing_anchor_ids", "contributing_source_ids"):
+            identifiers = getattr(self, field_name)
+            if len(identifiers) != len(set(identifiers)):
+                raise ValueError(f"{field_name} must contain unique IDs")
+            for item in identifiers:
+                if not isinstance(item, str):
+                    raise TypeError(f"{field_name} must contain only strings")
+                if not _SAFE_ID.fullmatch(item):
+                    raise ValueError(f"{field_name} must contain only safe IDs")
+        if len(self.contributing_years) != len(set(self.contributing_years)):
+            raise ValueError("contributing_years must be unique")
+        for year in self.contributing_years:
+            _positive_int(year, "contributing_year")
+            if year < 2000 or year > 2100:
+                raise ValueError("contributing years must be between 2000 and 2100")
+
+        if self.status == EvidenceStatus.INFERRED:
+            for name in ("lower_rank", "upper_rank", "median_rank"):
+                _positive_int(getattr(self, name), name)
+            if not self.lower_rank <= self.median_rank <= self.upper_rank:
+                raise ValueError("rank bounds must contain the median")
+            _nonnegative_int(self.tolerance_rank, "tolerance_rank")
+            expected_tolerance = max(
+                self.median_rank - self.lower_rank,
+                self.upper_rank - self.median_rank,
+            )
+            if self.tolerance_rank != expected_tolerance:
+                raise ValueError("tolerance_rank must match the observed bounds")
+            if self.reason_code is not None:
+                raise ValueError("successful estimates cannot have a reason_code")
+            if self.confidence == "none":
+                raise ValueError("successful estimates require confidence")
+            if not (
+                self.contributing_anchor_ids
+                and self.contributing_years
+                and self.contributing_source_ids
+            ):
+                raise ValueError("successful estimates require contributing evidence")
+        else:
+            if any(
+                value is not None
+                for value in (
+                    self.lower_rank,
+                    self.upper_rank,
+                    self.median_rank,
+                    self.tolerance_rank,
+                )
+            ):
+                raise ValueError("missing or conflict estimates cannot contain ranks")
+            if not isinstance(self.reason_code, str):
+                raise TypeError("missing or conflict estimates require a reason_code")
+            if not _REASON_CODE.fullmatch(self.reason_code):
+                raise ValueError("reason_code must use stable code syntax")
+            if self.confidence != "none":
+                raise ValueError("missing or conflict estimates must have no confidence")
+            if (
+                self.contributing_anchor_ids
+                or self.contributing_years
+                or self.contributing_source_ids
+            ):
+                raise ValueError("missing or conflict estimates cannot cite contributors")
 
     def to_dict(self) -> dict:
         return {
@@ -306,9 +399,9 @@ def estimate_rank_from_anchors(
     Every contributing anchor applies the public rank-offset rule
     ``max(1, province_rank + student_rank - school_rank)``.  The integer median
     is the center description and the minimum/maximum implied values are the
-    observed-spread interval.  ``student_score`` is validated and recorded only
-    as a cross-check signal; without a versioned score mapping it never changes
-    the rank result.
+    observed-spread interval. ``student_score`` is validated but explicitly
+    reported as unused; without a versioned score mapping it never changes the
+    rank result.
 
     The function performs no I/O and never enters the legacy bundled-xibao
     fallback used by :func:`estimate_rank`.
@@ -332,6 +425,20 @@ def estimate_rank_from_anchors(
     if any(not isinstance(item, RankAnchor) for item in input_anchors):
         raise TypeError("anchors must contain only RankAnchor records")
 
+    input_count = len(input_anchors)
+    anchor_by_id: dict[str, RankAnchor] = {}
+    for item in input_anchors:
+        previous = anchor_by_id.get(item.anchor_id)
+        if previous is not None and previous != item:
+            return _empty_rank_estimate(
+                EvidenceStatus.CONFLICT,
+                "duplicate_anchor_id_conflict",
+                input_count=input_count,
+                usable_count=0,
+                rejection_reasons=("duplicate_anchor_id_conflict",),
+            )
+        anchor_by_id[item.anchor_id] = item
+
     usable: list[RankAnchor] = []
     rejection_reasons: list[str] = []
     seen_anchor_ids: set[str] = set()
@@ -346,15 +453,26 @@ def estimate_rank_from_anchors(
         if item.coverage_status not in _ACCEPTED_EXACT_STATUSES:
             rejection_reasons.append("incomplete_coverage")
             continue
+        if not (
+            item.coverage_min_school_rank
+            <= student_rank
+            <= item.coverage_max_school_rank
+        ):
+            rejection_reasons.append("input_outside_verified_coverage")
+            continue
         usable.append(item)
 
-    input_count = len(input_anchors)
     usable_count = len(usable)
     rejected = tuple(sorted(rejection_reasons))
+    insufficient_reason = (
+        "input_outside_verified_coverage"
+        if "input_outside_verified_coverage" in rejection_reasons
+        else "insufficient_comparable_anchors"
+    )
     if not usable:
         return _empty_rank_estimate(
             EvidenceStatus.MISSING,
-            "insufficient_comparable_anchors",
+            insufficient_reason,
             input_count=input_count,
             usable_count=usable_count,
             rejection_reasons=rejected,
@@ -376,7 +494,10 @@ def estimate_rank_from_anchors(
     for item in usable:
         by_year.setdefault(item.year, []).append(item)
     for items in by_year.values():
-        exact_values = {(item.school_rank, item.province_rank) for item in items}
+        exact_values = {
+            (item.school_rank, item.province_rank, item.school_score)
+            for item in items
+        }
         if len(exact_values) != 1:
             return _empty_rank_estimate(
                 EvidenceStatus.CONFLICT,
@@ -397,7 +518,7 @@ def estimate_rank_from_anchors(
         if not contributing:
             return _empty_rank_estimate(
                 EvidenceStatus.MISSING,
-                "insufficient_comparable_anchors",
+                insufficient_reason,
                 input_count=input_count,
                 usable_count=usable_count,
                 rejection_reasons=rejected,
@@ -413,7 +534,7 @@ def estimate_rank_from_anchors(
     center = _integer_median(implied_ranks)
     reasons = ["observed_spread_interval"]
     if student_score is not None:
-        reasons.append("student_score_cross_check_only")
+        reasons.append("student_score_not_used_no_versioned_model")
     return RankEstimate(
         status=EvidenceStatus.INFERRED,
         lower_rank=lower,

@@ -2,6 +2,16 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://shengxue-skill.example/schemas/rank-anchor.schema.json",
   "title": "Joy-report rank anchor",
+  "$comment": "This Schema validates the JSON structure. Every payload must also pass RankAnchor semantic validation; estimation additionally validates student-rank coverage.",
+  "x-semantic-validator": {
+    "anchor": "scripts.rank_calc.RankAnchor",
+    "estimate": "scripts.rank_calc.estimate_rank_from_anchors",
+    "checks": [
+      "coverage_order",
+      "anchor_containment",
+      "student_rank_coverage"
+    ]
+  },
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -122,6 +132,22 @@
       },
       "else": {
         "properties": {"coverage_min_school_rank": {"type": "null"}}
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "coverage_status": {
+            "enum": ["official", "corroborated", "reference"]
+          }
+        },
+        "required": ["coverage_status"]
+      },
+      "then": {
+        "properties": {
+          "coverage_min_school_rank": {"type": "integer"},
+          "coverage_max_school_rank": {"type": "integer"}
+        }
       }
     }
   ]

@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import sys
 import unittest
 from dataclasses import FrozenInstanceError, replace
@@ -20,6 +21,82 @@ from rank_calc import (  # noqa: E402
     RankScope,
     estimate_rank_from_anchors,
 )
+
+
+def structural_schema_errors(schema, value, path="$"):
+    """Independent small Draft 2020-12 oracle for this dependency-free suite."""
+
+    errors = []
+    allowed_types = schema.get("type")
+    if allowed_types is not None:
+        if isinstance(allowed_types, str):
+            allowed_types = [allowed_types]
+
+        def matches_type(kind):
+            return {
+                "null": value is None,
+                "object": isinstance(value, dict),
+                "array": isinstance(value, list),
+                "string": isinstance(value, str),
+                "integer": isinstance(value, int) and not isinstance(value, bool),
+                "number": (
+                    isinstance(value, (int, float))
+                    and not isinstance(value, bool)
+                    and math.isfinite(value)
+                ),
+                "boolean": isinstance(value, bool),
+            }.get(kind, False)
+
+        if not any(matches_type(kind) for kind in allowed_types):
+            return [f"{path}:type"]
+    if "enum" in schema and value not in schema["enum"]:
+        errors.append(f"{path}:enum")
+    if isinstance(value, str):
+        if len(value) < schema.get("minLength", 0):
+            errors.append(f"{path}:minLength")
+        if "pattern" in schema and re.search(schema["pattern"], value) is None:
+            errors.append(f"{path}:pattern")
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if "minimum" in schema and value < schema["minimum"]:
+            errors.append(f"{path}:minimum")
+        if "maximum" in schema and value > schema["maximum"]:
+            errors.append(f"{path}:maximum")
+        if "exclusiveMinimum" in schema and value <= schema["exclusiveMinimum"]:
+            errors.append(f"{path}:exclusiveMinimum")
+    if isinstance(value, list):
+        if len(value) < schema.get("minItems", 0):
+            errors.append(f"{path}:minItems")
+        if schema.get("uniqueItems"):
+            rendered = [json.dumps(item, sort_keys=True) for item in value]
+            if len(rendered) != len(set(rendered)):
+                errors.append(f"{path}:uniqueItems")
+        if "items" in schema:
+            for index, item in enumerate(value):
+                errors.extend(
+                    structural_schema_errors(schema["items"], item, f"{path}[{index}]")
+                )
+    if isinstance(value, dict):
+        for required in schema.get("required", []):
+            if required not in value:
+                errors.append(f"{path}.{required}:required")
+        properties = schema.get("properties", {})
+        if schema.get("additionalProperties") is False:
+            for key in value:
+                if key not in properties:
+                    errors.append(f"{path}.{key}:additionalProperties")
+        for key, child_schema in properties.items():
+            if key in value:
+                errors.extend(
+                    structural_schema_errors(child_schema, value[key], f"{path}.{key}")
+                )
+    for child in schema.get("allOf", []):
+        errors.extend(structural_schema_errors(child, value, path))
+    if "if" in schema:
+        condition_matches = not structural_schema_errors(schema["if"], value, path)
+        branch = schema.get("then" if condition_matches else "else")
+        if branch is not None:
+            errors.extend(structural_schema_errors(branch, value, path))
+    return errors
 
 
 def anchor(
@@ -98,8 +175,26 @@ class RankAnchorContractTest(unittest.TestCase):
         data["coverage_min_school_rank"] = None
         with self.assertRaises(ValueError):
             RankAnchor(**data)
+
+    def test_accepted_exact_coverage_cannot_omit_both_bounds(self):
+        data = anchor("unbounded-exact", 2025).to_dict()
+        data["coverage_min_school_rank"] = None
+        data["coverage_max_school_rank"] = None
+
+        with self.assertRaises(ValueError):
+            RankAnchor(**data)
+
+        data["coverage_status"] = EvidenceStatus.PARTIAL.value
+        partial = RankAnchor(**data)
+        self.assertIsNone(partial.coverage_min_school_rank)
+        self.assertIsNone(partial.coverage_max_school_rank)
         data = anchor("outside", 2025).to_dict()
         data["coverage_max_school_rank"] = 50
+        with self.assertRaises(ValueError):
+            RankAnchor(**data)
+        data = anchor("reversed", 2025).to_dict()
+        data["coverage_min_school_rank"] = 200
+        data["coverage_max_school_rank"] = 100
         with self.assertRaises(ValueError):
             RankAnchor(**data)
 
@@ -121,8 +216,117 @@ class RankAnchorContractTest(unittest.TestCase):
             {status.value for status in EvidenceStatus},
         )
 
+    def test_independent_schema_oracle_rejects_structural_negative_cases(self):
+        schema_path = os.path.join(SKILL_ROOT, "schemas", "rank-anchor.schema.json")
+        with open(schema_path, "r", encoding="utf-8") as handle:
+            schema = json.load(handle)
+        valid = anchor("schema-validated", 2025).to_dict()
+        self.assertEqual(structural_schema_errors(schema, valid), [])
+
+        invalid_cases = []
+        missing = dict(valid)
+        missing.pop("year")
+        invalid_cases.append(missing)
+        extra = dict(valid, unexpected=True)
+        invalid_cases.append(extra)
+        invalid_cases.append(dict(valid, school_rank=True))
+        invalid_cases.append(dict(valid, school_rank="100"))
+        invalid_cases.append(dict(valid, school_rank=0))
+        invalid_cases.append(dict(valid, school_score=math.nan))
+        invalid_cases.append(dict(valid, source_ids=["unsafe source"]))
+        invalid_cases.append(
+            dict(
+                valid,
+                coverage_status=EvidenceStatus.OFFICIAL.value,
+                coverage_min_school_rank=None,
+                coverage_max_school_rank=None,
+            )
+        )
+        invalid_cases.append(dict(valid, coverage_min_school_rank=None))
+        for payload in invalid_cases:
+            with self.subTest(payload=payload):
+                self.assertTrue(structural_schema_errors(schema, payload))
+
+        partial_unbounded = dict(
+            valid,
+            coverage_status=EvidenceStatus.PARTIAL.value,
+            coverage_min_school_rank=None,
+            coverage_max_school_rank=None,
+        )
+        self.assertEqual(structural_schema_errors(schema, partial_unbounded), [])
+
+    def test_schema_declares_required_semantic_validation_layer(self):
+        schema_path = os.path.join(SKILL_ROOT, "schemas", "rank-anchor.schema.json")
+        with open(schema_path, "r", encoding="utf-8") as handle:
+            schema = json.load(handle)
+        semantic = schema["x-semantic-validator"]
+
+        self.assertEqual(semantic["anchor"], "scripts.rank_calc.RankAnchor")
+        self.assertEqual(
+            semantic["estimate"], "scripts.rank_calc.estimate_rank_from_anchors"
+        )
+        self.assertEqual(
+            set(semantic["checks"]),
+            {"coverage_order", "anchor_containment", "student_rank_coverage"},
+        )
+
 
 class RankEvidenceTest(unittest.TestCase):
+    def test_all_anchors_outside_verified_coverage_are_missing_without_numbers(self):
+        anchors = (
+            replace(anchor("a", 2024), coverage_max_school_rank=100),
+            replace(anchor("b", 2025), coverage_max_school_rank=100),
+        )
+
+        estimate = estimate_rank_from_anchors(anchors, None, 120)
+
+        self.assertEqual(estimate.status, EvidenceStatus.MISSING)
+        self.assertEqual(estimate.reason_code, "input_outside_verified_coverage")
+        self.assertIsNone(estimate.lower_rank)
+        self.assertIsNone(estimate.upper_rank)
+        self.assertEqual(estimate.usable_anchor_count, 0)
+        self.assertEqual(estimate.rejected_anchor_count, 2)
+        self.assertEqual(
+            estimate.rejection_reasons,
+            ("input_outside_verified_coverage", "input_outside_verified_coverage"),
+        )
+
+    def test_outside_anchor_is_filtered_when_remaining_years_meet_threshold(self):
+        anchors = (
+            replace(anchor("outside", 2023), coverage_max_school_rank=100),
+            anchor("inside-a", 2024),
+            anchor("inside-b", 2025),
+        )
+
+        estimate = estimate_rank_from_anchors(anchors, None, 120)
+
+        self.assertEqual(estimate.status, EvidenceStatus.INFERRED)
+        self.assertEqual(estimate.usable_anchor_count, 2)
+        self.assertEqual(estimate.rejected_anchor_count, 1)
+        self.assertEqual(
+            estimate.rejection_reasons, ("input_outside_verified_coverage",)
+        )
+        self.assertEqual(estimate.contributing_years, (2024, 2025))
+
+    def test_verified_coverage_boundaries_are_inclusive(self):
+        anchors = (
+            replace(
+                anchor("lower", 2024, school_rank=120),
+                coverage_min_school_rank=120,
+                coverage_max_school_rank=120,
+            ),
+            replace(
+                anchor("upper", 2025, school_rank=120),
+                coverage_min_school_rank=120,
+                coverage_max_school_rank=120,
+            ),
+        )
+
+        estimate = estimate_rank_from_anchors(anchors, None, 120)
+
+        self.assertEqual(estimate.status, EvidenceStatus.INFERRED)
+        self.assertEqual(estimate.usable_anchor_count, 2)
+
     def test_estimate_snapshots_direct_constructor_collections(self):
         base = estimate_rank_from_anchors(
             (anchor("a", 2024), anchor("b", 2025)), None, 120
@@ -134,6 +338,70 @@ class RankEvidenceTest(unittest.TestCase):
         self.assertEqual(copied.reasons, ("caller-reason",))
         with self.assertRaises(FrozenInstanceError):
             copied.lower_rank = 1
+
+    def test_estimate_rejects_non_atomic_or_unsafe_collection_elements(self):
+        base = estimate_rank_from_anchors(
+            (anchor("a", 2024), anchor("b", 2025)), None, 120
+        )
+        invalid_replacements = (
+            {"reasons": [["nested"]]},
+            {"rejection_reasons": [object()]},
+            {"contributing_anchor_ids": ["unsafe id"]},
+            {"contributing_anchor_ids": ["a", "a"]},
+            {"contributing_years": [True]},
+            {"contributing_years": [2024, 2024]},
+            {"contributing_source_ids": [["nested"]]},
+            {"contributing_source_ids": ["unsafe source"]},
+        )
+        for changes in invalid_replacements:
+            with self.subTest(changes=changes):
+                with self.assertRaises((TypeError, ValueError)):
+                    replace(base, **changes)
+
+    def test_estimate_rejects_invalid_scalars_counts_and_success_bounds(self):
+        base = estimate_rank_from_anchors(
+            (anchor("a", 2024), anchor("b", 2025)), None, 120
+        )
+        invalid_replacements = (
+            {"status": EvidenceStatus.OFFICIAL},
+            {"method": ""},
+            {"confidence": " "},
+            {"input_anchor_count": True},
+            {"input_anchor_count": -1},
+            {"usable_anchor_count": base.input_anchor_count + 1},
+            {"rejected_anchor_count": 1},
+            {"lower_rank": None},
+            {"lower_rank": 0},
+            {"lower_rank": 1.5},
+            {"upper_rank": base.lower_rank - 1},
+            {"median_rank": base.upper_rank + 1},
+            {"tolerance_rank": -1},
+            {"tolerance_rank": 1.5},
+            {"tolerance_rank": base.tolerance_rank + 1},
+            {"reason_code": "unexpected_success_reason"},
+        )
+        for changes in invalid_replacements:
+            with self.subTest(changes=changes):
+                with self.assertRaises((TypeError, ValueError)):
+                    replace(base, **changes)
+
+    def test_estimate_rejects_failure_status_with_numbers_or_missing_reason(self):
+        missing = estimate_rank_from_anchors((anchor("only", 2025),), None, 120)
+        invalid_replacements = (
+            {"lower_rank": 1},
+            {"upper_rank": 1},
+            {"median_rank": 1},
+            {"tolerance_rank": 0},
+            {"reason_code": None},
+            {"reason_code": "unsafe reason"},
+            {"contributing_anchor_ids": ["unexpected"]},
+            {"contributing_years": [2025]},
+            {"contributing_source_ids": ["unexpected"]},
+        )
+        for changes in invalid_replacements:
+            with self.subTest(changes=changes):
+                with self.assertRaises((TypeError, ValueError)):
+                    replace(missing, **changes)
 
     def test_two_distinct_years_produce_observed_interval(self):
         anchors = (
@@ -151,7 +419,8 @@ class RankEvidenceTest(unittest.TestCase):
         self.assertEqual(estimate.contributing_anchor_ids, ("y2024", "y2025"))
         self.assertEqual(estimate.contributing_years, (2024, 2025))
         self.assertEqual(estimate.usable_anchor_count, 2)
-        self.assertIn("student_score_cross_check_only", estimate.reasons)
+        self.assertIn("student_score_not_used_no_versioned_model", estimate.reasons)
+        self.assertFalse(any("cross_check" in reason for reason in estimate.reasons))
 
     def test_implied_rank_is_clamped_to_one(self):
         anchors = (
@@ -195,6 +464,19 @@ class RankEvidenceTest(unittest.TestCase):
         self.assertIsNone(estimate.upper_rank)
         self.assertEqual(estimate.reason_code, "same_year_exact_disagreement")
 
+    def test_same_year_school_score_missing_or_numeric_disagreement_is_conflict(self):
+        anchors = (
+            anchor("a", 2025, source_ids=("source-a",), school_score=None),
+            anchor("b", 2025, source_ids=("source-b",), school_score=610),
+            anchor("c", 2025, source_ids=("source-c",), school_score=610),
+        )
+
+        estimate = estimate_rank_from_anchors(anchors, None, 120)
+
+        self.assertEqual(estimate.status, EvidenceStatus.CONFLICT)
+        self.assertEqual(estimate.reason_code, "same_year_exact_disagreement")
+        self.assertIsNone(estimate.lower_rank)
+
     def test_mixed_scope_or_school_is_conflict_not_blended(self):
         cases = (
             (
@@ -223,6 +505,42 @@ class RankEvidenceTest(unittest.TestCase):
 
         self.assertEqual(estimate.status, EvidenceStatus.MISSING)
         self.assertEqual(estimate.reason_code, "insufficient_comparable_anchors")
+
+    def test_duplicate_anchor_id_with_any_conflicting_content_is_conflict_first(self):
+        original = anchor("duplicate", 2024)
+        conflicting_variants = (
+            replace(original, school_name="另一中学"),
+            replace(original, scope_type=RankScope.CLASS, scope_value="高三一班"),
+            replace(original, year=2025),
+            replace(original, school_rank=101),
+            replace(original, province_rank=5001),
+            replace(original, school_score=610),
+            replace(original, evidence_status=EvidenceStatus.INFERRED),
+            replace(original, source_ids=("source-b",)),
+            replace(original, coverage_min_school_rank=2),
+            replace(original, coverage_status=EvidenceStatus.PARTIAL),
+        )
+        for conflicting in conflicting_variants:
+            with self.subTest(conflicting=conflicting):
+                estimate = estimate_rank_from_anchors(
+                    (original, conflicting, anchor("other-year", 2025)), None, 120
+                )
+                self.assertEqual(estimate.status, EvidenceStatus.CONFLICT)
+                self.assertEqual(estimate.reason_code, "duplicate_anchor_id_conflict")
+                self.assertIsNone(estimate.lower_rank)
+                self.assertIsNone(estimate.upper_rank)
+
+    def test_identical_duplicate_anchor_is_counted_but_does_not_weight_threshold(self):
+        duplicate = anchor("duplicate", 2024)
+        estimate = estimate_rank_from_anchors(
+            (duplicate, duplicate, anchor("other-year", 2025)), None, 120
+        )
+
+        self.assertEqual(estimate.status, EvidenceStatus.INFERRED)
+        self.assertEqual(estimate.input_anchor_count, 3)
+        self.assertEqual(estimate.usable_anchor_count, 2)
+        self.assertEqual(estimate.rejected_anchor_count, 1)
+        self.assertEqual(estimate.rejection_reasons, ("duplicate_anchor",))
 
     def test_unaccepted_statuses_and_incomplete_coverage_are_rejected_and_counted(self):
         anchors = (
