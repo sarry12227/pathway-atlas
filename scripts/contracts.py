@@ -7,7 +7,7 @@ schemas and by evidence-bundle writers.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field, fields, is_dataclass
 from enum import Enum
 from typing import Any
 from uuid import uuid4
@@ -47,15 +47,27 @@ def _json_safe(value: Any) -> Any:
 
     if isinstance(value, Enum):
         return value.value
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
     if isinstance(value, tuple):
         return [_json_safe(item) for item in value]
     if isinstance(value, list):
         return [_json_safe(item) for item in value]
     if isinstance(value, dict):
-        return {key: _json_safe(item) for key, item in value.items()}
-    if hasattr(value, "to_dict") and callable(value.to_dict):
-        return value.to_dict()
-    return value
+        converted = {}
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise TypeError(
+                    "Value of type "
+                    f"{type(key).__name__} is not a JSON object key"
+                )
+            converted[key] = _json_safe(item)
+        return converted
+    if is_dataclass(value) and hasattr(value, "to_dict"):
+        return _json_safe(value.to_dict())
+    raise TypeError(
+        f"Value of type {type(value).__name__} is not JSON serializable"
+    )
 
 
 class _Serializable:

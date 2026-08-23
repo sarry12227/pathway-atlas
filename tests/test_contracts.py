@@ -160,6 +160,26 @@ class ContractTest(unittest.TestCase):
         self.assertTrue(first.session_id)
         self.assertNotEqual(first.session_id, second.session_id)
 
+    def test_non_json_values_fail_at_serialization_boundary(self):
+        class CustomValue:
+            pass
+
+        for value, type_name in (
+            ({"nested", "set"}, "set"),
+            (b"bytes", "bytes"),
+            (CustomValue(), "CustomValue"),
+        ):
+            with self.subTest(type_name=type_name):
+                claim = FactClaim(
+                    field="unsupported",
+                    value={"nested": value},
+                    unit=None,
+                    source_id="s1",
+                    method="test",
+                )
+                with self.assertRaisesRegex(TypeError, type_name):
+                    claim.to_dict()
+
 
 if __name__ == "__main__":
     unittest.main()
