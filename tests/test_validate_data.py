@@ -1,4 +1,6 @@
 import csv
+import contextlib
+import io
 import json
 import os
 import shutil
@@ -6,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from dataclasses import FrozenInstanceError
 from pathlib import Path
 
@@ -455,6 +458,103 @@ class ValidatorCliTest(unittest.TestCase):
         self.assertEqual(invalid_process.returncode, 2, invalid_process.stdout + invalid_process.stderr)
         self.assert_cli_paths_are_logical(valid_process, private_markers=(marker,))
         self.assert_cli_paths_are_logical(invalid_process, private_markers=(marker,))
+
+    def test_file_level_csv_failures_project_generic_cli_messages(self):
+        marker = "学生张三13800138000"
+        expected_messages = {
+            "duplicate_header": "文件级错误：CSV 表头包含重复字段",
+            "unsafe_data_file": "文件级错误：CSV 无法安全读取",
+            "data_file_changed": "文件级错误：CSV 在读取期间发生变化",
+            "invalid_csv": "文件级错误：CSV 必须是严格 UTF-8 且格式有效",
+        }
+        for code, expected in expected_messages.items():
+            with self.subTest(code=code):
+                issue = ValidationIssue(
+                    code=code,
+                    message=f"文件级错误：泄漏 C:/private/{marker}/tou_dang.csv",
+                    table="tou_dang",
+                    path=f"C:/private/{marker}/tou_dang.csv",
+                )
+                projected = validator_module._cli_issue_dict(issue)
+                self.assertEqual(projected["message"], expected)
+                self.assertEqual(projected["path"], "tou_dang.csv")
+                self.assertNotIn(marker, json.dumps(projected, ensure_ascii=False))
+                # Programmatic diagnostics remain exact and useful.
+                self.assertIn(marker, json.dumps(issue.to_dict(), ensure_ascii=False))
+
+    def test_real_malformed_csvs_under_private_directories_do_not_leak(self):
+        marker = "学生张三13800138000"
+        cases = (
+            (
+                "duplicate",
+                "duplicate_header",
+                "文件级错误：CSV 表头包含重复字段",
+            ),
+            (
+                "invalid-utf8",
+                "invalid_csv",
+                "文件级错误：CSV 必须是严格 UTF-8 且格式有效",
+            ),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            results = []
+            for suffix, expected_code, expected_message in cases:
+                directory = root / f"{marker}-{suffix}"
+                shutil.copytree(FIXTURES / "demo-312", directory)
+                csv_path = directory / "tou_dang.csv"
+                if suffix == "duplicate":
+                    write_csv(
+                        csv_path,
+                        ("year", "province", "province"),
+                        ((2026, "演示甲省", "演示甲省"),),
+                    )
+                else:
+                    csv_path.write_bytes(b"\xff\xfe")
+                results.append(
+                    (
+                        self.run_cli(directory.resolve()),
+                        expected_code,
+                        expected_message,
+                    )
+                )
+
+        for process, expected_code, expected_message in results:
+            with self.subTest(code=expected_code):
+                self.assertEqual(process.returncode, 2, process.stdout + process.stderr)
+                payload = json.loads(process.stdout)
+                issue = next(
+                    item for item in payload["issues"]
+                    if item["code"] == expected_code
+                )
+                self.assertEqual(issue["message"], expected_message)
+                self.assert_cli_paths_are_logical(process, private_markers=(marker,))
+
+    def test_mocked_file_race_keeps_cli_json_private(self):
+        marker = "学生张三13800138000"
+        private_path = f"C:/private/{marker}/tou_dang.csv"
+        race = ValidationIssue(
+            code="data_file_changed",
+            message=f"文件级错误：CSV 在读取期间发生变化：{private_path}",
+            table="tou_dang",
+            path=private_path,
+        )
+        output = io.StringIO()
+        with mock.patch.object(validator_module, "validate_dataset", return_value=[race]):
+            with contextlib.redirect_stdout(output):
+                returncode = validator_module.main([private_path])
+
+        self.assertEqual(returncode, 2)
+        payload = json.loads(output.getvalue())
+        self.assertEqual(payload["directory"], ".")
+        self.assertEqual(payload["issues"][0]["path"], "tou_dang.csv")
+        self.assertEqual(
+            payload["issues"][0]["message"],
+            "文件级错误：CSV 在读取期间发生变化",
+        )
+        self.assertNotIn(marker, output.getvalue())
+        self.assertNotIn("C:/", output.getvalue())
+        self.assertNotIn("Traceback", output.getvalue())
 
     def test_dataset_and_unknown_issue_paths_use_the_stable_logical_fallback(self):
         marker = "学生张三13800138000"

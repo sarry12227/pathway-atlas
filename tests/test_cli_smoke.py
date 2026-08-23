@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import socket
 import subprocess
 import sys
 import tempfile
@@ -11,6 +12,15 @@ import unittest
 from xml.etree import ElementTree
 from zipfile import ZipFile
 
+from scripts.contracts import (
+    CapabilityReport,
+    CapabilityTier,
+    EvidenceFact,
+    EvidenceStatus,
+    SourceCandidate,
+    SourceTier,
+)
+from scripts.evidence import EvidenceStore
 from scripts.province_registry import (
     SubjectSelectionError,
     discover_provinces,
@@ -60,16 +70,24 @@ from pathlib import Path
 import socket
 import sys
 
-Path(os.environ["SHENGXUE_SENTINEL_ACTIVE"]).write_text("active", encoding="utf-8")
+def _blocked_network(name):
+    def blocked(*args, **kwargs):
+        Path(os.environ["SHENGXUE_NETWORK_ATTEMPT"]).write_text(name, encoding="utf-8")
+        raise AssertionError("network access attempted during deterministic replay")
+    return blocked
 
-def _network_attempt(*args, **kwargs):
-    Path(os.environ["SHENGXUE_NETWORK_ATTEMPT"]).write_text("attempted", encoding="utf-8")
-    raise AssertionError("network access attempted during deterministic replay")
-
-socket.create_connection = _network_attempt
-socket.getaddrinfo = _network_attempt
-socket.socket.connect = _network_attempt
-socket.socket.connect_ex = _network_attempt
+socket.create_connection = _blocked_network("create_connection")
+socket.getaddrinfo = _blocked_network("getaddrinfo")
+socket.gethostbyname = _blocked_network("gethostbyname")
+socket.gethostbyname_ex = _blocked_network("gethostbyname_ex")
+socket.getnameinfo = _blocked_network("getnameinfo")
+socket.socket.connect = _blocked_network("socket.connect")
+socket.socket.connect_ex = _blocked_network("socket.connect_ex")
+socket.socket.sendto = _blocked_network("socket.sendto")
+socket.socket.send = _blocked_network("socket.send")
+socket.socket.sendall = _blocked_network("socket.sendall")
+if hasattr(socket.socket, "sendmsg"):
+    socket.socket.sendmsg = _blocked_network("socket.sendmsg")
 
 if os.environ.get("SHENGXUE_BLOCK_DOCX") == "1":
     class _BlockDocx(importlib.abc.MetaPathFinder):
@@ -78,12 +96,63 @@ if os.environ.get("SHENGXUE_BLOCK_DOCX") == "1":
                 raise ModuleNotFoundError("document capability blocked by smoke sentinel")
             return None
     sys.meta_path.insert(0, _BlockDocx())
+
+Path(os.environ["SHENGXUE_SENTINEL_ACTIVE"]).write_text("active", encoding="utf-8")
 """.lstrip(),
             encoding="utf-8",
             newline="\n",
         )
         configured = os.environ.get("SHENGXUE_DOCUMENTS_PYTHON")
         cls.documents_python = Path(configured) if configured else Path(sys.executable)
+        capability = CapabilityReport(
+            tier=CapabilityTier.STANDARD,
+            host_capabilities=("browse", "search"),
+            available_capabilities=("browse", "search"),
+            missing_capabilities=("vision",),
+            degradations=("skip-image-tables",),
+            python_version="3.10.0",
+            optional_modules=(),
+        )
+        store = EvidenceStore.create(cls.sandbox.resolve(), capability)
+        for index in range(1, 4):
+            store.add_candidate(
+                SourceCandidate(
+                    source_id=f"cli-s{index}",
+                    url=f"https://publisher-{index}.example.test/article",
+                    publisher=f"Synthetic Publisher {index}",
+                    tier=SourceTier.C,
+                    published_at=None,
+                    retrieved_at="2026-08-23T00:00:00Z",
+                    content_hash=f"sha256:cli-{index}",
+                    citation_root=f"https://publisher-{index}.example.test/original",
+                    summary="Synthetic admission record",
+                )
+            )
+        store.add_fact(
+            EvidenceFact(
+                fact_id="admission-1",
+                field="admission_record:demo-1",
+                value={
+                    "year": 2026,
+                    "province": "演示甲省",
+                    "subject_group": "物理",
+                    "school_code": "SYN312A",
+                    "program_group": "第01组",
+                    "remarks": "",
+                    "min_score": 645,
+                    "min_rank": 1100,
+                    "coverage_min_rank": 1,
+                    "coverage_max_rank": 10000,
+                },
+                unit=None,
+                status=EvidenceStatus.REFERENCE,
+                source_ids=("cli-s1", "cli-s2", "cli-s3"),
+                method="three-source-consensus",
+                notes="",
+            )
+        )
+        store.finalize()
+        cls.replay_evidence = store.session_path
 
     @classmethod
     def tearDownClass(cls):
@@ -94,6 +163,7 @@ if os.environ.get("SHENGXUE_BLOCK_DOCX") == "1":
         *arguments: object,
         python: Path | None = None,
         block_docx: bool = False,
+        expected_network_hook: str | None = None,
     ) -> CliResult:
         executable = Path(sys.executable) if python is None else python
         active = self.sandbox / "sentinel-active"
@@ -119,10 +189,16 @@ if os.environ.get("SHENGXUE_BLOCK_DOCX") == "1":
             check=False,
         )
         self.assertTrue(active.is_file(), "offline startup sentinel was not loaded")
-        self.assertFalse(
-            attempted.exists(),
-            "a socket/DNS boundary was invoked during deterministic replay",
-        )
+        if expected_network_hook is None:
+            self.assertFalse(
+                attempted.exists(),
+                "a socket/DNS boundary was invoked during deterministic replay",
+            )
+        else:
+            self.assertTrue(attempted.is_file(), "network canary was not intercepted")
+            self.assertEqual(
+                attempted.read_text(encoding="utf-8"), expected_network_hook
+            )
         return CliResult(process)
 
     def _script(
@@ -203,6 +279,73 @@ if os.environ.get("SHENGXUE_BLOCK_DOCX") == "1":
         with self.assertRaises(SubjectSelectionError):
             validate_subject_selection(config, "物理", ("物理", "地理"))
 
+    def test_offline_sentinel_blocks_every_network_primitive(self):
+        canary = (
+            "import sys\n"
+            "try:\n"
+            "    exec(sys.argv[1])\n"
+            "except AssertionError:\n"
+            "    raise SystemExit(0)\n"
+            "except BaseException:\n"
+            "    raise SystemExit(4)\n"
+            "raise SystemExit(5)\n"
+        )
+        probes = {
+            "create_connection": "socket.create_connection(('127.0.0.1', 9), timeout=0.01)",
+            "getaddrinfo": "socket.getaddrinfo('localhost', 80)",
+            "gethostbyname": "socket.gethostbyname('localhost')",
+            "gethostbyname_ex": "socket.gethostbyname_ex('localhost')",
+            "getnameinfo": "socket.getnameinfo(('127.0.0.1', 80), 0)",
+            "socket.connect": "socket.socket().connect(('127.0.0.1', 9))",
+            "socket.connect_ex": "socket.socket().connect_ex(('127.0.0.1', 9))",
+            "socket.sendto": "socket.socket().sendto(b'x', ('127.0.0.1', 9))",
+            "socket.send": "socket.socket().send(b'x')",
+            "socket.sendall": "socket.socket().sendall(b'x')",
+        }
+        if hasattr(socket.socket, "sendmsg"):
+            probes["socket.sendmsg"] = "socket.socket().sendmsg([b'x'])"
+        for hook, call in probes.items():
+            with self.subTest(hook=hook):
+                result = self._run(
+                    "-c",
+                    canary,
+                    f"import socket\n{call}",
+                    expected_network_hook=hook,
+                )
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_preflight_and_compliance_public_clis_stay_offline_and_private(self):
+        preflight = self._script("preflight.py")
+        self.assertEqual(preflight.returncode, 0, preflight.stdout + preflight.stderr)
+        capabilities = json.loads(preflight.stdout)
+        self.assertEqual(capabilities["tier"], "offline")
+        self.assertEqual(capabilities["host_capabilities"], [])
+        self.assertEqual(capabilities["available_capabilities"], [])
+        self.assertIn("search", capabilities["missing_capabilities"])
+        self.assertIn("browse", capabilities["missing_capabilities"])
+
+        safe = self.sandbox / "safe.md"
+        safe.write_text("省排名 1100 位", encoding="utf-8", newline="\n")
+        accepted = self._script("compliance_scan.py", safe)
+        self.assertEqual(accepted.returncode, 0, accepted.stdout + accepted.stderr)
+        self.assertEqual(accepted.stdout.strip(), "合规扫描通过")
+
+        price = self.sandbox / "price.md"
+        price.write_text("方案优惠价 3999", encoding="utf-8", newline="\n")
+        rejected = self._script("compliance_scan.py", price)
+        self.assertEqual(rejected.returncode, 2, rejected.stdout + rejected.stderr)
+        self.assertIn("优惠价 3999", rejected.stderr)
+
+        marker = "学生张三13800138000"
+        malformed = self.sandbox / f"{marker}-malformed.md"
+        malformed.write_bytes(b"\xff\xfe")
+        missing = self.sandbox / f"{marker}-missing.md"
+        for path in (malformed, missing):
+            with self.subTest(path=path.name):
+                self._assert_safe_failure(
+                    self._script("compliance_scan.py", path)
+                )
+
     def test_evidence_validation_uses_native_success_and_policy_failure_codes(self):
         """Catches a validator that accepts repost conflicts or stops emitting JSON."""
         accepted = self._script(
@@ -228,7 +371,7 @@ if os.environ.get("SHENGXUE_BLOCK_DOCX") == "1":
             "--profile",
             PROFILE,
             "--evidence",
-            EVIDENCE / "three-source-consensus",
+            self.replay_evidence,
         )
         first = self._script(*command)
         second = self._script(*command)
@@ -242,12 +385,18 @@ if os.environ.get("SHENGXUE_BLOCK_DOCX") == "1":
         for literal in (
             "# 匿名升学规划报告（演示甲省）",
             "查询覆盖：",
-            "数据覆盖：缺失",
+            "数据覆盖：多源参考",
             "证据状态：缺失",
             "检索日期：2026-08-23",
             "清单哈希：sha256:",
             "屏蔽值、冲突、部分覆盖与缺失数据",
             "AI 生成，仅供参考",
+            "虚构甲大学",
+            "645",
+            "1100",
+            "最低位次与用户位次差 Δ=+0",
+            "cli-s1、cli-s2、cli-s3",
+            "| 稳 | 虚构甲大学 | 645 | 1100 | 多源参考 | cli-s1、cli-s2、cli-s3 |",
         ):
             self.assertIn(literal, first.stdout)
         self.assertGreaterEqual(first.stdout.count("AI 生成，仅供参考"), 3)
@@ -323,7 +472,7 @@ if os.environ.get("SHENGXUE_BLOCK_DOCX") == "1":
                 "--profile",
                 PROFILE,
                 "--evidence",
-                EVIDENCE / "three-source-consensus",
+                self.replay_evidence,
                 "--secondary-subject",
                 "化学",
                 "--secondary-subject",
@@ -356,6 +505,14 @@ if os.environ.get("SHENGXUE_BLOCK_DOCX") == "1":
             "2026-08-23",
             "证据状态",
             "AI 生成，仅供参考",
+            "虚构甲大学",
+            "645",
+            "1100",
+            "+0",
+            "cli-s1",
+            "cli-s2",
+            "cli-s3",
+            "参考",
         ):
             self.assertIn(literal, text)
         for forbidden in ("张三", "13800138000", "http://", "https://", str(ROOT)):

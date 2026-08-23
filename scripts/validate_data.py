@@ -100,6 +100,14 @@ def _cli_issue_dict(issue: ValidationIssue) -> dict[str, Any]:
     """Serialize one issue without exposing a caller-controlled local path."""
 
     payload = issue.to_dict()
+    file_messages = {
+        "duplicate_header": "文件级错误：CSV 表头包含重复字段",
+        "unsafe_data_file": "文件级错误：CSV 无法安全读取",
+        "data_file_changed": "文件级错误：CSV 在读取期间发生变化",
+        "invalid_csv": "文件级错误：CSV 必须是严格 UTF-8 且格式有效",
+    }
+    if issue.code in file_messages:
+        payload["message"] = file_messages[issue.code]
     if issue.table in _KNOWN_TABLES:
         payload["path"] = f"{issue.table}.csv"
     elif issue.table == "province":
