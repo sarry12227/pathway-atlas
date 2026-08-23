@@ -162,15 +162,45 @@ class RecommendationProfile(_Serializable):
     target_schools: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        if isinstance(self.secondary_subjects, str):
-            raise TypeError("secondary_subjects must be a collection of strings")
-        object.__setattr__(self, "secondary_subjects",
-                           frozenset(self.secondary_subjects))
-        for name in ("target_major_categories", "target_cities", "target_schools"):
+        if not isinstance(self.rank, int) or isinstance(self.rank, bool):
+            raise TypeError("rank must be a positive integer")
+        if self.rank < 1:
+            raise ValueError("rank must be a positive integer")
+        for name in ("target_province", "subject_group"):
             value = getattr(self, name)
-            if isinstance(value, str):
-                raise TypeError(f"{name} must be a collection of strings")
-            object.__setattr__(self, name, tuple(value))
+            if not isinstance(value, str):
+                raise TypeError(f"{name} must be a non-empty string")
+            normalized = value.strip()
+            if not normalized:
+                raise ValueError(f"{name} must be a non-empty string")
+            object.__setattr__(self, name, normalized)
+
+        subjects = self._normalize_collection(
+            self.secondary_subjects, "secondary_subjects"
+        )
+        object.__setattr__(self, "secondary_subjects", frozenset(subjects))
+        for name in ("target_major_categories", "target_cities", "target_schools"):
+            object.__setattr__(
+                self, name, self._normalize_collection(getattr(self, name), name)
+            )
+
+    @staticmethod
+    def _normalize_collection(value: Any, name: str) -> tuple[str, ...]:
+        if isinstance(value, (str, bytes, bytearray)):
+            raise TypeError(f"{name} must be a collection of strings")
+        try:
+            items = tuple(value)
+        except TypeError as error:
+            raise TypeError(f"{name} must be a collection of strings") from error
+        normalized: list[str] = []
+        for item in items:
+            if not isinstance(item, str):
+                raise TypeError(f"{name} must contain only strings")
+            stripped = item.strip()
+            if not stripped:
+                raise ValueError(f"{name} must not contain empty strings")
+            normalized.append(stripped)
+        return tuple(normalized)
 
 
 @dataclass(frozen=True)
@@ -212,6 +242,7 @@ class RecommendationResult(_Serializable):
 
     items: tuple[RecommendationItem, ...] = ()
     excluded_by_subject_count: int = 0
+    zero_score_excluded_count: int = 0
     input_years: tuple[int, ...] = ()
     usable_years: tuple[int, ...] = ()
     verified_rank_coverage: tuple[int, int] | None = None

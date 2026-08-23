@@ -85,6 +85,22 @@ class ProvinceNormalizationTest(unittest.TestCase):
             with self.subTest(full_name=full_name):
                 self.assertTrue(is_in_province(full_name, short_name))
 
+    def test_invalid_official_suffix_variants_never_canonicalize(self):
+        invalid_pairs = (
+            ("上海省", "上海市"),
+            ("香港省", "香港特别行政区"),
+            ("新疆自治区", "新疆维吾尔自治区"),
+            ("广西自治区", "广西壮族自治区"),
+            ("上海省", "上海省"),
+            ("新疆自治区", "新疆自治区"),
+        )
+        for invalid, other in invalid_pairs:
+            with self.subTest(invalid=invalid, other=other):
+                self.assertFalse(is_in_province(invalid, other))
+
+        self.assertTrue(is_in_province("演示甲省", "演示甲"))
+        self.assertTrue(is_in_province("XX省", "XX"))
+
 
 class SecondarySubjectParserTest(unittest.TestCase):
     def test_parser_accepts_explicit_string_and_sequence_formats(self):
@@ -150,6 +166,34 @@ class SecondarySubjectParserTest(unittest.TestCase):
 
 
 class EvidenceAndCoverageTest(unittest.TestCase):
+    def test_zero_score_placeholder_is_counted_and_never_recommended(self):
+        zero = admission_row(min_score=0)
+        result = recommend_schools([zero], profile())
+        self.assertEqual(result.items, ())
+        self.assertEqual(result.zero_score_excluded_count, 1)
+        self.assertEqual(result.coverage_status, EvidenceStatus.PARTIAL)
+        self.assertIn("0分占位已剔除：1 行", result.warnings)
+
+    def test_mixed_zero_placeholder_keeps_only_valid_items_and_legacy_count(self):
+        zero = admission_row(school_name="占位大学", min_score=0)
+        valid = admission_row(school_name="有效大学", school_code="D002")
+        result = recommend_schools([zero, valid], profile())
+        self.assertEqual(tuple(item.school_name for item in result.items), ("有效大学",))
+        self.assertEqual(result.zero_score_excluded_count, 1)
+        self.assertEqual(result.coverage_status, EvidenceStatus.PARTIAL)
+
+        legacy = recommend_schools(
+            [zero, valid], year=2025, estimated_prov_rank=8000,
+            target_province="上海",
+        )
+        self.assertEqual(legacy["statistics"]["zero_score_excluded_count"], 1)
+        names = {
+            item["school_name"]
+            for values in legacy["recommendations"].values()
+            for item in values
+        }
+        self.assertEqual(names, {"有效大学"})
+
     def test_subject_filter_runs_before_invalid_numeric_fields(self):
         row = admission_row(
             required_secondary_subjects=["思想政治"],
@@ -224,6 +268,28 @@ class EvidenceAndCoverageTest(unittest.TestCase):
             with self.subTest(statuses=statuses):
                 result = recommend_schools(rows, profile())
                 self.assertEqual(result.coverage_status, expected)
+
+    def test_aggregate_status_keeps_every_distinct_risk_warning(self):
+        partial = admission_row(
+            school_name="部分大学",
+            evidence_status="partial",
+        )
+        conflict = admission_row(
+            school_name="冲突大学",
+            school_code="D002",
+            evidence_status="conflict",
+        )
+        result = recommend_schools([partial, conflict], profile())
+        self.assertEqual(result.coverage_status, EvidenceStatus.CONFLICT)
+        self.assertEqual(tuple(item.school_name for item in result.items), ("部分大学",))
+        self.assertEqual(
+            result.warnings[:2],
+            (
+                "证据存在冲突，冲突行未进入精确推荐。",
+                "数据覆盖不完整；结论仅适用于当前已验证覆盖范围内。",
+            ),
+        )
+        self.assertEqual(len(result.warnings), len(set(result.warnings)))
 
     def test_partial_exact_rows_are_used_only_inside_explicit_verified_coverage(self):
         row = admission_row(evidence_status="partial")
@@ -315,6 +381,7 @@ class ResultContractTest(unittest.TestCase):
         value = RecommendationProfile(
             rank=8000,
             target_province="上海",
+            subject_group="物理",
             secondary_subjects=selected,
             target_schools=schools,
         )
@@ -327,13 +394,124 @@ class ResultContractTest(unittest.TestCase):
             RecommendationProfile(
                 rank=8000,
                 target_province="上海",
+                subject_group="物理",
                 secondary_subjects="化学生物",
             )
+
+    def test_profile_validates_scalar_and_collection_boundaries(self):
+        invalid_scalars = (
+            {"rank": True, "target_province": "上海", "subject_group": "物理"},
+            {"rank": 0, "target_province": "上海", "subject_group": "物理"},
+            {"rank": 8000, "target_province": None, "subject_group": "物理"},
+            {"rank": 8000, "target_province": " ", "subject_group": "物理"},
+            {"rank": 8000, "target_province": "上海", "subject_group": None},
+            {"rank": 8000, "target_province": "上海", "subject_group": " "},
+        )
+        for values in invalid_scalars:
+            with self.subTest(values=values):
+                with self.assertRaises((TypeError, ValueError)):
+                    RecommendationProfile(**values)
+
+        for field in (
+            "secondary_subjects",
+            "target_major_categories",
+            "target_cities",
+            "target_schools",
+        ):
+            for invalid in ([1], [["化学"]], [" "], "化学生物"):
+                with self.subTest(field=field, invalid=invalid):
+                    values = {
+                        "rank": 8000,
+                        "target_province": "上海",
+                        "subject_group": "物理",
+                        field: invalid,
+                    }
+                    with self.assertRaises((TypeError, ValueError)):
+                        RecommendationProfile(**values)
+
+    def test_profile_strips_and_snapshots_all_collection_elements(self):
+        subjects = [" 化学 ", "生物"]
+        majors = [" 计算机 "]
+        cities = [" 上海 "]
+        schools = [" 演示大学 "]
+        value = RecommendationProfile(
+            rank=8000,
+            target_province=" 上海 ",
+            subject_group=" 物理 ",
+            secondary_subjects=subjects,
+            target_major_categories=majors,
+            target_cities=cities,
+            target_schools=schools,
+        )
+        subjects.append("地理")
+        majors[0] = "后来专业"
+        cities.clear()
+        schools.append("后来大学")
+        self.assertEqual(value.target_province, "上海")
+        self.assertEqual(value.subject_group, "物理")
+        self.assertEqual(value.secondary_subjects, frozenset({"化学", "生物"}))
+        self.assertEqual(value.target_major_categories, ("计算机",))
+        self.assertEqual(value.target_cities, ("上海",))
+        self.assertEqual(value.target_schools, ("演示大学",))
 
     def test_invalid_profile_rank_is_a_controlled_error(self):
         with self.assertRaises(SchoolRecommendError) as caught:
             recommend_schools([admission_row()], {"rank": True, "target_province": "上海"})
         self.assertEqual(caught.exception.code, "REC_001")
+
+    def test_mapping_and_legacy_adapters_do_not_bypass_collection_validation(self):
+        with self.assertRaises(SchoolRecommendError) as mapping_error:
+            recommend_schools(
+                [admission_row()],
+                {
+                    "rank": 8000,
+                    "target_province": "上海",
+                    "subject_group": "物理",
+                    "target_cities": "上海",
+                },
+            )
+        self.assertEqual(mapping_error.exception.code, "REC_001")
+
+        with self.assertRaises(SchoolRecommendError) as legacy_error:
+            recommend_schools(
+                [admission_row()],
+                year=2025,
+                estimated_prov_rank=8000,
+                target_city="上海",
+            )
+        self.assertEqual(legacy_error.exception.code, "REC_001")
+
+
+class DispatchContractTest(unittest.TestCase):
+    def test_profile_mode_rejects_every_explicit_legacy_keyword_even_default_values(self):
+        legacy_keywords = (
+            {"year": None},
+            {"estimated_prov_rank": None},
+            {"subject_group": "物理"},
+            {"target_province": None},
+            {"target_major_category": None},
+            {"target_city": None},
+            {"target_schools_preference": None},
+            {"secondary_subjects": None},
+            {"params": None},
+        )
+        for legacy_kwargs in legacy_keywords:
+            with self.subTest(keyword=next(iter(legacy_kwargs))):
+                with self.assertRaises(SchoolRecommendError) as caught:
+                    recommend_schools([admission_row()], profile(), **legacy_kwargs)
+                self.assertEqual(caught.exception.code, "REC_003")
+
+    def test_legacy_mode_requires_both_year_and_estimated_rank(self):
+        cases = (
+            {},
+            {"year": 2025},
+            {"estimated_prov_rank": 8000},
+        )
+        for legacy_kwargs in cases:
+            with self.subTest(legacy_kwargs=legacy_kwargs):
+                with self.assertRaises(SchoolRecommendError) as caught:
+                    recommend_schools([admission_row()], **legacy_kwargs)
+                self.assertEqual(caught.exception.code, "REC_001")
 
 
 if __name__ == "__main__":
