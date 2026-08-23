@@ -58,13 +58,22 @@
       ],
       "properties": {
         "source_id": {"type": "string"},
-        "url": {"type": "string", "format": "uri"},
+        "url": {
+          "type": "string",
+          "minLength": 8,
+          "pattern": "^[Hh][Tt][Tt][Pp][Ss]?://(?:\\[[0-9A-Fa-f:.]+\\]|[^@/?#\\s:]+)(?::[0-9]{1,5})?(?:[/?#]|$)",
+          "format": "uri"
+        },
         "publisher": {"type": "string"},
         "tier": {"$ref": "#/$defs/sourceTier"},
         "published_at": {"type": ["string", "null"]},
         "retrieved_at": {"type": "string"},
         "content_hash": {"type": "string"},
-        "citation_root": {"type": "string"},
+        "citation_root": {
+          "type": "string",
+          "minLength": 8,
+          "pattern": "^[Hh][Tt][Tt][Pp][Ss]?://(?:\\[[0-9A-Fa-f:.]+\\]|[^@/?#\\s:]+)(?::[0-9]{1,5})?(?:[/?#]|$)"
+        },
         "summary": {"type": "string"}
       }
     },

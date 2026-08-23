@@ -1,6 +1,7 @@
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -38,10 +39,38 @@ class ValidateEvidenceCliTest(unittest.TestCase):
             self.fail(f"validator stdout was not JSON: {error}: {result.stdout!r}")
         return result, summary
 
-    def copy_fixture(self, name: str) -> Path:
-        destination = self.temp_root / name
+    def copy_fixture(self, name: str, destination_name: str | None = None) -> Path:
+        destination = self.temp_root / (destination_name or name)
         shutil.copytree(FIXTURES / name, destination)
         return destination
+
+    @staticmethod
+    def rewrite_candidates(bundle: Path, transform) -> None:
+        path = bundle / "candidates.jsonl"
+        candidates = [json.loads(line) for line in path.read_text("utf-8").splitlines()]
+        transformed = [transform(index, candidate) for index, candidate in enumerate(candidates)]
+        path.write_text(
+            "".join(
+                json.dumps(item, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
+                for item in transformed
+            ),
+            encoding="utf-8",
+            newline="\n",
+        )
+
+    @staticmethod
+    def rewrite_facts(bundle: Path, transform) -> None:
+        path = bundle / "normalized" / "facts.jsonl"
+        facts = [json.loads(line) for line in path.read_text("utf-8").splitlines()]
+        transformed = [transform(index, fact) for index, fact in enumerate(facts)]
+        path.write_text(
+            "".join(
+                json.dumps(item, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
+                for item in transformed
+            ),
+            encoding="utf-8",
+            newline="\n",
+        )
 
     @staticmethod
     def rewrite_manifest_hash(bundle: Path) -> None:
@@ -110,6 +139,111 @@ class ValidateEvidenceCliTest(unittest.TestCase):
         self.assertEqual(summary["valid"], False)
         self.assertIn("independent_sources", {item["code"] for item in summary["errors"]})
         self.assertEqual(summary["independent_source_count"], 1)
+
+    def test_same_site_candidates_cannot_manufacture_cli_consensus(self):
+        bundle = self.copy_fixture("three-source-consensus")
+
+        def use_same_site(index, candidate):
+            candidate["url"] = (
+                "https://Example.TEST:443/first"
+                if index == 0
+                else "https://example.test./second"
+                if index == 1
+                else "https://www.example.test/third"
+            )
+            return candidate
+
+        self.rewrite_candidates(bundle, use_same_site)
+        self.rewrite_manifest_hash(bundle)
+
+        result, summary = self.run_cli(bundle)
+
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("independent_sources", {item["code"] for item in summary["errors"]})
+        self.assertEqual(summary["independent_source_count"], 1)
+
+    def test_blank_identity_candidate_is_excluded_from_cli_independence(self):
+        bundle = self.copy_fixture("three-source-consensus")
+
+        def blank_first_publisher(index, candidate):
+            if index == 0:
+                candidate["publisher"] = ""
+            return candidate
+
+        self.rewrite_candidates(bundle, blank_first_publisher)
+        self.rewrite_manifest_hash(bundle)
+
+        result, summary = self.run_cli(bundle)
+
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("schema", {item["code"] for item in summary["errors"]})
+        self.assertEqual(summary["independent_source_count"], 2)
+
+    def configure_two_source_b_fact(self, bundle: Path, roots: tuple[str, str]) -> None:
+        def make_b_sources(index, candidate):
+            if index < 2:
+                candidate["tier"] = "B"
+                candidate["citation_root"] = roots[index]
+            return candidate
+
+        def make_b_fact(_index, fact):
+            fact["source_ids"] = ["s1", "s2"]
+            fact["status"] = "corroborated"
+            fact["method"] = "two-source-consensus"
+            return fact
+
+        self.rewrite_candidates(bundle, make_b_sources)
+        self.rewrite_facts(bundle, make_b_fact)
+        self.rewrite_manifest_hash(bundle)
+
+    def test_opaque_b_roots_fail_cli_provenance_validation(self):
+        bundle = self.copy_fixture("three-source-consensus")
+        self.configure_two_source_b_fact(bundle, ("opaque-root-one", "opaque-root-two"))
+
+        result, summary = self.run_cli(bundle)
+
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("schema", {item["code"] for item in summary["errors"]})
+
+    def test_two_independent_http_b_roots_still_pass_cli_replay(self):
+        bundle = self.copy_fixture("three-source-consensus")
+        self.configure_two_source_b_fact(
+            bundle,
+            ("https://upstream-one.test/original", "http://upstream-two.test/original"),
+        )
+
+        result, summary = self.run_cli(bundle)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(summary["errors"], [])
+
+    def test_userinfo_citation_root_is_rejected_without_echoing_it(self):
+        bundle = self.copy_fixture("three-source-consensus")
+        secret = "sensitive-password"
+        self.configure_two_source_b_fact(
+            bundle,
+            (f"https://user:{secret}@upstream-one.test/original", "https://upstream-two.test/original"),
+        )
+
+        result, summary = self.run_cli(bundle)
+
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("schema", {item["code"] for item in summary["errors"]})
+        self.assertNotIn(secret, result.stdout)
+        self.assertNotIn(secret, result.stderr)
+
+    def test_schema_requires_nonempty_http_candidate_and_provenance_urls(self):
+        schema = json.loads((ROOT / "schemas" / "evidence-bundle.schema.json").read_text("utf-8"))
+        properties = schema["$defs"]["sourceCandidate"]["properties"]
+
+        for field in ("url", "citation_root"):
+            with self.subTest(field=field):
+                contract = properties[field]
+                self.assertGreaterEqual(contract["minLength"], 1)
+                pattern = re.compile(contract["pattern"])
+                self.assertIsNotNone(pattern.search("https://example.test/path"))
+                self.assertIsNone(pattern.search("opaque-root"))
+                self.assertIsNone(pattern.search("/relative/path"))
 
     def test_rejected_candidate_cannot_support_an_exact_fact(self):
         bundle = self.copy_fixture("three-source-consensus")
@@ -204,6 +338,97 @@ class ValidateEvidenceCliTest(unittest.TestCase):
 
         self.assertEqual(result.returncode, 2)
         self.assertIn("method", {item["code"] for item in summary["errors"]})
+
+    def test_inferred_exact_fact_without_derivation_contract_is_rejected(self):
+        bundle = self.copy_fixture("three-source-consensus")
+
+        def fabricate_inference(_index, fact):
+            fact["status"] = "inferred"
+            fact["source_ids"] = []
+            fact["method"] = "fabricated-method"
+            return fact
+
+        self.rewrite_facts(bundle, fabricate_inference)
+        self.rewrite_manifest_hash(bundle)
+
+        result, summary = self.run_cli(bundle)
+
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("unsupported_derivation", {item["code"] for item in summary["errors"]})
+
+    def test_inferred_fact_with_sources_and_public_method_is_still_not_replayable_in_v1(self):
+        bundle = self.copy_fixture("three-source-consensus")
+
+        def public_but_unversioned_inference(_index, fact):
+            fact["status"] = "inferred"
+            fact["method"] = "published-headcount-method"
+            return fact
+
+        self.rewrite_facts(bundle, public_but_unversioned_inference)
+        self.rewrite_manifest_hash(bundle)
+
+        result, summary = self.run_cli(bundle)
+
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("unsupported_derivation", {item["code"] for item in summary["errors"]})
+
+    def test_non_consensus_statuses_cannot_carry_exact_values(self):
+        for status in ("conflict", "missing", "masked", "partial"):
+            with self.subTest(status=status):
+                bundle = self.copy_fixture("three-source-consensus", f"exact-{status}")
+
+                def set_status(_index, fact):
+                    fact["status"] = status
+                    fact["method"] = "reported-boundary"
+                    return fact
+
+                self.rewrite_facts(bundle, set_status)
+                self.rewrite_manifest_hash(bundle)
+
+                result, summary = self.run_cli(bundle)
+
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn("unsupported_status", {item["code"] for item in summary["errors"]})
+
+    def test_masked_and_partial_facts_require_sources_and_a_method(self):
+        for status in ("masked", "partial"):
+            with self.subTest(status=status):
+                bundle = self.copy_fixture("three-source-consensus", f"unsupported-{status}")
+
+                def remove_support(_index, fact):
+                    fact["status"] = status
+                    fact["value"] = None
+                    fact["source_ids"] = []
+                    fact["method"] = ""
+                    return fact
+
+                self.rewrite_facts(bundle, remove_support)
+                self.rewrite_manifest_hash(bundle)
+
+                result, summary = self.run_cli(bundle)
+
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn("unsupported_status", {item["code"] for item in summary["errors"]})
+
+    def test_masked_and_partial_null_facts_with_known_support_are_allowed(self):
+        for status in ("masked", "partial"):
+            with self.subTest(status=status):
+                bundle = self.copy_fixture("three-source-consensus", f"supported-{status}")
+
+                def retain_supported_boundary(_index, fact):
+                    fact["status"] = status
+                    fact["value"] = None
+                    fact["source_ids"] = ["s1"]
+                    fact["method"] = "reported-boundary"
+                    return fact
+
+                self.rewrite_facts(bundle, retain_supported_boundary)
+                self.rewrite_manifest_hash(bundle)
+
+                result, summary = self.run_cli(bundle)
+
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(summary["errors"], [])
 
     def test_manifest_tampering_fails_hash_validation(self):
         bundle = self.copy_fixture("three-source-consensus")

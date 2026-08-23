@@ -2,6 +2,7 @@ import unittest
 
 from scripts.contracts import FactClaim, SourceCandidate, SourceTier, EvidenceStatus
 from scripts.source_policy import (
+    canonicalize_provenance_url,
     canonicalize_url,
     content_fingerprint,
     deduplicate_candidates,
@@ -79,6 +80,64 @@ class SourcePolicyTest(unittest.TestCase):
         )
         self.assertEqual([candidate.source_id for candidate in unique], ["a"])
         self.assertEqual(rejected, {"b": "same-content-hash"})
+
+    def test_same_site_variants_count_once_despite_distinct_other_identities(self):
+        unique, rejected = deduplicate_candidates(
+            [
+                self.candidate(
+                    "a",
+                    publisher="Publisher A",
+                    url="https://Example.TEST:443/first",
+                    citation_root="https://upstream-a.test/original",
+                    content_hash="sha256:a",
+                ),
+                self.candidate(
+                    "b",
+                    publisher="Publisher B",
+                    url="https://example.test./second",
+                    citation_root="https://upstream-b.test/original",
+                    content_hash="sha256:b",
+                ),
+                self.candidate(
+                    "c",
+                    publisher="Publisher C",
+                    url="https://www.example.test/third",
+                    citation_root="https://upstream-c.test/original",
+                    content_hash="sha256:c",
+                ),
+            ]
+        )
+
+        self.assertEqual([candidate.source_id for candidate in unique], ["a"])
+        self.assertEqual(rejected, {"b": "same-site", "c": "same-site"})
+
+    def test_candidates_missing_any_required_identity_fail_closed(self):
+        candidates = [
+            self.candidate("publisher", publisher=" "),
+            self.candidate("site", url="not-an-absolute-url"),
+            self.candidate("provenance", citation_root=" "),
+            self.candidate("fingerprint", content_hash=" "),
+        ]
+
+        unique, rejected = deduplicate_candidates(candidates)
+        fact = evaluate_claims(
+            "min_score",
+            [self.claim(candidate.source_id, 588) for candidate in candidates],
+            candidates,
+        )
+
+        self.assertEqual(unique, [])
+        self.assertEqual(
+            rejected,
+            {
+                "fingerprint": "insufficient-source-identity",
+                "provenance": "insufficient-source-identity",
+                "publisher": "insufficient-source-identity",
+                "site": "insufficient-source-identity",
+            },
+        )
+        self.assertEqual(fact.status, EvidenceStatus.MISSING)
+        self.assertIsNone(fact.value)
 
     def test_deduplication_collapses_transitive_independence_links(self):
         unique, rejected = deduplicate_candidates(
@@ -164,6 +223,37 @@ class SourcePolicyTest(unittest.TestCase):
         self.assertEqual(fact.source_ids, ("b1", "b2"))
         self.assertEqual(fact.method, "two-source-consensus")
 
+    def test_only_absolute_http_provenance_urls_are_canonicalized(self):
+        self.assertEqual(
+            canonicalize_provenance_url(
+                "HTTPS://Official.TEST:443/notices?id=1&utm_source=repost#section"
+            ),
+            "https://official.test/notices?id=1",
+        )
+        for invalid in (
+            "opaque-root-label",
+            "/relative/upstream",
+            "ftp://official.test/file",
+            "https://user:password@official.test/file",
+            "https:///missing-host",
+            "https://bad_host.test/file",
+        ):
+            with self.subTest(invalid=invalid):
+                self.assertEqual(canonicalize_provenance_url(invalid), "")
+
+    def test_opaque_b_citation_roots_cannot_be_corroborated(self):
+        fact = evaluate_claims(
+            "min_score",
+            [self.claim("b1", 588), self.claim("b2", 588)],
+            [
+                self.candidate("b1", tier=SourceTier.B, citation_root="opaque-root-one"),
+                self.candidate("b2", tier=SourceTier.B, citation_root="opaque-root-two"),
+            ],
+        )
+
+        self.assertEqual(fact.status, EvidenceStatus.MISSING)
+        self.assertIsNone(fact.value)
+
     def test_b_sources_without_citation_roots_cannot_be_corroborated(self):
         fact = evaluate_claims(
             "min_score",
@@ -176,7 +266,7 @@ class SourcePolicyTest(unittest.TestCase):
         self.assertEqual(fact.status, EvidenceStatus.MISSING)
         self.assertIsNone(fact.value)
 
-    def test_conflicting_b_claims_are_conflict_even_if_one_lacks_a_citation_root(self):
+    def test_invalid_b_provenance_is_excluded_before_conflict_policy(self):
         fact = evaluate_claims(
             "min_score",
             [self.claim("b1", 588), self.claim("b2", 589)],
@@ -185,7 +275,7 @@ class SourcePolicyTest(unittest.TestCase):
                 self.candidate("b2", tier=SourceTier.B, citation_root=""),
             ],
         )
-        self.assertEqual(fact.status, EvidenceStatus.CONFLICT)
+        self.assertEqual(fact.status, EvidenceStatus.MISSING)
         self.assertIsNone(fact.value)
 
     def test_b_claim_traced_to_registered_a_upstream_is_official(self):

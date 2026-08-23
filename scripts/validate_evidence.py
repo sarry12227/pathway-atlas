@@ -16,7 +16,6 @@ import re
 import stat
 import sys
 from typing import Any, Callable
-from urllib.parse import urlsplit
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -35,7 +34,11 @@ from scripts.evidence import (  # noqa: E402
     _normalize_key,
     _reject_pii_keys,
 )
-from scripts.source_policy import deduplicate_candidates, evaluate_claims  # noqa: E402
+from scripts.source_policy import (  # noqa: E402
+    canonicalize_provenance_url,
+    deduplicate_candidates,
+    evaluate_claims,
+)
 
 
 _EXPECTED_ARTIFACTS = (
@@ -263,12 +266,12 @@ _CAPABILITY_FIELDS = {
 _CANDIDATE_FIELDS = {
     "source_id": lambda value: isinstance(value, str) and bool(_SOURCE_ID.fullmatch(value)),
     "url": _is_string,
-    "publisher": _is_string,
+    "publisher": lambda value: isinstance(value, str) and bool(value.strip()),
     "tier": _one_of({item.value for item in SourceTier}),
     "published_at": _is_nullable_string,
     "retrieved_at": _is_string,
-    "content_hash": _is_string,
-    "citation_root": _is_string,
+    "content_hash": lambda value: isinstance(value, str) and bool(value.strip()),
+    "citation_root": lambda value: isinstance(value, str) and bool(value.strip()),
     "summary": _is_string,
 }
 _FACT_FIELDS = {
@@ -285,11 +288,7 @@ _REJECTION_FIELDS = {"source_id": _is_string, "reason": _is_string}
 
 
 def _valid_public_document_url(value: str) -> bool:
-    try:
-        parsed = urlsplit(value)
-        return parsed.scheme in {"http", "https"} and bool(parsed.hostname)
-    except ValueError:
-        return False
+    return bool(canonicalize_provenance_url(value))
 
 
 def _validate_shapes(
@@ -313,6 +312,14 @@ def _validate_shapes(
         if _check_object(candidate, _CANDIDATE_FIELDS, location, errors):
             if not _valid_public_document_url(candidate["url"]):
                 errors.append(_error("schema", "candidate URL must be absolute HTTP(S)", location))
+            if not canonicalize_provenance_url(candidate["citation_root"]):
+                errors.append(
+                    _error(
+                        "schema",
+                        "citation root must be an absolute HTTP(S) provenance URL",
+                        location,
+                    )
+                )
     if not facts:
         errors.append(_error("schema", "at least one fact is required", "normalized/facts.jsonl"))
     for index, fact in enumerate(facts, 1):
@@ -436,6 +443,21 @@ def _to_candidate(value: dict[str, Any]) -> SourceCandidate:
     )
 
 
+def _independent_candidate_count(candidate_values: list[Any]) -> int:
+    candidates: list[SourceCandidate] = []
+    for value in candidate_values:
+        if not isinstance(value, dict) or set(value) != set(_CANDIDATE_FIELDS):
+            continue
+        if any(not predicate(value[name]) for name, predicate in _CANDIDATE_FIELDS.items()):
+            continue
+        try:
+            candidates.append(_to_candidate(value))
+        except (KeyError, TypeError, ValueError):
+            continue
+    unique, _rejected = deduplicate_candidates(candidates)
+    return len(unique)
+
+
 def _validate_policy(
     candidate_values: list[dict[str, Any]], fact_values: list[dict[str, Any]]
 ) -> tuple[list[dict[str, str]], int]:
@@ -462,13 +484,38 @@ def _validate_policy(
             continue
 
         status = EvidenceStatus(fact["status"])
+        if status == EvidenceStatus.INFERRED:
+            errors.append(
+                _error(
+                    "unsupported_derivation",
+                    "schema version 1 cannot replay derived facts",
+                    location,
+                )
+            )
+            continue
         if status not in {
             EvidenceStatus.OFFICIAL,
             EvidenceStatus.CORROBORATED,
             EvidenceStatus.REFERENCE,
         }:
-            if status in {EvidenceStatus.CONFLICT, EvidenceStatus.MISSING} and fact["value"] is not None:
-                errors.append(_error("schema", "non-exact fact status must not contain an exact value", location))
+            if fact["value"] is not None:
+                errors.append(
+                    _error(
+                        "unsupported_status",
+                        "non-consensus fact status cannot carry an exact value",
+                        location,
+                    )
+                )
+            if status in {EvidenceStatus.MASKED, EvidenceStatus.PARTIAL} and (
+                not fact["source_ids"] or not fact["method"].strip()
+            ):
+                errors.append(
+                    _error(
+                        "unsupported_status",
+                        "boundary facts require known sources and a method",
+                        location,
+                    )
+                )
             continue
         claims = [
             FactClaim(
@@ -536,6 +583,7 @@ def validate_bundle(bundle: Path) -> dict[str, Any]:
 
     summary["candidate_count"] = len(candidates)
     summary["fact_count"] = len(facts)
+    summary["independent_source_count"] = _independent_candidate_count(candidates)
     errors = _validate_shapes(manifest, capability, candidates, contexts, facts, rejections)
     errors.extend(
         _validate_privacy(

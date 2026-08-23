@@ -80,12 +80,107 @@ def canonicalize_url(url: str) -> str:
     return urlunsplit((scheme, netloc, parsed.path, query, ""))
 
 
+def canonicalize_provenance_url(url: str) -> str:
+    """Canonicalize a traceable absolute HTTP(S) provenance URL.
+
+    Opaque labels, relative references, non-web schemes, credentials, and
+    malformed authorities return an empty string so evidence admission fails
+    closed even when callers do not run the bundle validator first.
+    """
+
+    parsed_parts = _public_http_parts(url)
+    if parsed_parts is None:
+        return ""
+    parsed, hostname, port = parsed_parts
+    scheme = parsed.scheme.casefold()
+    rendered_host = f"[{hostname}]" if ":" in hostname else hostname
+    default_port = (scheme == "http" and port == 80) or (
+        scheme == "https" and port == 443
+    )
+    netloc = rendered_host
+    if port is not None and not default_port:
+        netloc += f":{port}"
+    parameters = [
+        (key, item)
+        for key, item in parse_qsl(parsed.query, keep_blank_values=True)
+        if not _is_tracking_parameter(key)
+    ]
+    query = urlencode(sorted(parameters), doseq=True)
+    return urlunsplit((scheme, netloc, parsed.path, query, ""))
+
+
 def content_fingerprint(text: str) -> str:
     """Return a whitespace-insensitive SHA-256 fingerprint for source text."""
 
     normalized = " ".join(unicodedata.normalize("NFKC", text).split())
     digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
     return f"sha256:{digest}"
+
+
+def canonical_site_identity(url: str) -> str:
+    """Return a stable site identity for an absolute public HTTP(S) URL.
+
+    Site identity deliberately ignores the HTTP/HTTPS distinction and their
+    default ports.  A leading ``www.`` label and a DNS root trailing dot are
+    aliases of the same publishing site.
+    """
+
+    parsed_parts = _public_http_parts(url)
+    if parsed_parts is None:
+        return ""
+    parsed, hostname, port = parsed_parts
+    scheme = parsed.scheme.casefold()
+    if ":" not in hostname:
+        if hostname.startswith("www.") and len(hostname) > len("www."):
+            hostname = hostname[len("www.") :]
+    default_port = (scheme == "http" and port == 80) or (
+        scheme == "https" and port == 443
+    )
+    if port is not None and not default_port:
+        return f"{hostname}:{port}"
+    return hostname
+
+
+def _public_http_parts(url: str) -> tuple[Any, str, int | None] | None:
+    if not isinstance(url, str) or not url or url != url.strip():
+        return None
+    if any(character.isspace() for character in url) or "\\" in url:
+        return None
+    try:
+        parsed = urlsplit(url)
+        port = parsed.port
+    except ValueError:
+        return None
+    if (
+        parsed.scheme.casefold() not in {"http", "https"}
+        or parsed.hostname is None
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
+        return None
+    hostname = parsed.hostname.rstrip(".").casefold()
+    if not hostname:
+        return None
+    if ":" not in hostname:
+        try:
+            hostname = hostname.encode("idna").decode("ascii")
+        except UnicodeError:
+            return None
+        labels = hostname.split(".")
+        if len(hostname) > 253 or any(
+            not label
+            or len(label) > 63
+            or label.startswith("-")
+            or label.endswith("-")
+            or any(
+                character != "-"
+                and not (character.isascii() and character.isalnum())
+                for character in label
+            )
+            for label in labels
+        ):
+            return None
+    return parsed, hostname, port
 
 
 def deduplicate_candidates(
@@ -102,7 +197,17 @@ def _deduplicate_with_representatives(
 ) -> tuple[list[SourceCandidate], dict[str, str], dict[str, str]]:
     """Deduplicate candidates and retain a source-ID-to-representative map."""
 
-    ordered = sorted(candidates, key=_candidate_sort_key)
+    all_candidates = sorted(candidates, key=_candidate_sort_key)
+    rejected_reasons = {
+        candidate.source_id: "insufficient-source-identity"
+        for candidate in all_candidates
+        if not _has_complete_identity(candidate)
+    }
+    ordered = [
+        candidate
+        for candidate in all_candidates
+        if candidate.source_id not in rejected_reasons
+    ]
     parents = list(range(len(ordered)))
 
     def find(index: int) -> int:
@@ -118,6 +223,7 @@ def _deduplicate_with_representatives(
 
     indexes: dict[str, dict[str, int]] = {
         "publisher": {},
+        "site": {},
         "citation_root": {},
         "content_hash": {},
     }
@@ -136,7 +242,6 @@ def _deduplicate_with_representatives(
         components[find(index)].append(index)
 
     unique: list[SourceCandidate] = []
-    rejected_reasons: dict[str, str] = {}
     representatives: dict[str, str] = {}
     for component in components.values():
         component.sort()
@@ -153,7 +258,7 @@ def _deduplicate_with_representatives(
     unique.sort(key=_candidate_sort_key)
     rejected = {
         candidate.source_id: rejected_reasons[candidate.source_id]
-        for candidate in ordered
+        for candidate in all_candidates
         if candidate.source_id in rejected_reasons
     }
     return unique, rejected, representatives
@@ -187,7 +292,10 @@ def evaluate_claims(
         root
         for source in unique_sources
         if source.tier == SourceTier.A
-        for root in (canonicalize_url(source.url), _canonical_root(source.citation_root))
+        for root in (
+            canonicalize_provenance_url(source.url),
+            _canonical_root(source.citation_root),
+        )
         if root
     }
     direct_a_source_ids = {
@@ -288,9 +396,14 @@ def _representative_sort_key(candidate: SourceCandidate) -> tuple[int, tuple[str
 def _candidate_identities(candidate: SourceCandidate) -> dict[str, str]:
     return {
         "publisher": _publisher_key(candidate.publisher),
+        "site": canonical_site_identity(candidate.url),
         "citation_root": _canonical_root(candidate.citation_root),
         "content_hash": _content_hash_key(candidate.content_hash),
     }
+
+
+def _has_complete_identity(candidate: SourceCandidate) -> bool:
+    return all(_candidate_identities(candidate).values())
 
 
 def _publisher_key(publisher: str) -> str:
@@ -298,7 +411,7 @@ def _publisher_key(publisher: str) -> str:
 
 
 def _canonical_root(citation_root: str) -> str:
-    return canonicalize_url(citation_root) if citation_root.strip() else ""
+    return canonicalize_provenance_url(citation_root)
 
 
 def _content_hash_key(content_hash: str) -> str:
@@ -310,6 +423,9 @@ def _component_rejection_reason(component: list[SourceCandidate]) -> str:
         identities = [_candidate_identities(source)[identity_kind] for source in component]
         if len([item for item in identities if item]) != len(set(item for item in identities if item)):
             return "same-publisher-or-citation-root"
+    site_identities = [_candidate_identities(source)["site"] for source in component]
+    if len(site_identities) != len(set(site_identities)):
+        return "same-site"
     return "same-content-hash"
 
 
@@ -405,6 +521,8 @@ def _fact(
 
 
 __all__ = [
+    "canonical_site_identity",
+    "canonicalize_provenance_url",
     "canonicalize_url",
     "content_fingerprint",
     "deduplicate_candidates",
