@@ -278,6 +278,22 @@ class EvidenceStoreTest(unittest.TestCase):
             store.raw_path_for("s1")
         self.assertFalse((outside / "s1").exists())
 
+    def test_raw_path_removes_created_directory_when_raw_moves_before_postcheck(self):
+        store = EvidenceStore.create(self.root, self.report)
+        store.add_candidate(self.candidate("s1"))
+        raw = store.session_path / "raw"
+        moved_raw = self.root / "moved-raw"
+
+        def move_raw(stage):
+            if stage == "after-raw-mkdir-before-postcheck":
+                raw.rename(moved_raw)
+
+        store._operation_hook = move_raw
+        with self.assertRaises(EvidencePathError):
+            store.raw_path_for("s1")
+        self.assertTrue(moved_raw.is_dir())
+        self.assertFalse((moved_raw / "s1").exists())
+
     def test_finalize_rejects_normalized_directory_swap_before_write(self):
         store = EvidenceStore.create(self.root, self.report)
         store.add_candidate(self.candidate("s1"))
@@ -324,6 +340,21 @@ class EvidenceStoreTest(unittest.TestCase):
             store.finalize()
         self.assertFalse((store.session_path / "manifest.json").exists())
         self.assertFalse((outside / "facts.jsonl").exists())
+
+    def test_finalize_removes_manifest_when_session_moves_after_replace(self):
+        store = EvidenceStore.create(self.root, self.report)
+        store.add_candidate(self.candidate("s1"))
+        moved_session = self.root / "moved-session"
+
+        def move_session(stage):
+            if stage == "after-replace-before-postcheck:manifest.json":
+                store.session_path.rename(moved_session)
+
+        store._operation_hook = move_session
+        with self.assertRaises(EvidencePathError):
+            store.finalize()
+        self.assertTrue(moved_session.is_dir())
+        self.assertFalse((moved_session / "manifest.json").exists())
 
     def test_writes_after_finalize_fail_closed(self):
         store = EvidenceStore.create(self.root, self.report)

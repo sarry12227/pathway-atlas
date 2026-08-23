@@ -122,6 +122,37 @@ class _DirectoryIdentity:
             raise EvidencePathError("Evidence directory changed during operation")
 
 
+@dataclass(frozen=True)
+class _EntryIdentity:
+    """Identity of a just-created file or directory used for exact cleanup."""
+
+    device: int
+    inode: int
+    file_attributes: int
+    mode: int
+
+    @classmethod
+    def capture(cls, path: Path) -> "_EntryIdentity":
+        try:
+            info = os.lstat(path)
+        except OSError as error:
+            raise EvidencePathError("Evidence artifact changed during operation") from error
+        return cls(info.st_dev, info.st_ino, getattr(info, "st_file_attributes", 0), info.st_mode)
+
+    def matches(self, path: Path, *, directory: bool) -> bool:
+        try:
+            info = os.lstat(path)
+        except OSError:
+            return False
+        expected_type = stat.S_ISDIR(info.st_mode) if directory else stat.S_ISREG(info.st_mode)
+        return (
+            expected_type
+            and not stat.S_ISLNK(info.st_mode)
+            and (info.st_dev, info.st_ino, getattr(info, "st_file_attributes", 0))
+            == (self.device, self.inode, self.file_attributes)
+        )
+
+
 class EvidenceStore:
     """Mutable evidence collection which becomes immutable once finalized."""
 
@@ -262,14 +293,42 @@ class EvidenceStore:
             raise EvidencePathError("Raw storage requires a registered source id")
         self._verify_layout()
         self._raw_dir.verify()
-        self._run_hook("before-raw-mkdir")
-        self._verify_layout()
-        self._raw_dir.verify()
-        source_dir = self._create_or_verify_child(self._raw_dir, source_id)
-        self._verify_layout()
-        if not _is_below(source_dir.path, self._raw_dir.path):
-            raise EvidencePathError("Raw storage path escaped the evidence session")
-        return source_dir.path
+        raw_fd = self._open_directory_fd(self._raw_dir)
+        created = False
+        source_identity: _EntryIdentity | None = None
+        source_path = self._raw_dir.path / source_id
+        try:
+            self._run_hook("before-raw-mkdir")
+            self._verify_layout()
+            self._raw_dir.verify()
+            self._run_hook("after-raw-precheck-before-mkdir")
+            try:
+                if raw_fd is not None:
+                    os.mkdir(source_id, dir_fd=raw_fd)
+                else:
+                    os.mkdir(source_path)
+                created = True
+            except FileExistsError:
+                source_dir = _DirectoryIdentity.capture(source_path)
+                if not _is_below(source_dir.path, self._raw_dir.path):
+                    raise EvidencePathError("Raw storage path escaped the evidence session")
+                return source_dir.path
+            except OSError as error:
+                raise EvidencePathError("Raw storage path could not be created") from error
+            source_identity = _EntryIdentity.capture(source_path)
+            self._run_hook("after-raw-mkdir-before-postcheck")
+            self._verify_layout()
+            self._raw_dir.verify()
+            source_dir = _DirectoryIdentity.capture(source_path)
+            if not _is_below(source_dir.path, self._raw_dir.path):
+                raise EvidencePathError("Raw storage path escaped the evidence session")
+            created = False
+            return source_dir.path
+        finally:
+            if created:
+                self._remove_created_raw_directory(source_id, source_identity, raw_fd)
+            if raw_fd is not None:
+                os.close(raw_fd)
 
     def finalize(self) -> EvidenceManifest:
         if self._manifest is not None:
@@ -323,6 +382,85 @@ class EvidenceStore:
         }
         return "sha256:" + hashlib.sha256(_canonical_json(payload).encode("utf-8")).hexdigest()
 
+    @staticmethod
+    def _open_directory_fd(directory: _DirectoryIdentity) -> int | None:
+        if os.name == "nt" or os.open not in os.supports_dir_fd:
+            return None
+        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            descriptor = os.open(directory.path, flags)
+            info = os.fstat(descriptor)
+        except OSError as error:
+            raise EvidencePathError("Evidence directory changed during operation") from error
+        if (info.st_dev, info.st_ino) != (directory.device, directory.inode):
+            os.close(descriptor)
+            raise EvidencePathError("Evidence directory changed during operation")
+        return descriptor
+
+    def _remove_created_raw_directory(
+        self,
+        source_id: str,
+        identity: _EntryIdentity | None,
+        raw_fd: int | None,
+    ) -> None:
+        if raw_fd is not None:
+            try:
+                os.rmdir(source_id, dir_fd=raw_fd)
+            except OSError:
+                pass
+            return
+        if identity is not None:
+            self._remove_exact_entry(self._raw_dir.path / source_id, identity, directory=True)
+
+    def _remove_exact_entry(self, preferred: Path, identity: _EntryIdentity, *, directory: bool) -> None:
+        candidates = [preferred]
+        if os.name == "nt":
+            found = self._find_identity_below_root(identity, directory=directory)
+            if found is not None:
+                candidates.append(found)
+        for candidate in candidates:
+            if not identity.matches(candidate, directory=directory):
+                continue
+            try:
+                if directory:
+                    candidate.rmdir()
+                else:
+                    candidate.unlink()
+            except OSError:
+                pass
+            return
+
+    def _find_identity_below_root(self, identity: _EntryIdentity, *, directory: bool) -> Path | None:
+        """Locate only an exact known object below the unchanged workspace root."""
+
+        try:
+            self._root_dir.verify()
+        except EvidencePathError:
+            return None
+        pending = [self._root_dir.path]
+        while pending:
+            current = pending.pop()
+            try:
+                with os.scandir(current) as entries:
+                    for entry in entries:
+                        path = Path(entry.path)
+                        if identity.matches(path, directory=directory):
+                            return path
+                        try:
+                            info = entry.stat(follow_symlinks=False)
+                        except OSError:
+                            continue
+                        attributes = getattr(info, "st_file_attributes", 0)
+                        if (
+                            stat.S_ISDIR(info.st_mode)
+                            and not stat.S_ISLNK(info.st_mode)
+                            and not (os.name == "nt" and attributes & _REPARSE_POINT)
+                        ):
+                            pending.append(path)
+            except OSError:
+                continue
+        return None
+
     def _atomic_write(self, relative_name: str, content: str) -> None:
         parent, destination_name = self._artifact_parent(relative_name)
         self._verify_layout()
@@ -332,8 +470,11 @@ class EvidenceStore:
         parent.verify()
         descriptor, temporary_name, directory_fd = self._open_temporary(parent, destination_name)
         temporary_path = parent.path / temporary_name
+        temporary_identity: _EntryIdentity | None = None
+        replaced = False
         published = False
         try:
+            temporary_identity = _EntryIdentity.capture(temporary_path)
             self._verify_temporary(temporary_path, parent, descriptor)
             with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
                 descriptor = -1
@@ -351,22 +492,30 @@ class EvidenceStore:
                 os.replace(temporary_name, destination_name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
             else:
                 os.replace(temporary_path, parent.path / destination_name)
-            published = True
+            replaced = True
+            self._run_hook(f"after-replace-before-postcheck:{relative_name}")
             self._verify_layout()
             parent.verify()
             self._verify_regular_file(parent.path / destination_name, parent)
+            if not temporary_identity.matches(parent.path / destination_name, directory=False):
+                raise EvidencePathError("Evidence artifact changed during operation")
+            published = True
         finally:
             if descriptor >= 0:
                 os.close(descriptor)
             if directory_fd is not None:
                 if not published:
                     try:
-                        os.unlink(temporary_name, dir_fd=directory_fd)
+                        os.unlink(destination_name if replaced else temporary_name, dir_fd=directory_fd)
                     except FileNotFoundError:
                         pass
                 os.close(directory_fd)
             elif not published:
-                self._remove_temporary_if_still_safe(temporary_path, parent)
+                if replaced:
+                    if temporary_identity is not None:
+                        self._remove_exact_entry(parent.path / destination_name, temporary_identity, directory=False)
+                else:
+                    self._remove_temporary_if_still_safe(temporary_path, parent)
 
     def _artifact_parent(self, relative_name: str) -> tuple[_DirectoryIdentity, str]:
         if relative_name.startswith("normalized/"):
