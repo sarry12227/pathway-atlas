@@ -20,8 +20,11 @@ import argparse
 import csv
 import json
 import os
+import re
 import sys
+import tempfile
 from datetime import date
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -34,6 +37,18 @@ from path_recommend import (HKMO_POSITIVE, PathRecommendError,  # noqa: E402
 from rank_calc import RankCalcError, estimate_rank  # noqa: E402
 from school_recommend import (SchoolRecommendError, params_from_config,  # noqa: E402
                               recommend_schools)
+
+# Evidence-aware v0.1 public path.  The historical imports above remain only
+# for the one-release CLI adapter exercised by existing users and tests.
+from contracts import (CapabilityReport, CapabilityTier, EvidenceManifest,  # noqa: E402
+                       EvidenceStatus, RecommendationProfile)
+from path_recommend import PathwayProfile, evaluate_pathways  # noqa: E402
+from province_registry import (discover_provinces,  # noqa: E402
+                               validate_subject_selection)
+from report_model import StudentProfile, build_report_model, render_markdown  # noqa: E402
+from validate_data import validate_dataset  # noqa: E402
+from validate_evidence import (_BundleReader, _EXPECTED_ARTIFACTS,  # noqa: E402
+                               validate_bundle)
 
 DISCLAIMER = ("本方案基于历史公开数据生成，仅为数据参考，不构成录取承诺；"
               "志愿填报与路径申报以省教育考试院及各高校官方发布的当年信息为准。")
@@ -57,6 +72,14 @@ QUALITY_NOTE = {
 }
 
 EMPTY_TIER_NOTE = "> 本档无符合条件院校：按规则留空，不硬凑。"
+
+
+class EvidenceReportInputError(ValueError):
+    """The public report CLI received invalid or unauthenticated input."""
+
+
+class EvidenceReportCapabilityError(RuntimeError):
+    """A caller-required optional report capability is unavailable."""
 
 
 def _reconfigure_utf8() -> None:
@@ -606,9 +629,419 @@ def default_output_path(name) -> str:
                         f"{safe or '方案'}_升学方案_{date.today():%Y%m%d}.md")
 
 
+def _strict_object(pairs):
+    value = {}
+    for key, item in pairs:
+        if key in value:
+            raise EvidenceReportInputError("JSON 包含重复字段")
+        value[key] = item
+    return value
+
+
+def _reject_json_constant(_value):
+    raise EvidenceReportInputError("JSON 包含非有限数值")
+
+
+def _strict_json_text(text: str, label: str):
+    try:
+        return json.loads(
+            text,
+            object_pairs_hook=_strict_object,
+            parse_constant=_reject_json_constant,
+        )
+    except (json.JSONDecodeError, EvidenceReportInputError) as error:
+        raise EvidenceReportInputError(f"{label} 不是严格 JSON") from error
+
+
+def _strict_json_file(path: Path, label: str):
+    try:
+        before = path.stat()
+        if not path.is_file() or path.is_symlink() or before.st_size > 1024 * 1024:
+            raise EvidenceReportInputError(f"{label} 文件不安全")
+        payload = path.read_bytes()
+        after = path.stat()
+        if (before.st_dev, before.st_ino, before.st_size) != (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+        ):
+            raise EvidenceReportInputError(f"{label} 文件读取期间发生变化")
+        text = payload.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise EvidenceReportInputError(f"{label} 不是 UTF-8") from error
+    except OSError as error:
+        raise EvidenceReportInputError(f"{label} 无法安全读取") from error
+    return _strict_json_text(text, label)
+
+
+def _strict_jsonl_text(text: str, label: str):
+    records = []
+    for index, line in enumerate(text.splitlines(), 1):
+        if not line.strip():
+            raise EvidenceReportInputError(f"{label} 包含空记录")
+        records.append(_strict_json_text(line, f"{label}:{index}"))
+    return tuple(records)
+
+
+def _validated_evidence_snapshot(bundle: Path):
+    """Read once through the hardened reader, then validate that exact snapshot."""
+
+    try:
+        reader = _BundleReader(bundle)
+        texts = {name: reader.read(name) for name in _EXPECTED_ARTIFACTS}
+    except Exception as error:
+        raise EvidenceReportInputError("证据包无法安全读取") from error
+
+    # validate_bundle is intentionally path-bounded.  Validate an in-memory
+    # snapshot materialized in a private temporary directory so later parsing
+    # cannot observe a different original file after validation.
+    with tempfile.TemporaryDirectory(prefix="shengxue-evidence-") as temporary:
+        snapshot_root = Path(temporary)
+        (snapshot_root / "normalized").mkdir()
+        for relative_name, text in texts.items():
+            destination = snapshot_root.joinpath(*relative_name.split("/"))
+            destination.write_text(text, encoding="utf-8", newline="\n")
+        summary = validate_bundle(snapshot_root)
+    if not summary.get("valid"):
+        raise EvidenceReportInputError("证据包未通过完整性与来源门禁")
+
+    manifest_payload = _strict_json_text(texts["manifest.json"], "证据清单")
+    capability_payload = _strict_json_text(texts["capability.json"], "能力报告")
+    if not isinstance(manifest_payload, dict) or not isinstance(capability_payload, dict):
+        raise EvidenceReportInputError("证据包主记录格式无效")
+    try:
+        manifest = EvidenceManifest(
+            schema_version=manifest_payload["schema_version"],
+            session_id=manifest_payload["session_id"],
+            capability_tier=CapabilityTier(manifest_payload["capability_tier"]),
+            candidates_filename=manifest_payload["candidates_filename"],
+            facts_filename=manifest_payload["facts_filename"],
+            rejected_count=manifest_payload["rejected_count"],
+            manifest_hash=manifest_payload["manifest_hash"],
+        )
+        capability = CapabilityReport(
+            tier=CapabilityTier(capability_payload["tier"]),
+            host_capabilities=tuple(capability_payload["host_capabilities"]),
+            available_capabilities=tuple(capability_payload["available_capabilities"]),
+            missing_capabilities=tuple(capability_payload["missing_capabilities"]),
+            degradations=tuple(capability_payload["degradations"]),
+            python_version=capability_payload["python_version"],
+            optional_modules=tuple(capability_payload["optional_modules"]),
+        )
+    except (KeyError, TypeError, ValueError) as error:
+        raise EvidenceReportInputError("证据包公共契约无效") from error
+    facts = _strict_jsonl_text(texts["normalized/facts.jsonl"], "标准化事实")
+    return manifest, capability, facts
+
+
+def _profile_collection(payload: dict, name: str) -> tuple[str, ...]:
+    value = payload[name]
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise EvidenceReportInputError(f"画像字段 {name} 必须是字符串数组")
+    return tuple(value)
+
+
+def _load_public_profile(path: Path):
+    payload = _strict_json_file(path, "用户画像")
+    fields = {
+        "schema_version",
+        "province",
+        "subject_mode",
+        "subject_group",
+        "secondary_subjects",
+        "rank",
+        "grade",
+        "current_year",
+        "target_major_categories",
+        "target_cities",
+        "target_schools",
+        "eligibility_facts",
+    }
+    if not isinstance(payload, dict) or set(payload) != fields:
+        raise EvidenceReportInputError("用户画像字段不符合公开契约")
+    if payload["schema_version"] != "1.0":
+        raise EvidenceReportInputError("用户画像版本不受支持")
+    try:
+        report_profile = StudentProfile(
+            province=payload["province"],
+            subject_mode=payload["subject_mode"],
+            subject_group=payload["subject_group"],
+            secondary_subjects=_profile_collection(payload, "secondary_subjects"),
+            rank=payload["rank"],
+            grade=payload["grade"],
+            current_year=payload["current_year"],
+        )
+        recommendation_profile = RecommendationProfile(
+            rank=payload["rank"],
+            target_province=payload["province"],
+            subject_group=payload["subject_group"],
+            secondary_subjects=frozenset(_profile_collection(payload, "secondary_subjects")),
+            target_major_categories=_profile_collection(payload, "target_major_categories"),
+            target_cities=_profile_collection(payload, "target_cities"),
+            target_schools=_profile_collection(payload, "target_schools"),
+        )
+        pathway_profile = PathwayProfile(
+            rank=payload["rank"],
+            province=payload["province"],
+            subject_mode=payload["subject_mode"],
+            current_year=payload["current_year"],
+            eligibility_facts=_profile_collection(payload, "eligibility_facts"),
+        )
+    except (TypeError, ValueError) as error:
+        raise EvidenceReportInputError("用户画像值不符合公开契约") from error
+    return report_profile, recommendation_profile, pathway_profile
+
+
+def _resolve_public_dataset(dataset: Path, profile: StudentProfile):
+    try:
+        resolved = dataset.resolve(strict=True)
+    except OSError as error:
+        raise EvidenceReportInputError("数据目录不存在") from error
+    issues = validate_dataset(resolved)
+    if issues:
+        raise EvidenceReportInputError("数据目录未通过省份数据校验")
+    try:
+        configs = discover_provinces(resolved.parent)
+        matches = [config for config in configs.values() if config.directory == resolved]
+        if len(matches) != 1:
+            raise EvidenceReportInputError("数据目录无法绑定唯一省份配置")
+        config = matches[0]
+        if config.province != profile.province or config.mode != profile.subject_mode:
+            raise EvidenceReportInputError("用户画像与省份数据配置不匹配")
+        validate_subject_selection(
+            config,
+            profile.subject_group,
+            list(profile.secondary_subjects),
+        )
+    except EvidenceReportInputError:
+        raise
+    except Exception as error:
+        raise EvidenceReportInputError("省份或选科配置无效") from error
+    return resolved
+
+
+_ADMISSION_FACT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+_ADMISSION_VALUE_FIELDS = {
+    "year",
+    "province",
+    "subject_group",
+    "school_code",
+    "program_group",
+    "remarks",
+    "min_score",
+    "min_rank",
+    "coverage_min_rank",
+    "coverage_max_rank",
+}
+
+
+def _strict_admission_fact(record):
+    if not isinstance(record, dict):
+        return None
+    field = record.get("field")
+    if not isinstance(field, str) or not field.startswith("admission_record:"):
+        return None
+    suffix = field.removeprefix("admission_record:")
+    if _ADMISSION_FACT_ID.fullmatch(suffix) is None:
+        return None
+    value = record.get("value")
+    if not isinstance(value, dict) or set(value) != _ADMISSION_VALUE_FIELDS:
+        return None
+    status = record.get("status")
+    if status not in {
+        EvidenceStatus.OFFICIAL.value,
+        EvidenceStatus.CORROBORATED.value,
+        EvidenceStatus.REFERENCE.value,
+    }:
+        return None
+    for name in ("year", "min_score", "min_rank", "coverage_min_rank", "coverage_max_rank"):
+        if not isinstance(value[name], int) or isinstance(value[name], bool) or value[name] < 1:
+            return None
+    if value["year"] < 2000 or value["year"] > 2100:
+        return None
+    if value["coverage_min_rank"] > value["coverage_max_rank"]:
+        return None
+    if not value["coverage_min_rank"] <= value["min_rank"] <= value["coverage_max_rank"]:
+        return None
+    for name in ("province", "subject_group", "school_code", "program_group", "remarks"):
+        if not isinstance(value[name], str):
+            return None
+        if name != "remarks" and (not value[name] or value[name] != value[name].strip()):
+            return None
+        if any(ord(char) < 32 or ord(char) == 127 for char in value[name]):
+            return None
+    source_ids = record.get("source_ids")
+    if not isinstance(source_ids, list) or not source_ids:
+        return None
+    if len(source_ids) != len(set(source_ids)) or any(
+        not isinstance(source_id, str) or _ADMISSION_FACT_ID.fullmatch(source_id) is None
+        for source_id in source_ids
+    ):
+        return None
+    key = (
+        value["year"],
+        value["province"],
+        value["subject_group"],
+        value["school_code"],
+        value["program_group"],
+        value["remarks"],
+    )
+    return key, value, status, tuple(sorted(source_ids))
+
+
+def _admission_fact_index(facts):
+    index = {}
+    conflicted = set()
+    for record in facts:
+        parsed = _strict_admission_fact(record)
+        if parsed is None:
+            continue
+        key, value, status, source_ids = parsed
+        snapshot = (value, status, source_ids)
+        if key in index and index[key] != snapshot:
+            conflicted.add(key)
+        else:
+            index[key] = snapshot
+    for key in conflicted:
+        index.pop(key, None)
+    return index
+
+
+def _public_recommendations(dataset: Path, profile: RecommendationProfile, facts):
+    """Run Task 3 without assigning unscoped facts to admission rows.
+
+    v1 evidence facts must name the exact normalized admission field before a
+    row can carry numeric provenance.  The current public replay fixture has a
+    deliberately generic fact, so rows degrade to missing rather than gaining
+    fabricated source coverage.
+    """
+
+    try:
+        _year, rows = load_toudang(
+            None,
+            profile.subject_group,
+            province_dir=dataset,
+        )
+        evidence_by_row = _admission_fact_index(facts)
+        bounded_rows = []
+        for original in rows:
+            row = dict(original)
+            key = (
+                row.get("year"),
+                row.get("province"),
+                row.get("subject_group"),
+                row.get("school_code"),
+                row.get("program_group") or row.get("major_group_name"),
+                row.get("remarks") or "",
+            )
+            accepted = evidence_by_row.get(key)
+            if accepted is None:
+                row.update(
+                    {
+                        "evidence_status": EvidenceStatus.MISSING.value,
+                        "source_ids": (),
+                        "coverage_min_rank": None,
+                        "coverage_max_rank": None,
+                    }
+                )
+            else:
+                value, status, source_ids = accepted
+                if row.get("min_score") != value["min_score"] or row.get("min_rank") != value["min_rank"]:
+                    row.update(
+                        {
+                            "evidence_status": EvidenceStatus.CONFLICT.value,
+                            "source_ids": (),
+                            "coverage_min_rank": None,
+                            "coverage_max_rank": None,
+                        }
+                    )
+                else:
+                    row.update(
+                        {
+                            "evidence_status": status,
+                            "source_ids": source_ids,
+                            "coverage_min_rank": value["coverage_min_rank"],
+                            "coverage_max_rank": value["coverage_max_rank"],
+                        }
+                    )
+            bounded_rows.append(row)
+        return recommend_schools(bounded_rows, profile)
+    except (DataError, SchoolRecommendError, TypeError, ValueError) as error:
+        raise EvidenceReportInputError("普通批数据无法形成安全推荐结果") from error
+
+
+def _build_evidence_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="从显式省份数据、匿名画像和已验证证据包生成确定性 Markdown"
+    )
+    parser.add_argument("--dataset", required=True, type=Path, help="显式省份数据目录")
+    parser.add_argument("--profile", required=True, type=Path, help="匿名严格 JSON 用户画像")
+    parser.add_argument("--evidence", required=True, type=Path, help="已完成的证据包目录")
+    parser.add_argument("--output", type=Path, default=None, help="可选 Markdown 输出路径")
+    return parser
+
+
+def _evidence_main(argv) -> int:
+    if sys.version_info < (3, 10):
+        print("缺少能力：需要 Python 3.10 或更高版本", file=sys.stderr)
+        return 3
+    args = _build_evidence_parser().parse_args(argv)
+    try:
+        report_profile, recommendation_profile, pathway_profile = _load_public_profile(
+            args.profile
+        )
+        dataset = _resolve_public_dataset(args.dataset, report_profile)
+        manifest, capability, facts = _validated_evidence_snapshot(args.evidence)
+        recommendations = _public_recommendations(dataset, recommendation_profile, facts)
+        # The public replay fixture carries no policy records or versioned rank
+        # anchors.  Task 5 is still entered through its new API; Task 4 remains
+        # explicitly unavailable instead of falling back to bundled xibao data.
+        pathways = evaluate_pathways(pathway_profile, (), model=None)
+        model = build_report_model(
+            report_profile,
+            capability,
+            recommendations,
+            rank=None,
+            pathways=pathways,
+            manifest=manifest,
+        )
+        markdown = render_markdown(model)
+        hit = find_price_text(markdown)
+        if hit is not None:
+            raise EvidenceReportInputError("报告未通过合规扫描")
+        if args.output is not None:
+            output = args.output.resolve(strict=False)
+            if (
+                output.suffix.lower() != ".md"
+                or not output.parent.is_dir()
+                or output.exists()
+            ):
+                raise EvidenceReportInputError("输出路径必须位于现有目录且使用 .md 后缀")
+            with output.open("x", encoding="utf-8", newline="\n") as handle:
+                handle.write(markdown)
+    except EvidenceReportCapabilityError as error:
+        print(f"缺少能力：{error}", file=sys.stderr)
+        return 3
+    except (EvidenceReportInputError, OSError) as error:
+        print(f"错误[REPORT_002]：{error}", file=sys.stderr)
+        return 2
+    print(markdown, end="")
+    return 0
+
+
+def _uses_evidence_cli(argv) -> bool:
+    return any(
+        item in {"--dataset", "--profile", "--evidence"}
+        for item in argv
+    )
+
+
 def main(argv=None) -> int:
     _reconfigure_utf8()
-    args = build_parser().parse_args(argv)
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    if _uses_evidence_cli(raw_argv):
+        return _evidence_main(raw_argv)
+    args = build_parser().parse_args(raw_argv)
     try:
         ctx = collect_context(args)
     except (DataError, RankCalcError, SchoolRecommendError,
