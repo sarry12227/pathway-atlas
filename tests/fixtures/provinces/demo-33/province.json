@@ -1,0 +1,8 @@
+{
+  "province": "演示乙市",
+  "mode": "3+3",
+  "primary_subjects": ["物理", "历史", "化学"],
+  "secondary_subjects": ["生物", "思想政治", "地理"],
+  "score_scale": 660,
+  "schema_version": "1.0"
+}
