@@ -15,6 +15,7 @@ from scripts.province_registry import (
     ProvinceConfig,
     ProvinceConfigError,
     ProvincePathError,
+    SubjectSelectionError,
     UnknownProvinceError,
     discover_provinces,
     resolve_province_dir,
@@ -207,10 +208,6 @@ class ProvinceMetadataValidationTest(unittest.TestCase):
                 self.assert_invalid_payload(payload)
 
     def test_mode_specific_subject_sets_are_rejected_when_incoherent(self):
-        overlap = valid_metadata()
-        overlap["secondary_subjects"] = ["物理", "化学"]
-        self.assert_invalid_payload(overlap)
-
         too_few_secondary = valid_metadata()
         too_few_secondary["secondary_subjects"] = ["化学"]
         self.assert_invalid_payload(too_few_secondary)
@@ -220,6 +217,21 @@ class ProvinceMetadataValidationTest(unittest.TestCase):
         too_few_for_33["primary_subjects"] = ["物理"]
         too_few_for_33["secondary_subjects"] = ["化学"]
         self.assert_invalid_payload(too_few_for_33)
+
+    def test_role_lists_may_overlap_but_one_selection_must_be_distinct(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            payload = valid_metadata("角色重叠省")
+            payload["secondary_subjects"] = ["物理", "化学", "地理"]
+            write_metadata(root / "entry", payload)
+
+            config = discover_provinces(root)["角色重叠省"]
+
+            self.assertEqual(config.primary_subjects, ("物理", "历史"))
+            self.assertEqual(config.secondary_subjects, ("物理", "化学", "地理"))
+            with self.assertRaises(SubjectSelectionError):
+                validate_subject_selection(config, "物理", ("物理", "化学"))
+            validate_subject_selection(config, "物理", ("化学", "地理"))
 
     def test_empty_or_wrong_typed_subjects_are_rejected(self):
         for value in ([], [" "], "物理", [1, "物理"], None):

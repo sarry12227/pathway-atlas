@@ -335,8 +335,6 @@ def _parse_config(payload: dict[str, Any], directory: Path) -> ProvinceConfig:
         raise ProvinceConfigError("mode 仅支持 3+1+2 或 3+3")
     primary = _normalize_subjects(payload["primary_subjects"], "primary_subjects")
     secondary = _normalize_subjects(payload["secondary_subjects"], "secondary_subjects")
-    if set(primary) & set(secondary):
-        raise ProvinceConfigError("primary_subjects 与 secondary_subjects 不得重叠")
     if mode == "3+1+2" and len(secondary) < 2:
         raise ProvinceConfigError("3+1+2 模式至少需要两个可配置再选科目")
     if mode == "3+3" and len(primary) + len(secondary) < 3:
