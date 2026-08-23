@@ -64,6 +64,14 @@ def _dotted_name(node: ast.AST) -> str | None:
     return None
 
 
+def _isolated_python_environment(source=None) -> dict[str, str]:
+    environment = dict(os.environ if source is None else source)
+    for name in tuple(environment):
+        if name.upper().startswith("PYTHON"):
+            del environment[name]
+    return environment
+
+
 def _join_static_path(parts: tuple[str, ...]) -> str | None:
     if not parts:
         return None
@@ -346,27 +354,82 @@ class PublicPackageBoundaryTest(unittest.TestCase):
             )
             shutil.unpack_archive(archive, snapshot)
 
+            polluted_env = os.environ.copy()
+            polluted_env.update(
+                {
+                    "PYTHONPATH": str(ROOT / "scripts"),
+                    "PYTHONHOME": str(ROOT / "malicious-python-home"),
+                    "PYTHONSTARTUP": str(ROOT / "malicious-startup.py"),
+                }
+            )
+            isolated_env = _isolated_python_environment(polluted_env)
+            self.assertFalse(
+                any(name.upper().startswith("PYTHON") for name in isolated_env)
+            )
+
+            def run_in_snapshot(snapshot_root: Path, command: list[str]):
+                script = (snapshot_root / command[1]).resolve()
+                self.assertTrue(script.is_relative_to(snapshot_root.resolve()))
+                runner = (
+                    "import os,runpy,sys;"
+                    "assert sys.flags.isolated;"
+                    "assert not any(k.upper().startswith('PYTHON') for k in os.environ);"
+                    "root=sys.argv.pop(1);script=sys.argv.pop(1);"
+                    "sys.path[:0]=[root,root+'/scripts'];"
+                    "runpy.run_path(script,run_name='__main__')"
+                )
+                return subprocess.run(
+                    [
+                        sys.executable,
+                        "-I",
+                        "-c",
+                        runner,
+                        str(snapshot_root.resolve()),
+                        str(script),
+                        *command[2:],
+                    ],
+                    cwd=snapshot_root,
+                    env=isolated_env,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                )
+
             executed = 0
             for command in commands:
                 if command[1] == "scripts/docx_export.py" and not documents_available:
                     continue
                 with self.subTest(command=command):
                     executed += 1
-                    completed = subprocess.run(
-                        [sys.executable, *command[1:]],
-                        cwd=snapshot,
-                        check=False,
-                        capture_output=True,
-                        text=True,
-                        encoding="utf-8",
-                        errors="replace",
-                    )
+                    completed = run_in_snapshot(snapshot, command)
                     self.assertEqual(
                         completed.returncode,
                         0,
                         f"stdout={completed.stdout}\nstderr={completed.stderr}",
                     )
             self.assertEqual(executed, 5 if documents_available else 4)
+
+            missing_module_snapshot = temporary_path / "missing-module-snapshot"
+            shutil.unpack_archive(archive, missing_module_snapshot)
+            (missing_module_snapshot / "scripts/compliance_scan.py").unlink()
+            dependent_commands = [
+                command
+                for command in commands
+                if command[1]
+                in {"scripts/generate_report.py", "scripts/docx_export.py"}
+                and (documents_available or command[1] != "scripts/docx_export.py")
+            ]
+            for command in dependent_commands:
+                with self.subTest(missing_module=command[1]):
+                    isolated = run_in_snapshot(missing_module_snapshot, command)
+                    self.assertNotEqual(
+                        isolated.returncode,
+                        0,
+                        "missing-module snapshot imported compliance_scan externally",
+                    )
+                    self.assertIn("compliance_scan", isolated.stderr)
 
     def test_compliance_scan_has_minimal_price_and_privacy_boundaries(self):
         from scripts.compliance_scan import contains_price_text, find_price_text
@@ -418,6 +481,64 @@ class PublicPackageBoundaryTest(unittest.TestCase):
         self.assertEqual(missing_code, 2)
         self.assertNotIn(str(report.parent), stdout.getvalue())
         self.assertNotIn(str(report.parent), stderr.getvalue())
+
+    def test_compliance_scan_cli_normalizes_all_input_read_failures(self):
+        from scripts import compliance_scan
+
+        def invoke(argument: str, patched_open=None):
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            patcher = (
+                mock.patch("builtins.open", patched_open)
+                if patched_open is not None
+                else contextlib.nullcontext()
+            )
+            with patcher, contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(
+                stderr
+            ):
+                try:
+                    code = compliance_scan.main([argument])
+                except Exception as error:  # The assertion below makes this RED.
+                    code = error
+            return code, stdout.getvalue(), stderr.getvalue()
+
+        with tempfile.TemporaryDirectory() as temporary:
+            private_root = Path(temporary)
+            existing = private_root / "private-report.md"
+            existing.write_text("省排名 3000 位", encoding="utf-8")
+            cases = [
+                (str(private_root), None),
+                (str(private_root / "missing-private.md"), None),
+                (str(existing), mock.Mock(side_effect=PermissionError("PRIVATE"))),
+                (str(existing), mock.Mock(side_effect=FileNotFoundError("PRIVATE"))),
+            ]
+            for argument, patched_open in cases:
+                with self.subTest(argument=Path(argument).name):
+                    code, stdout, stderr = invoke(argument, patched_open)
+                    self.assertEqual(code, 2)
+                    self.assertEqual(stdout, "")
+                    self.assertEqual(stderr, "错误：无法读取输入文件\n")
+                    self.assertNotIn(str(private_root), stderr)
+                    self.assertNotIn("PRIVATE", stderr)
+                    self.assertNotIn("Traceback", stderr)
+
+            for error in (
+                OSError("PRIVATE read race"),
+                UnicodeDecodeError("utf-8", b"\xff", 0, 1, "PRIVATE"),
+            ):
+                reader = mock.MagicMock()
+                reader.__enter__.return_value = reader
+                reader.read.side_effect = error
+                with self.subTest(error=type(error).__name__):
+                    code, stdout, stderr = invoke(
+                        str(existing), mock.Mock(return_value=reader)
+                    )
+                    self.assertEqual(code, 2)
+                    self.assertEqual(stdout, "")
+                    self.assertEqual(stderr, "错误：无法读取输入文件\n")
+                    self.assertNotIn(str(private_root), stderr)
+                    self.assertNotIn("PRIVATE", stderr)
+                    self.assertNotIn("Traceback", stderr)
 
     def test_legacy_school_cli_fails_closed_before_default_rank_estimator(self):
         from scripts import generate_report

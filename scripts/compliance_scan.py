@@ -72,12 +72,13 @@ def main(argv=None) -> int:
     if len(argv) != 1:
         print("用法：python scripts/compliance_scan.py <文件路径>", file=sys.stderr)
         return 2
-    import os
-    if not os.path.exists(argv[0]):
-        print("错误：文件不存在", file=sys.stderr)
+    try:
+        with open(argv[0], encoding="utf-8") as f:
+            content = f.read()
+    except (OSError, UnicodeError):
+        print("错误：无法读取输入文件", file=sys.stderr)
         return 2
-    with open(argv[0], encoding="utf-8") as f:
-        hit = find_price_text(f.read())
+    hit = find_price_text(content)
     if hit:
         print(f"合规扫描未通过：命中价格/营销词片段「{hit}」，"
               f"请移除后重新交付", file=sys.stderr)
