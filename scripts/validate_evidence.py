@@ -330,6 +330,54 @@ def _validate_shapes(
             errors.append(_error("artifact", "fact artifact path is not canonical", "manifest.json"))
         if manifest["rejected_count"] != len(rejections):
             errors.append(_error("schema", "rejected_count does not match records", "manifest.json"))
+    errors.extend(_validate_rejection_links(candidates, facts, rejections))
+    return errors
+
+
+def _validate_rejection_links(
+    candidates: list[Any], facts: list[Any], rejections: list[Any]
+) -> list[dict[str, str]]:
+    errors: list[dict[str, str]] = []
+    rejected_ids: set[str] = set()
+    for index, rejection in enumerate(rejections, 1):
+        if not isinstance(rejection, dict):
+            continue
+        source_id = rejection.get("source_id")
+        if not isinstance(source_id, str):
+            continue
+        location = f"rejections.jsonl:{index}"
+        if not _SOURCE_ID.fullmatch(source_id):
+            errors.append(_error("rejections", "rejection source_id is unsafe", location))
+            continue
+        if source_id in rejected_ids:
+            errors.append(_error("rejections", "rejection source_id is duplicated", location))
+            continue
+        rejected_ids.add(source_id)
+
+    candidate_ids = {
+        candidate.get("source_id")
+        for candidate in candidates
+        if isinstance(candidate, dict) and isinstance(candidate.get("source_id"), str)
+    }
+    if candidate_ids.intersection(rejected_ids):
+        errors.append(
+            _error(
+                "rejected_source",
+                "accepted candidates and rejected sources must be disjoint",
+                "rejections.jsonl",
+            )
+        )
+    for index, fact in enumerate(facts, 1):
+        if not isinstance(fact, dict) or not isinstance(fact.get("source_ids"), list):
+            continue
+        if rejected_ids.intersection(item for item in fact["source_ids"] if isinstance(item, str)):
+            errors.append(
+                _error(
+                    "rejected_source",
+                    "fact references a rejected source",
+                    f"normalized/facts.jsonl:{index}",
+                )
+            )
     return errors
 
 
@@ -443,6 +491,14 @@ def _validate_policy(
                 _error(
                     "independent_sources",
                     "fact is not supported by the shared source-independence policy",
+                    location,
+                )
+            )
+        elif evaluated.method != fact["method"]:
+            errors.append(
+                _error(
+                    "method",
+                    "fact method does not match the shared source policy",
                     location,
                 )
             )

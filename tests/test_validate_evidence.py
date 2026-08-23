@@ -7,6 +7,8 @@ import sys
 import tempfile
 import unittest
 
+from scripts.evidence import EvidenceStore
+
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = ROOT / "tests" / "fixtures" / "evidence"
@@ -40,6 +42,32 @@ class ValidateEvidenceCliTest(unittest.TestCase):
         destination = self.temp_root / name
         shutil.copytree(FIXTURES / name, destination)
         return destination
+
+    @staticmethod
+    def rewrite_manifest_hash(bundle: Path) -> None:
+        manifest_path = bundle / "manifest.json"
+        manifest = json.loads(manifest_path.read_text("utf-8"))
+        capability = json.loads((bundle / "capability.json").read_text("utf-8"))
+        rejection_lines = (bundle / "rejections.jsonl").read_text("utf-8").splitlines()
+        store = object.__new__(EvidenceStore)
+        store._capability = capability
+        store._rejections = {str(index): None for index in range(len(rejection_lines))}
+        records = {
+            name: (bundle / name).read_text("utf-8")
+            for name in (
+                "capability.json",
+                "candidates.jsonl",
+                "context.jsonl",
+                "normalized/facts.jsonl",
+                "rejections.jsonl",
+            )
+        }
+        manifest["manifest_hash"] = EvidenceStore._manifest_hash(store, records)
+        manifest_path.write_text(
+            json.dumps(manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n",
+            encoding="utf-8",
+            newline="\n",
+        )
 
     def test_consensus_fixture_passes_with_machine_readable_summary(self):
         result, summary = self.run_cli(FIXTURES / "three-source-consensus")
@@ -81,6 +109,101 @@ class ValidateEvidenceCliTest(unittest.TestCase):
         self.assertEqual(result.returncode, 2, result.stderr)
         self.assertEqual(summary["valid"], False)
         self.assertIn("independent_sources", {item["code"] for item in summary["errors"]})
+        self.assertEqual(summary["independent_source_count"], 1)
+
+    def test_rejected_candidate_cannot_support_an_exact_fact(self):
+        bundle = self.copy_fixture("three-source-consensus")
+        rejection_reason = "sensitive-reason-must-not-be-echoed"
+        (bundle / "rejections.jsonl").write_text(
+            json.dumps(
+                {"source_id": "s1", "reason": rejection_reason},
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+        manifest_path = bundle / "manifest.json"
+        manifest = json.loads(manifest_path.read_text("utf-8"))
+        manifest["rejected_count"] = 1
+        manifest_path.write_text(
+            json.dumps(manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+        self.rewrite_manifest_hash(bundle)
+
+        result, summary = self.run_cli(bundle)
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("rejected_source", {item["code"] for item in summary["errors"]})
+        self.assertNotIn(rejection_reason, result.stdout)
+        self.assertNotIn(rejection_reason, result.stderr)
+
+    def test_unsafe_rejection_source_id_is_rejected(self):
+        bundle = self.copy_fixture("three-source-consensus")
+        (bundle / "rejections.jsonl").write_text(
+            '{"reason":"synthetic","source_id":"../../outside"}\n',
+            encoding="utf-8",
+            newline="\n",
+        )
+        manifest_path = bundle / "manifest.json"
+        manifest = json.loads(manifest_path.read_text("utf-8"))
+        manifest["rejected_count"] = 1
+        manifest_path.write_text(
+            json.dumps(manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+        self.rewrite_manifest_hash(bundle)
+
+        result, summary = self.run_cli(bundle)
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("rejections", {item["code"] for item in summary["errors"]})
+
+    def test_duplicate_rejection_source_id_is_rejected(self):
+        bundle = self.copy_fixture("three-source-consensus")
+        (bundle / "rejections.jsonl").write_text(
+            '{"reason":"first","source_id":"r1"}\n'
+            '{"reason":"second","source_id":"r1"}\n',
+            encoding="utf-8",
+            newline="\n",
+        )
+        manifest_path = bundle / "manifest.json"
+        manifest = json.loads(manifest_path.read_text("utf-8"))
+        manifest["rejected_count"] = 2
+        manifest_path.write_text(
+            json.dumps(manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+        self.rewrite_manifest_hash(bundle)
+
+        result, summary = self.run_cli(bundle)
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("rejections", {item["code"] for item in summary["errors"]})
+
+    def test_fabricated_fact_method_is_rejected_after_policy_replay(self):
+        bundle = self.copy_fixture("three-source-consensus")
+        facts = bundle / "normalized" / "facts.jsonl"
+        facts.write_text(
+            facts.read_text("utf-8").replace(
+                '"method":"three-source-consensus"',
+                '"method":"fabricated-method"',
+            ),
+            encoding="utf-8",
+            newline="\n",
+        )
+        self.rewrite_manifest_hash(bundle)
+
+        result, summary = self.run_cli(bundle)
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("method", {item["code"] for item in summary["errors"]})
 
     def test_manifest_tampering_fails_hash_validation(self):
         bundle = self.copy_fixture("three-source-consensus")
