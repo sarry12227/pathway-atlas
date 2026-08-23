@@ -1,10 +1,13 @@
+import ipaddress
 import os
 import socket
 import ssl
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, PropertyMock, patch
 
 from scripts import downloader
 from scripts.downloader import (
@@ -44,6 +47,68 @@ class FakeHttpResponse:
 
     def close(self):
         self.closed = True
+
+
+class AbortableSocket:
+    def __init__(self):
+        self.aborted = threading.Event()
+
+    def getpeername(self):
+        return ("93.184.216.34", 443)
+
+    def settimeout(self, timeout):
+        self.timeout = timeout
+
+    def shutdown(self, how):
+        self.aborted.set()
+
+    def close(self):
+        self.aborted.set()
+
+
+class SlowHeaderConnection:
+    def __init__(self, hostname, port, address, timeout):
+        self.sock = AbortableSocket()
+
+    def connect(self):
+        pass
+
+    def request(self, method, path, headers):
+        pass
+
+    def getresponse(self):
+        self.sock.aborted.wait(0.3)
+        raise OSError("synthetic blocked response headers")
+
+    def close(self):
+        self.sock.close()
+
+
+class SlowBodyResponse:
+    status = 200
+    reason = "Synthetic response"
+
+    def __init__(self, peer_socket):
+        self.peer_socket = peer_socket
+        self.closed = False
+
+    def getheader(self, name, default=None):
+        if name.lower() == "content-type":
+            return "text/csv"
+        return default
+
+    def read(self, amount=-1):
+        if self.peer_socket.aborted.wait(0.3):
+            raise OSError("synthetic interrupted body")
+        return b"x"
+
+    def close(self):
+        self.closed = True
+
+
+class SlowBodyConnection(SlowHeaderConnection):
+    def getresponse(self):
+        return SlowBodyResponse(self.sock)
 
 
 class DownloaderUrlSecurityTest(unittest.TestCase):
@@ -95,6 +160,111 @@ class DownloaderUrlSecurityTest(unittest.TestCase):
         ]
 
         self.assertIsNone(validate_public_url("https://public.example.test/file.csv"))
+
+    def test_blocks_special_ranges_when_legacy_ipaddress_reports_global(self):
+        blocked = (
+            "http://192.0.0.8/x",
+            "http://[64:ff9b:1::1]/x",
+            "http://[2002::1]/x",
+            "http://[2001::1]/x",
+            "http://[::ffff:192.0.0.8]/x",
+        )
+        patches = (
+            patch.object(
+                ipaddress.IPv4Address,
+                "is_global",
+                new_callable=PropertyMock,
+                return_value=True,
+            ),
+            patch.object(
+                ipaddress.IPv4Address,
+                "is_private",
+                new_callable=PropertyMock,
+                return_value=False,
+            ),
+            patch.object(
+                ipaddress.IPv4Address,
+                "is_reserved",
+                new_callable=PropertyMock,
+                return_value=False,
+            ),
+            patch.object(
+                ipaddress.IPv6Address,
+                "is_global",
+                new_callable=PropertyMock,
+                return_value=True,
+            ),
+            patch.object(
+                ipaddress.IPv6Address,
+                "is_private",
+                new_callable=PropertyMock,
+                return_value=False,
+            ),
+            patch.object(
+                ipaddress.IPv6Address,
+                "is_reserved",
+                new_callable=PropertyMock,
+                return_value=False,
+            ),
+        )
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
+            for url in blocked:
+                with self.subTest(url=url), self.assertRaises(DownloadSecurityError):
+                    validate_public_url(url)
+
+    def test_allows_registry_exceptions_when_legacy_ipaddress_reports_private(self):
+        allowed = (
+            "http://192.0.0.9/x",
+            "http://192.0.0.10/x",
+            "http://[2001:1::1]/x",
+            "http://[2001:1::2]/x",
+            "http://[2001:3::1]/x",
+            "http://[2001:4:112::1]/x",
+            "http://[2001:20::1]/x",
+            "http://[2001:30::1]/x",
+        )
+        patches = (
+            patch.object(
+                ipaddress.IPv4Address,
+                "is_global",
+                new_callable=PropertyMock,
+                return_value=False,
+            ),
+            patch.object(
+                ipaddress.IPv4Address,
+                "is_private",
+                new_callable=PropertyMock,
+                return_value=True,
+            ),
+            patch.object(
+                ipaddress.IPv4Address,
+                "is_reserved",
+                new_callable=PropertyMock,
+                return_value=True,
+            ),
+            patch.object(
+                ipaddress.IPv6Address,
+                "is_global",
+                new_callable=PropertyMock,
+                return_value=False,
+            ),
+            patch.object(
+                ipaddress.IPv6Address,
+                "is_private",
+                new_callable=PropertyMock,
+                return_value=True,
+            ),
+            patch.object(
+                ipaddress.IPv6Address,
+                "is_reserved",
+                new_callable=PropertyMock,
+                return_value=True,
+            ),
+        )
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
+            for url in allowed:
+                with self.subTest(url=url):
+                    self.assertIsNone(validate_public_url(url))
 
 
 class DownloaderTransportSecurityTest(unittest.TestCase):
@@ -181,6 +351,7 @@ class DownloaderPinnedConnectionTest(unittest.TestCase):
             raw_socket, server_hostname="public.example.test"
         )
         self.assertIs(connection.sock, wrapped_socket)
+        connection.deadline_watchdog.cancel()
 
     @patch("scripts.downloader.socket.create_connection")
     @patch("scripts.downloader.ssl.create_default_context")
@@ -200,6 +371,84 @@ class DownloaderPinnedConnectionTest(unittest.TestCase):
             connection.connect()
 
         raw_socket.close.assert_called_once_with()
+
+
+class DownloaderHardDeadlineTest(unittest.TestCase):
+    def setUp(self):
+        self.temporary_directory = tempfile.TemporaryDirectory()
+        self.workspace = Path(self.temporary_directory.name).resolve()
+        self.public_dns = [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))
+        ]
+
+    def tearDown(self):
+        self.temporary_directory.cleanup()
+
+    @patch("scripts.downloader._open_pinned_request")
+    @patch("scripts.downloader.socket.getaddrinfo")
+    def test_slow_redirect_dns_is_cut_off_by_wall_clock_deadline(
+        self, getaddrinfo, open_request
+    ):
+        release_dns = threading.Event()
+
+        def dns(hostname, *args, **kwargs):
+            if hostname == "redirected.example.test":
+                release_dns.wait(0.3)
+            return self.public_dns
+
+        getaddrinfo.side_effect = dns
+        open_request.return_value = FakeHttpResponse(
+            302, headers={"Location": "https://redirected.example.test/final.csv"}
+        )
+
+        started = time.monotonic()
+        try:
+            with self.assertRaises(DownloadTimeout):
+                download_public_file(
+                    "https://public.example.test/start",
+                    self.workspace,
+                    timeout=0.03,
+                )
+        finally:
+            elapsed = time.monotonic() - started
+            release_dns.set()
+
+        self.assertLess(elapsed, 0.18)
+        self.assertEqual(list(self.workspace.iterdir()), [])
+
+    @patch("scripts.downloader._PinnedHTTPSConnection", SlowHeaderConnection)
+    @patch("scripts.downloader.socket.getaddrinfo")
+    def test_slow_response_headers_are_actively_interrupted(self, getaddrinfo):
+        getaddrinfo.return_value = self.public_dns
+
+        started = time.monotonic()
+        with self.assertRaises(DownloadTimeout):
+            download_public_file(
+                "https://public.example.test/data.csv",
+                self.workspace,
+                timeout=0.03,
+            )
+        elapsed = time.monotonic() - started
+
+        self.assertLess(elapsed, 0.18)
+        self.assertEqual(list(self.workspace.iterdir()), [])
+
+    @patch("scripts.downloader._PinnedHTTPSConnection", SlowBodyConnection)
+    @patch("scripts.downloader.socket.getaddrinfo")
+    def test_slow_body_read_is_actively_interrupted(self, getaddrinfo):
+        getaddrinfo.return_value = self.public_dns
+
+        started = time.monotonic()
+        with self.assertRaises(DownloadTimeout):
+            download_public_file(
+                "https://public.example.test/data.csv",
+                self.workspace,
+                timeout=0.03,
+            )
+        elapsed = time.monotonic() - started
+
+        self.assertLess(elapsed, 0.18)
+        self.assertEqual(list(self.workspace.iterdir()), [])
 
 
 class DownloaderResponseTest(unittest.TestCase):
@@ -412,7 +661,16 @@ class DownloaderResponseTest(unittest.TestCase):
         )
         open_request.return_value = response
         getaddrinfo.return_value = self.public_dns
-        monotonic.side_effect = [100.0, 100.2, 101.0]
+        monotonic.side_effect = [
+            100.0,
+            100.1,
+            100.2,
+            100.3,
+            100.4,
+            100.5,
+            100.6,
+            101.0,
+        ]
 
         with self.assertRaises(DownloadTimeout):
             download_public_file(

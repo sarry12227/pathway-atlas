@@ -11,10 +11,12 @@ from __future__ import annotations
 import http.client
 import ipaddress
 import os
+import queue
 import secrets
 import socket
 import ssl
 import tempfile
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -86,16 +88,43 @@ _MEDIA_TYPE_EXTENSIONS = {
     "text/json": ".json",
 }
 
+# Keep SSRF classification stable across the supported Python 3.10+ range.
+# These IANA special-purpose registry corrections changed in ipaddress 3.13
+# and were only selectively backported to older maintenance releases.
+_IPV4_PROTOCOL_ASSIGNMENTS = ipaddress.ip_network("192.0.0.0/24")
+_IPV4_PROTOCOL_GLOBAL_EXCEPTIONS = frozenset(
+    {ipaddress.ip_address("192.0.0.9"), ipaddress.ip_address("192.0.0.10")}
+)
+_IPV6_ALWAYS_NON_GLOBAL = (
+    ipaddress.ip_network("64:ff9b:1::/48"),
+    ipaddress.ip_network("2002::/16"),
+)
+_IPV6_PROTOCOL_ASSIGNMENTS = ipaddress.ip_network("2001::/23")
+_IPV6_PROTOCOL_GLOBAL_EXCEPTIONS = (
+    ipaddress.ip_network("2001:1::1/128"),
+    ipaddress.ip_network("2001:1::2/128"),
+    ipaddress.ip_network("2001:3::/32"),
+    ipaddress.ip_network("2001:4:112::/48"),
+    ipaddress.ip_network("2001:20::/28"),
+    ipaddress.ip_network("2001:30::/28"),
+)
+
 
 class _PinnedHTTPConnection(http.client.HTTPConnection):
     def __init__(self, hostname: str, port: int, address: str, timeout: float):
         super().__init__(hostname, port=port, timeout=timeout)
         self._pinned_address = address
+        self._operation_deadline = time.monotonic() + timeout
+        self.deadline_watchdog: _SocketDeadlineWatchdog | None = None
 
     def connect(self) -> None:
         self.sock = socket.create_connection(
             (self._pinned_address, self.port), self.timeout, self.source_address
         )
+        self.deadline_watchdog = _SocketDeadlineWatchdog(
+            self.sock, self._operation_deadline
+        )
+        self.deadline_watchdog.start()
 
 
 class _PinnedHTTPSConnection(http.client.HTTPSConnection):
@@ -107,16 +136,67 @@ class _PinnedHTTPSConnection(http.client.HTTPSConnection):
             context=ssl.create_default_context(),
         )
         self._pinned_address = address
+        self._operation_deadline = time.monotonic() + timeout
+        self.deadline_watchdog: _SocketDeadlineWatchdog | None = None
 
     def connect(self) -> None:
         raw_socket = socket.create_connection(
             (self._pinned_address, self.port), self.timeout, self.source_address
         )
+        self.deadline_watchdog = _SocketDeadlineWatchdog(
+            raw_socket, self._operation_deadline
+        )
+        self.deadline_watchdog.start()
         try:
             self.sock = self._context.wrap_socket(raw_socket, server_hostname=self.host)
+            self.deadline_watchdog.replace_socket(self.sock)
         except BaseException:
+            self.deadline_watchdog.cancel()
             raw_socket.close()
             raise
+
+
+def _abort_socket(peer_socket: socket.socket) -> None:
+    try:
+        peer_socket.shutdown(socket.SHUT_RDWR)
+    except OSError:
+        pass
+    try:
+        peer_socket.close()
+    except OSError:
+        pass
+
+
+class _SocketDeadlineWatchdog:
+    """Actively abort one connected socket when its wall-clock deadline passes."""
+
+    def __init__(self, peer_socket: socket.socket, deadline: float):
+        self._peer_socket = peer_socket
+        self._lock = threading.Lock()
+        self.expired = threading.Event()
+        self._timer = threading.Timer(
+            max(0.0, deadline - time.monotonic()), self._expire
+        )
+        self._timer.daemon = True
+
+    def start(self) -> None:
+        self._timer.start()
+
+    def replace_socket(self, peer_socket: socket.socket) -> None:
+        with self._lock:
+            self._peer_socket = peer_socket
+            expired = self.expired.is_set()
+        if expired:
+            _abort_socket(peer_socket)
+
+    def _expire(self) -> None:
+        with self._lock:
+            self.expired.set()
+            peer_socket = self._peer_socket
+        _abort_socket(peer_socket)
+
+    def cancel(self) -> None:
+        self._timer.cancel()
 
 
 class _ManagedResponse:
@@ -126,11 +206,13 @@ class _ManagedResponse:
         connection: http.client.HTTPConnection,
         peer_socket: socket.socket,
         peer_ip: str,
+        deadline_watchdog: _SocketDeadlineWatchdog,
     ):
         self._response = response
         self._connection = connection
         self._peer_socket = peer_socket
         self.peer_ip = peer_ip
+        self._deadline_watchdog = deadline_watchdog
         self.status = response.status
         self.reason = response.reason
 
@@ -143,11 +225,43 @@ class _ManagedResponse:
     def set_timeout(self, timeout: float) -> None:
         self._peer_socket.settimeout(timeout)
 
+    @property
+    def deadline_expired(self) -> bool:
+        return self._deadline_watchdog.expired.is_set()
+
     def close(self) -> None:
+        self._deadline_watchdog.cancel()
         try:
             self._response.close()
         finally:
             self._connection.close()
+
+
+def _is_public_address(
+    address: ipaddress.IPv4Address | ipaddress.IPv6Address,
+) -> bool:
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped:
+        return _is_public_address(address.ipv4_mapped)
+    if isinstance(address, ipaddress.IPv4Address):
+        if address in _IPV4_PROTOCOL_ASSIGNMENTS:
+            return address in _IPV4_PROTOCOL_GLOBAL_EXCEPTIONS
+    else:
+        if any(address in network for network in _IPV6_ALWAYS_NON_GLOBAL):
+            return False
+        if address in _IPV6_PROTOCOL_ASSIGNMENTS:
+            return any(
+                address in network
+                for network in _IPV6_PROTOCOL_GLOBAL_EXCEPTIONS
+            )
+    return (
+        address.is_global
+        and not address.is_loopback
+        and not address.is_private
+        and not address.is_link_local
+        and not address.is_multicast
+        and not address.is_reserved
+        and not address.is_unspecified
+    )
 
 
 def _require_public_address(value: str) -> None:
@@ -155,19 +269,51 @@ def _require_public_address(value: str) -> None:
         address = ipaddress.ip_address(value)
     except ValueError as exc:
         raise DownloadSecurityError("DNS returned an invalid address") from exc
-    if (
-        not address.is_global
-        or address.is_loopback
-        or address.is_private
-        or address.is_link_local
-        or address.is_multicast
-        or address.is_reserved
-        or address.is_unspecified
-    ):
+    if not _is_public_address(address):
         raise DownloadSecurityError("URL resolves to a non-public address")
 
 
-def _resolve_public_addresses(hostname: str, port: int) -> tuple[str, ...]:
+def _getaddrinfo_before_deadline(
+    hostname: str, port: int, deadline: float | None
+) -> list[tuple[object, ...]]:
+    if deadline is None:
+        return socket.getaddrinfo(hostname, port, type=socket.SOCK_STREAM)
+
+    result_queue: queue.Queue[tuple[bool, object]] = queue.Queue(maxsize=1)
+
+    def resolve() -> None:
+        try:
+            result: object = socket.getaddrinfo(
+                hostname, port, type=socket.SOCK_STREAM
+            )
+            item = (True, result)
+        except Exception as exc:
+            item = (False, exc)
+        try:
+            result_queue.put_nowait(item)
+        except queue.Full:
+            pass
+
+    _remaining_timeout(deadline)
+    worker = threading.Thread(
+        target=resolve,
+        name="public-download-resolver",
+        daemon=True,
+    )
+    worker.start()
+    try:
+        succeeded, value = result_queue.get(timeout=_remaining_timeout(deadline))
+    except queue.Empty as exc:
+        raise DownloadTimeout("Download timed out during DNS resolution") from exc
+    _remaining_timeout(deadline)
+    if succeeded:
+        return value  # type: ignore[return-value]
+    raise value  # type: ignore[misc]
+
+
+def _resolve_public_addresses(
+    hostname: str, port: int, deadline: float | None = None
+) -> tuple[str, ...]:
     try:
         literal = ipaddress.ip_address(hostname)
     except ValueError:
@@ -176,7 +322,7 @@ def _resolve_public_addresses(hostname: str, port: int) -> tuple[str, ...]:
         _require_public_address(str(literal))
         return (str(literal),)
     try:
-        results = socket.getaddrinfo(hostname, port, type=socket.SOCK_STREAM)
+        results = _getaddrinfo_before_deadline(hostname, port, deadline)
     except (OSError, UnicodeError) as exc:
         raise DownloadSecurityError("URL host could not be resolved") from exc
     addresses = tuple(dict.fromkeys(result[4][0] for result in results))
@@ -187,7 +333,9 @@ def _resolve_public_addresses(hostname: str, port: int) -> tuple[str, ...]:
     return addresses
 
 
-def _validated_target(url: str) -> tuple[str, int, tuple[str, ...]]:
+def _validated_target(
+    url: str, deadline: float | None = None
+) -> tuple[str, int, tuple[str, ...]]:
     try:
         parsed = urlsplit(url)
         hostname = parsed.hostname
@@ -201,7 +349,11 @@ def _validated_target(url: str) -> tuple[str, int, tuple[str, ...]]:
     if parsed.username is not None or parsed.password is not None:
         raise DownloadSecurityError("URL userinfo is not allowed")
     effective_port = port or (443 if parsed.scheme.lower() == "https" else 80)
-    return hostname, effective_port, _resolve_public_addresses(hostname, effective_port)
+    return (
+        hostname,
+        effective_port,
+        _resolve_public_addresses(hostname, effective_port, deadline),
+    )
 
 
 def validate_public_url(url: str) -> None:
@@ -246,7 +398,18 @@ def _open_pinned_request(
         connection = connection_class(
             hostname, port, address, _remaining_timeout(deadline)
         )
+        connection._operation_deadline = deadline
+        response = None
+        watchdog = None
         try:
+            connection.connect()
+            if connection.sock is None:
+                raise OSError("connection has no peer socket")
+            peer_socket = connection.sock
+            watchdog = getattr(connection, "deadline_watchdog", None)
+            if watchdog is None:
+                watchdog = _SocketDeadlineWatchdog(peer_socket, deadline)
+                watchdog.start()
             connection.request(
                 "GET",
                 _request_path(url),
@@ -256,14 +419,34 @@ def _open_pinned_request(
                     "User-Agent": "shengxue-skill-downloader/0.1",
                 },
             )
-            if connection.sock is None:
-                raise OSError("connection has no peer socket")
-            peer_socket = connection.sock
             peer_ip = peer_socket.getpeername()[0]
             response = connection.getresponse()
-            return _ManagedResponse(response, connection, peer_socket, peer_ip)
-        except (OSError, http.client.HTTPException) as exc:
+            _remaining_timeout(deadline)
+            return _ManagedResponse(
+                response,
+                connection,
+                peer_socket,
+                peer_ip,
+                watchdog,
+            )
+        except DownloadTimeout:
+            if response is not None:
+                response.close()
+            if watchdog is not None:
+                watchdog.cancel()
             connection.close()
+            raise
+        except (OSError, http.client.HTTPException) as exc:
+            expired = (
+                watchdog is not None and watchdog.expired.is_set()
+            ) or time.monotonic() >= deadline
+            if response is not None:
+                response.close()
+            if watchdog is not None:
+                watchdog.cancel()
+            connection.close()
+            if expired:
+                raise DownloadTimeout("Download timed out") from exc
             last_error = exc
     if isinstance(last_error, socket.timeout):
         raise DownloadTimeout("Download timed out") from last_error
@@ -288,11 +471,14 @@ def download_public_file(
     current_url = url
     redirects_followed = 0
     while True:
-        _, _, addresses = _validated_target(current_url)
+        _remaining_timeout(deadline)
+        _, _, addresses = _validated_target(current_url, deadline)
+        _remaining_timeout(deadline)
         response = _open_pinned_request(
             current_url, addresses, _remaining_timeout(deadline)
         )
         try:
+            _remaining_timeout(deadline)
             _require_public_address(response.peer_ip)
             resolved = {ipaddress.ip_address(address) for address in addresses}
             if ipaddress.ip_address(response.peer_ip) not in resolved:
@@ -395,16 +581,20 @@ def _stream_to_workspace(
         ) as temporary:
             temporary_path = Path(temporary.name)
             while True:
-                remaining = _remaining_timeout(deadline)
-                set_timeout = getattr(response, "set_timeout", None)
-                if set_timeout is not None:
-                    set_timeout(remaining)
                 try:
+                    remaining = _remaining_timeout(deadline)
+                    set_timeout = getattr(response, "set_timeout", None)
+                    if set_timeout is not None:
+                        set_timeout(remaining)
                     chunk = response.read(64 * 1024)
                 except socket.timeout as exc:
                     raise DownloadTimeout("Download timed out") from exc
                 except (OSError, http.client.HTTPException) as exc:
+                    expired = getattr(response, "deadline_expired", False)
+                    if expired or time.monotonic() >= deadline:
+                        raise DownloadTimeout("Download timed out") from exc
                     raise DownloadNetworkError("Response stream failed") from exc
+                _remaining_timeout(deadline)
                 if not chunk:
                     break
                 total += len(chunk)
@@ -413,6 +603,7 @@ def _stream_to_workspace(
                 temporary.write(chunk)
             temporary.flush()
             os.fsync(temporary.fileno())
+        _remaining_timeout(deadline)
         os.replace(temporary_path, destination)
         temporary_path = None
     except DownloadError:
