@@ -137,6 +137,18 @@ class _EntryIdentity:
             info = os.lstat(path)
         except OSError as error:
             raise EvidencePathError("Evidence artifact changed during operation") from error
+        return cls.from_info(info)
+
+    @classmethod
+    def capture_at(cls, directory_fd: int, name: str) -> "_EntryIdentity":
+        try:
+            info = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        except OSError as error:
+            raise EvidencePathError("Evidence artifact changed during operation") from error
+        return cls.from_info(info)
+
+    @classmethod
+    def from_info(cls, info: os.stat_result) -> "_EntryIdentity":
         return cls(info.st_dev, info.st_ino, getattr(info, "st_file_attributes", 0), info.st_mode)
 
     def matches(self, path: Path, *, directory: bool) -> bool:
@@ -144,6 +156,9 @@ class _EntryIdentity:
             info = os.lstat(path)
         except OSError:
             return False
+        return self.matches_info(info, directory=directory)
+
+    def matches_info(self, info: os.stat_result, *, directory: bool) -> bool:
         expected_type = stat.S_ISDIR(info.st_mode) if directory else stat.S_ISREG(info.st_mode)
         return (
             expected_type
@@ -315,7 +330,11 @@ class EvidenceStore:
                 return source_dir.path
             except OSError as error:
                 raise EvidencePathError("Raw storage path could not be created") from error
-            source_identity = _EntryIdentity.capture(source_path)
+            source_identity = (
+                _EntryIdentity.capture_at(raw_fd, source_id)
+                if raw_fd is not None
+                else _EntryIdentity.capture(source_path)
+            )
             self._run_hook("after-raw-mkdir-before-postcheck")
             self._verify_layout()
             self._raw_dir.verify()
@@ -404,13 +423,44 @@ class EvidenceStore:
         raw_fd: int | None,
     ) -> None:
         if raw_fd is not None:
-            try:
-                os.rmdir(source_id, dir_fd=raw_fd)
-            except OSError:
-                pass
+            if identity is not None:
+                self._remove_entry_by_identity_fd(raw_fd, identity, directory=True)
             return
         if identity is not None:
             self._remove_exact_entry(self._raw_dir.path / source_id, identity, directory=True)
+
+    @staticmethod
+    def _remove_entry_by_identity_fd(
+        directory_fd: int,
+        identity: _EntryIdentity,
+        *,
+        directory: bool,
+    ) -> None:
+        """Delete only the entry whose lstat identity matches a created object."""
+
+        try:
+            names = os.listdir(directory_fd)
+        except OSError:
+            return
+        for name in names:
+            try:
+                info = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            except OSError:
+                continue
+            if not identity.matches_info(info, directory=directory):
+                continue
+            try:
+                # Re-stat immediately before removal so a reused name survives.
+                current = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                if not identity.matches_info(current, directory=directory):
+                    return
+                if directory:
+                    os.rmdir(name, dir_fd=directory_fd)
+                else:
+                    os.unlink(name, dir_fd=directory_fd)
+            except OSError:
+                pass
+            return
 
     def _remove_exact_entry(self, preferred: Path, identity: _EntryIdentity, *, directory: bool) -> None:
         candidates = [preferred]
@@ -488,10 +538,14 @@ class EvidenceStore:
             self._verify_layout()
             parent.verify()
             self._verify_temporary(temporary_path, parent)
-            if directory_fd is not None:
-                os.replace(temporary_name, destination_name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
-            else:
-                os.replace(temporary_path, parent.path / destination_name)
+            self._run_hook(f"after-final-precheck-before-replace:{relative_name}")
+            try:
+                if directory_fd is not None:
+                    os.replace(temporary_name, destination_name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+                else:
+                    os.replace(temporary_path, parent.path / destination_name)
+            except OSError as error:
+                raise EvidencePathError("Evidence artifact could not be published safely") from error
             replaced = True
             self._run_hook(f"after-replace-before-postcheck:{relative_name}")
             self._verify_layout()
@@ -505,15 +559,20 @@ class EvidenceStore:
                 os.close(descriptor)
             if directory_fd is not None:
                 if not published:
-                    try:
-                        os.unlink(destination_name if replaced else temporary_name, dir_fd=directory_fd)
-                    except FileNotFoundError:
-                        pass
+                    if temporary_identity is not None:
+                        self._remove_entry_by_identity_fd(
+                            directory_fd,
+                            temporary_identity,
+                            directory=False,
+                        )
                 os.close(directory_fd)
             elif not published:
-                if replaced:
-                    if temporary_identity is not None:
-                        self._remove_exact_entry(parent.path / destination_name, temporary_identity, directory=False)
+                if temporary_identity is not None:
+                    self._remove_exact_entry(
+                        parent.path / (destination_name if replaced else temporary_name),
+                        temporary_identity,
+                        directory=False,
+                    )
                 else:
                     self._remove_temporary_if_still_safe(temporary_path, parent)
 

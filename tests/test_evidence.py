@@ -294,6 +294,43 @@ class EvidenceStoreTest(unittest.TestCase):
         self.assertTrue(moved_raw.is_dir())
         self.assertFalse((moved_raw / "s1").exists())
 
+    def test_raw_path_preserves_replacement_name_when_posix_cleanup_runs(self):
+        if os.name == "nt":
+            self.skipTest("requires POSIX dir_fd cleanup")
+        store = EvidenceStore.create(self.root, self.report)
+        store.add_candidate(self.candidate("s1"))
+        raw = store.session_path / "raw"
+        moved_raw = self.root / "moved-raw"
+
+        def replace_source_name(stage):
+            if stage != "after-raw-mkdir-before-postcheck":
+                return
+            raw.rename(moved_raw)
+            (moved_raw / "s1").rename(moved_raw / "owned-created")
+            (moved_raw / "s1").mkdir()
+
+        store._operation_hook = replace_source_name
+        with self.assertRaises(EvidencePathError):
+            store.raw_path_for("s1")
+        self.assertFalse((moved_raw / "owned-created").exists())
+        self.assertTrue((moved_raw / "s1").is_dir())
+
+    def test_raw_path_rejects_move_after_final_precheck_before_mkdir(self):
+        store = EvidenceStore.create(self.root, self.report)
+        store.add_candidate(self.candidate("s1"))
+        raw = store.session_path / "raw"
+        moved_raw = self.root / "moved-raw"
+
+        def move_raw(stage):
+            if stage == "after-raw-precheck-before-mkdir":
+                raw.rename(moved_raw)
+
+        store._operation_hook = move_raw
+        with self.assertRaises(EvidencePathError):
+            store.raw_path_for("s1")
+        self.assertTrue(moved_raw.is_dir())
+        self.assertFalse((moved_raw / "s1").exists())
+
     def test_finalize_rejects_normalized_directory_swap_before_write(self):
         store = EvidenceStore.create(self.root, self.report)
         store.add_candidate(self.candidate("s1"))
@@ -356,6 +393,44 @@ class EvidenceStoreTest(unittest.TestCase):
         self.assertTrue(moved_session.is_dir())
         self.assertFalse((moved_session / "manifest.json").exists())
 
+    def test_finalize_preserves_replacement_manifest_when_posix_cleanup_runs(self):
+        if os.name == "nt":
+            self.skipTest("requires POSIX dir_fd cleanup")
+        store = EvidenceStore.create(self.root, self.report)
+        store.add_candidate(self.candidate("s1"))
+        moved_session = self.root / "moved-session"
+
+        def replace_manifest_name(stage):
+            if stage != "after-replace-before-postcheck:manifest.json":
+                return
+            store.session_path.rename(moved_session)
+            (moved_session / "manifest.json").rename(moved_session / "owned-created")
+            (moved_session / "manifest.json").write_text("unrelated", encoding="utf-8")
+
+        store._operation_hook = replace_manifest_name
+        with self.assertRaises(EvidencePathError):
+            store.finalize()
+        self.assertFalse((moved_session / "owned-created").exists())
+        self.assertEqual((moved_session / "manifest.json").read_text("utf-8"), "unrelated")
+        self.assertIsNone(store._manifest)
+
+    def test_finalize_rejects_move_after_final_precheck_before_replace(self):
+        store = EvidenceStore.create(self.root, self.report)
+        store.add_candidate(self.candidate("s1"))
+        moved_session = self.root / "moved-session"
+
+        def move_session(stage):
+            if stage == "after-final-precheck-before-replace:manifest.json":
+                store.session_path.rename(moved_session)
+
+        store._operation_hook = move_session
+        with self.assertRaises(EvidencePathError):
+            store.finalize()
+        self.assertTrue(moved_session.is_dir())
+        self.assertFalse((moved_session / "manifest.json").exists())
+        self.assertFalse(list(moved_session.glob(".manifest.json.*.tmp")))
+        self.assertIsNone(store._manifest)
+
     def test_writes_after_finalize_fail_closed(self):
         store = EvidenceStore.create(self.root, self.report)
         store.add_candidate(self.candidate("s1"))
@@ -381,7 +456,7 @@ class EvidenceStoreTest(unittest.TestCase):
             return real_replace(source, destination)
 
         with patch("scripts.evidence.os.replace", side_effect=fail_manifest_replace):
-            with self.assertRaises(OSError):
+            with self.assertRaises(EvidencePathError):
                 store.finalize()
 
         self.assertFalse((store.session_path / "manifest.json").exists())
