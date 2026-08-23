@@ -32,14 +32,12 @@ def _default_module_probe(module_name: str) -> bool:
     """Return whether *module_name* has an import spec.
 
     ``find_spec`` intentionally checks availability without importing or
-    executing the optional package.  The exception handling also makes the
-    probe safe for a malformed or partially installed distribution.
+    executing the optional package.  Exceptions are handled by
+    ``detect_capabilities`` so the report can identify the affected module
+    and exception type without exposing the exception message.
     """
 
-    try:
-        return importlib.util.find_spec(module_name) is not None
-    except (ImportError, AttributeError, ValueError):
-        return False
+    return importlib.util.find_spec(module_name) is not None
 
 
 def _python_version() -> tuple[str, bool]:
@@ -53,13 +51,29 @@ def _python_version() -> tuple[str, bool]:
 
 
 def _degradation_messages(
-    missing: Iterable[str], *, offline: bool, unsupported_python: bool
+    missing: Iterable[str],
+    *,
+    offline: bool,
+    unsupported_python: bool,
+    probe_failures: Iterable[tuple[str, str]],
 ) -> tuple[str, ...]:
-    messages = [f"missing capability: {name}" for name in sorted(missing)]
+    missing_names = tuple(sorted(set(missing)))
+    messages = [f"missing capability: {name}" for name in missing_names]
     if offline:
-        messages.append("offline mode: search and browse are unavailable")
+        missing_network = tuple(
+            name for name in ("search", "browse") if name in missing_names
+        )
+        if missing_network:
+            messages.append(
+                "offline mode: missing network capabilities: "
+                + ", ".join(missing_network)
+            )
     if unsupported_python:
         messages.append("python<3.10: runtime is below the supported minimum")
+    messages.extend(
+        f"module probe failed: {module} ({exception_type})"
+        for module, exception_type in sorted(probe_failures)
+    )
     return tuple(messages)
 
 
@@ -81,12 +95,24 @@ def detect_capabilities(
     declared = {name for name in host_capabilities if name in HOST_CAPABILITIES}
     host = tuple(sorted(declared))
 
-    available_modules = tuple(
-        sorted(name for name in OPTIONAL_MODULES if bool(probe(name)))
-    )
-    missing_modules = tuple(
-        sorted(name for name in OPTIONAL_MODULES if name not in available_modules)
-    )
+    available_module_names = []
+    missing_module_names = []
+    probe_failures = []
+    for name in OPTIONAL_MODULES:
+        try:
+            available = bool(probe(name))
+        except Exception as exc:
+            # A broken finder/package must degrade only that module.  Do not
+            # catch BaseException: KeyboardInterrupt and SystemExit remain
+            # process-control signals rather than capability results.
+            available = False
+            probe_failures.append((name, type(exc).__name__))
+        if available:
+            available_module_names.append(name)
+        else:
+            missing_module_names.append(name)
+    available_modules = tuple(sorted(available_module_names))
+    missing_modules = tuple(sorted(missing_module_names))
     missing_host = tuple(sorted(set(HOST_CAPABILITIES) - declared))
     missing = tuple(sorted((*missing_host, *missing_modules)))
     python_version, supported_python = _python_version()
@@ -107,6 +133,7 @@ def detect_capabilities(
         missing,
         offline=tier is CapabilityTier.OFFLINE,
         unsupported_python=not supported_python,
+        probe_failures=probe_failures,
     )
     return CapabilityReport(
         tier=tier,
