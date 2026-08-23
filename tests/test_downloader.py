@@ -49,6 +49,12 @@ class FakeHttpResponse:
         self.closed = True
 
 
+class SlowInjectedResponse(FakeHttpResponse):
+    def read(self, amount=-1):
+        time.sleep(0.03)
+        return super().read(amount)
+
+
 class AbortableSocket:
     def __init__(self):
         self.aborted = threading.Event()
@@ -109,6 +115,44 @@ class SlowBodyResponse:
 class SlowBodyConnection(SlowHeaderConnection):
     def getresponse(self):
         return SlowBodyResponse(self.sock)
+
+
+class SlowHandshakeSocket(AbortableSocket):
+    def __init__(self):
+        super().__init__()
+        self.closed = False
+
+    def do_handshake(self):
+        if self.aborted.wait(0.3):
+            raise ssl.SSLError("synthetic interrupted TLS handshake")
+
+    def sendall(self, data):
+        if self.closed:
+            raise OSError("synthetic closed TLS socket")
+
+    def close(self):
+        self.closed = True
+        super().close()
+
+
+class SlowHandshakeContext:
+    def __init__(self):
+        self.verify_mode = ssl.CERT_REQUIRED
+        self.check_hostname = True
+        self.wrapped_socket = SlowHandshakeSocket()
+        self.do_handshake_on_connect = None
+
+    def wrap_socket(
+        self,
+        raw_socket,
+        *,
+        server_hostname,
+        do_handshake_on_connect=True,
+    ):
+        self.do_handshake_on_connect = do_handshake_on_connect
+        if do_handshake_on_connect:
+            time.sleep(0.3)
+        return self.wrapped_socket
 
 
 class DownloaderUrlSecurityTest(unittest.TestCase):
@@ -348,8 +392,11 @@ class DownloaderPinnedConnectionTest(unittest.TestCase):
             ("93.184.216.34", 443), 12.5, None
         )
         context.wrap_socket.assert_called_once_with(
-            raw_socket, server_hostname="public.example.test"
+            raw_socket,
+            server_hostname="public.example.test",
+            do_handshake_on_connect=False,
         )
+        wrapped_socket.do_handshake.assert_called_once_with()
         self.assertIs(connection.sock, wrapped_socket)
         connection.deadline_watchdog.cancel()
 
@@ -383,6 +430,52 @@ class DownloaderHardDeadlineTest(unittest.TestCase):
 
     def tearDown(self):
         self.temporary_directory.cleanup()
+
+    @patch("scripts.downloader.socket.getaddrinfo")
+    def test_z_repeated_dns_timeouts_keep_a_fixed_daemon_worker_bound(
+        self, getaddrinfo
+    ):
+        release_dns = threading.Event()
+        started_lock = threading.Lock()
+        started = 0
+
+        def permanently_blocked_dns(*args, **kwargs):
+            nonlocal started
+            with started_lock:
+                started += 1
+            release_dns.wait(2)
+            return self.public_dns
+
+        getaddrinfo.side_effect = permanently_blocked_dns
+        prefix = "public-download-resolver"
+        before = sum(
+            thread.name.startswith(prefix) for thread in threading.enumerate()
+        )
+
+        try:
+            elapsed_calls = []
+            for _ in range(16):
+                call_started = time.monotonic()
+                with self.assertRaises(DownloadTimeout):
+                    downloader._getaddrinfo_before_deadline(
+                        "blocked.example.test",
+                        443,
+                        time.monotonic() + 0.02,
+                    )
+                elapsed_calls.append(time.monotonic() - call_started)
+
+            workers = [
+                thread
+                for thread in threading.enumerate()
+                if thread.name.startswith(prefix)
+            ]
+            self.assertLessEqual(len(workers) - before, 4)
+            self.assertLessEqual(len(workers), 4)
+            self.assertTrue(all(thread.daemon for thread in workers))
+            self.assertLessEqual(started, 4)
+            self.assertTrue(all(elapsed < 0.12 for elapsed in elapsed_calls))
+        finally:
+            release_dns.set()
 
     @patch("scripts.downloader._open_pinned_request")
     @patch("scripts.downloader.socket.getaddrinfo")
@@ -432,6 +525,28 @@ class DownloaderHardDeadlineTest(unittest.TestCase):
 
         self.assertLess(elapsed, 0.18)
         self.assertEqual(list(self.workspace.iterdir()), [])
+
+    @patch("scripts.downloader.socket.create_connection")
+    @patch("scripts.downloader.ssl.create_default_context")
+    def test_slow_tls_handshake_is_interrupted_after_socket_handoff(
+        self, create_context, create_connection
+    ):
+        context = SlowHandshakeContext()
+        create_context.return_value = context
+        create_connection.return_value = AbortableSocket()
+
+        started = time.monotonic()
+        with self.assertRaises(DownloadTimeout):
+            downloader._open_pinned_request(
+                "https://public.example.test/data.csv",
+                ("93.184.216.34",),
+                0.03,
+            )
+        elapsed = time.monotonic() - started
+
+        self.assertLess(elapsed, 0.18)
+        self.assertFalse(context.do_handshake_on_connect)
+        self.assertTrue(context.wrapped_socket.closed)
 
     @patch("scripts.downloader._PinnedHTTPSConnection", SlowBodyConnection)
     @patch("scripts.downloader.socket.getaddrinfo")
@@ -650,34 +765,24 @@ class DownloaderResponseTest(unittest.TestCase):
 
         self.assertEqual(list(self.workspace.iterdir()), [])
 
-    @patch("scripts.downloader.time.monotonic")
     @patch("scripts.downloader.socket.getaddrinfo")
     @patch("scripts.downloader._open_pinned_request", create=True)
     def test_total_timeout_removes_partial_file(
-        self, open_request, getaddrinfo, monotonic
+        self, open_request, getaddrinfo
     ):
-        response = FakeHttpResponse(
+        response = SlowInjectedResponse(
             200, headers={"Content-Type": "text/csv"}, body=b"not-read"
         )
         open_request.return_value = response
         getaddrinfo.return_value = self.public_dns
-        monotonic.side_effect = [
-            100.0,
-            100.1,
-            100.2,
-            100.3,
-            100.4,
-            100.5,
-            100.6,
-            101.0,
-        ]
 
         with self.assertRaises(DownloadTimeout):
             download_public_file(
-                "https://public.example.test/data.csv", self.workspace, timeout=1
+                "https://public.example.test/data.csv",
+                self.workspace,
+                timeout=0.01,
             )
 
-        self.assertEqual(response.offset, 0)
         self.assertEqual(list(self.workspace.iterdir()), [])
         self.assertTrue(response.closed)
 

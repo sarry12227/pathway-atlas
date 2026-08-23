@@ -148,11 +148,19 @@ class _PinnedHTTPSConnection(http.client.HTTPSConnection):
         )
         self.deadline_watchdog.start()
         try:
-            self.sock = self._context.wrap_socket(raw_socket, server_hostname=self.host)
+            self.sock = self._context.wrap_socket(
+                raw_socket,
+                server_hostname=self.host,
+                do_handshake_on_connect=False,
+            )
             self.deadline_watchdog.replace_socket(self.sock)
+            self.sock.do_handshake()
         except BaseException:
             self.deadline_watchdog.cancel()
-            raw_socket.close()
+            if self.sock is None:
+                raw_socket.close()
+            else:
+                self.sock.close()
             raise
 
 
@@ -273,42 +281,110 @@ def _require_public_address(value: str) -> None:
         raise DownloadSecurityError("URL resolves to a non-public address")
 
 
+@dataclass
+class _ResolverJob:
+    hostname: str
+    port: int
+    deadline: float
+    result_queue: queue.Queue[tuple[bool, object]]
+    cancelled: threading.Event
+
+
+class _ResolverService:
+    """Fixed-size daemon resolver pool with a bounded pending-job queue."""
+
+    def __init__(self, worker_count: int = 4, queue_capacity: int = 8):
+        self._worker_count = worker_count
+        self._jobs: queue.Queue[_ResolverJob] = queue.Queue(
+            maxsize=queue_capacity
+        )
+        self._start_lock = threading.Lock()
+        self._started = False
+
+    def resolve(
+        self, hostname: str, port: int, deadline: float
+    ) -> list[tuple[object, ...]]:
+        _remaining_timeout(deadline)
+        self._ensure_started()
+        job = _ResolverJob(
+            hostname=hostname,
+            port=port,
+            deadline=deadline,
+            result_queue=queue.Queue(maxsize=1),
+            cancelled=threading.Event(),
+        )
+        try:
+            self._jobs.put(job, timeout=_remaining_timeout(deadline))
+        except queue.Full as exc:
+            job.cancelled.set()
+            raise DownloadTimeout(
+                "Download timed out waiting for DNS capacity"
+            ) from exc
+        try:
+            succeeded, value = job.result_queue.get(
+                timeout=_remaining_timeout(deadline)
+            )
+        except queue.Empty as exc:
+            job.cancelled.set()
+            raise DownloadTimeout("Download timed out during DNS resolution") from exc
+        try:
+            _remaining_timeout(deadline)
+        except DownloadTimeout:
+            job.cancelled.set()
+            raise
+        if succeeded:
+            return value  # type: ignore[return-value]
+        raise value  # type: ignore[misc]
+
+    def _ensure_started(self) -> None:
+        if self._started:
+            return
+        with self._start_lock:
+            if self._started:
+                return
+            for index in range(self._worker_count):
+                worker = threading.Thread(
+                    target=self._work,
+                    name=f"public-download-resolver-{index}",
+                    daemon=True,
+                )
+                worker.start()
+            self._started = True
+
+    def _work(self) -> None:
+        while True:
+            job = self._jobs.get()
+            try:
+                if job.cancelled.is_set() or time.monotonic() >= job.deadline:
+                    continue
+                try:
+                    value: object = socket.getaddrinfo(
+                        job.hostname,
+                        job.port,
+                        type=socket.SOCK_STREAM,
+                    )
+                    result = (True, value)
+                except Exception as exc:
+                    result = (False, exc)
+                if job.cancelled.is_set() or time.monotonic() >= job.deadline:
+                    continue
+                try:
+                    job.result_queue.put_nowait(result)
+                except queue.Full:
+                    pass
+            finally:
+                self._jobs.task_done()
+
+
+_RESOLVER_SERVICE = _ResolverService()
+
+
 def _getaddrinfo_before_deadline(
     hostname: str, port: int, deadline: float | None
 ) -> list[tuple[object, ...]]:
     if deadline is None:
         return socket.getaddrinfo(hostname, port, type=socket.SOCK_STREAM)
-
-    result_queue: queue.Queue[tuple[bool, object]] = queue.Queue(maxsize=1)
-
-    def resolve() -> None:
-        try:
-            result: object = socket.getaddrinfo(
-                hostname, port, type=socket.SOCK_STREAM
-            )
-            item = (True, result)
-        except Exception as exc:
-            item = (False, exc)
-        try:
-            result_queue.put_nowait(item)
-        except queue.Full:
-            pass
-
-    _remaining_timeout(deadline)
-    worker = threading.Thread(
-        target=resolve,
-        name="public-download-resolver",
-        daemon=True,
-    )
-    worker.start()
-    try:
-        succeeded, value = result_queue.get(timeout=_remaining_timeout(deadline))
-    except queue.Empty as exc:
-        raise DownloadTimeout("Download timed out during DNS resolution") from exc
-    _remaining_timeout(deadline)
-    if succeeded:
-        return value  # type: ignore[return-value]
-    raise value  # type: ignore[misc]
+    return _RESOLVER_SERVICE.resolve(hostname, port, deadline)
 
 
 def _resolve_public_addresses(
