@@ -449,11 +449,22 @@ class EvidenceStoreTest(unittest.TestCase):
         store = EvidenceStore.create(self.root, self.report)
         store.add_candidate(self.candidate("s1"))
         real_replace = os.replace
+        seen_replace_kwargs = []
 
-        def fail_manifest_replace(source, destination):
+        def fail_manifest_replace(source, destination, **kwargs):
+            seen_replace_kwargs.append(kwargs)
             if Path(destination).name == "manifest.json":
                 raise OSError("synthetic manifest rename failure")
-            return real_replace(source, destination)
+            return real_replace(source, destination, **kwargs)
+
+        with self.assertRaises(OSError):
+            fail_manifest_replace(
+                "temporary-name",
+                "manifest.json",
+                src_dir_fd=11,
+                dst_dir_fd=11,
+            )
+        self.assertEqual(seen_replace_kwargs, [{"src_dir_fd": 11, "dst_dir_fd": 11}])
 
         with patch("scripts.evidence.os.replace", side_effect=fail_manifest_replace):
             with self.assertRaises(EvidencePathError):
