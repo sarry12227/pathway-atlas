@@ -10,6 +10,7 @@ import json
 import os
 import stat
 import warnings
+from collections.abc import Callable
 from pathlib import Path
 
 try:
@@ -55,12 +56,23 @@ class DataError(Exception):
     """数据缺失/损坏的业务错误，message 必须指明缺哪份数据。"""
 
 
-def _read_csv_records(path: os.PathLike[str] | str) -> tuple[tuple[str, ...], list[dict[str, str]]]:
+def _read_csv_records(
+    path: os.PathLike[str] | str,
+    *,
+    _parent_identity: _DirectoryIdentity | None = None,
+    _operation_hook: Callable[[], None] | None = None,
+) -> tuple[tuple[str, ...], list[dict[str, str]]]:
     """Read one bounded, strict UTF-8 regular CSV without following links."""
 
     candidate = Path(path)
     try:
         absolute = Path(os.path.abspath(os.fspath(candidate)))
+        parent_identity = _parent_identity or _DirectoryIdentity.capture(
+            absolute.parent, "CSV 父目录"
+        )
+        if absolute.parent != parent_identity.path:
+            raise DataError(f"CSV 必须位于已验证父目录内：{absolute}")
+        parent_identity.verify("CSV 父目录")
         before = os.lstat(absolute)
         attributes = getattr(before, "st_file_attributes", 0)
         if (
@@ -73,14 +85,40 @@ def _read_csv_records(path: os.PathLike[str] | str) -> tuple[tuple[str, ...], li
         if before.st_size > MAX_CSV_BYTES:
             raise DataError(f"CSV 超过 {MAX_CSV_BYTES} 字节上限：{absolute}")
 
+        if _operation_hook is not None:
+            _operation_hook()
+        parent_identity.verify("CSV 父目录")
+
         flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
-        descriptor = os.open(absolute, flags)
+        directory_descriptor = None
+        descriptor = None
         try:
+            if os.open in os.supports_dir_fd and hasattr(os, "O_DIRECTORY"):
+                directory_descriptor = os.open(
+                    parent_identity.path,
+                    os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_CLOEXEC", 0),
+                )
+                opened_parent = os.fstat(directory_descriptor)
+                if (opened_parent.st_dev, opened_parent.st_ino) != (
+                    parent_identity.device,
+                    parent_identity.inode,
+                ):
+                    raise DataError(f"CSV 父目录在读取期间发生变化：{absolute.parent}")
+                descriptor = os.open(absolute.name, flags, dir_fd=directory_descriptor)
+            else:
+                descriptor = os.open(absolute, flags)
             opened = os.fstat(descriptor)
-            if (opened.st_dev, opened.st_ino, opened.st_size) != (
-                before.st_dev,
-                before.st_ino,
-                before.st_size,
+            opened_attributes = getattr(opened, "st_file_attributes", 0)
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or opened_attributes & _REPARSE_POINT
+                or (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns)
+                != (
+                    before.st_dev,
+                    before.st_ino,
+                    before.st_size,
+                    before.st_mtime_ns,
+                )
             ):
                 raise DataError(f"CSV 在读取期间发生变化：{absolute}")
             chunks: list[bytes] = []
@@ -94,14 +132,24 @@ def _read_csv_records(path: os.PathLike[str] | str) -> tuple[tuple[str, ...], li
                     raise DataError(f"CSV 超过 {MAX_CSV_BYTES} 字节上限：{absolute}")
                 chunks.append(chunk)
         finally:
-            os.close(descriptor)
+            if descriptor is not None:
+                os.close(descriptor)
+            if directory_descriptor is not None:
+                os.close(directory_descriptor)
 
+        parent_identity.verify("CSV 父目录")
         after = os.lstat(absolute)
+        after_attributes = getattr(after, "st_file_attributes", 0)
         if (
-            (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+            absolute.resolve(strict=True) != absolute
+            or not stat.S_ISREG(after.st_mode)
+            or stat.S_ISLNK(after.st_mode)
+            or after_attributes & _REPARSE_POINT
+            or (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
             != (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
         ):
             raise DataError(f"CSV 在读取期间发生变化：{absolute}")
+        parent_identity.verify("CSV 父目录")
         text = b"".join(chunks).decode("utf-8")
         reader = csv.reader(io.StringIO(text, newline=""), strict=True)
         try:

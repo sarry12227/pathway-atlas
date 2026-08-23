@@ -1,6 +1,7 @@
 import csv
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -9,6 +10,7 @@ from dataclasses import FrozenInstanceError
 from pathlib import Path
 
 from scripts.data_loader import DataError, load_admission_rows, load_toudang
+from scripts import validate_data as validator_module
 from scripts.validate_data import ValidationIssue, validate_dataset
 
 
@@ -171,6 +173,43 @@ class ValidationContractTest(unittest.TestCase):
                 self.skipTest(f"symlink unavailable: {error}")
             self.assertIn("unsafe_data_file", {item.code for item in validate_dataset(directory.resolve())})
 
+    def test_same_name_dataset_replacement_after_config_fails_closed(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            directory = root / "dataset"
+            moved = root / "authenticated-dataset"
+            shutil.copytree(FIXTURES / "demo-312", directory)
+
+            def replace_after_config():
+                directory.rename(moved)
+                directory.mkdir()
+                shutil.copy2(moved / "yifenyiduan.csv", directory / "yifenyiduan.csv")
+                shutil.copy2(moved / "tou_dang.csv", directory / "tou_dang.csv")
+
+            issues = validator_module._validate_dataset(
+                directory.resolve(), operation_hook=replace_after_config
+            )
+
+            self.assertEqual([item.code for item in issues], ["dataset_path_changed"])
+            self.assertNotIn("演示甲省", json.dumps([item.to_dict() for item in issues], ensure_ascii=False))
+
+    def test_same_name_csv_replacement_between_identity_check_and_open_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary) / "dataset"
+            shutil.copytree(FIXTURES / "demo-312", directory)
+            original = directory / "original-yifenyiduan.csv"
+
+            def replace_table(table, path):
+                if table == "yifenyiduan":
+                    path.rename(original)
+                    shutil.copy2(original, path)
+
+            issues = validator_module._validate_dataset(
+                directory.resolve(), table_operation_hook=replace_table
+            )
+
+            self.assertIn("data_file_changed", {item.code for item in issues})
+
 
 class AdmissionNormalizationTest(unittest.TestCase):
     def test_legacy_aliases_normalize_to_one_canonical_shape(self):
@@ -223,6 +262,40 @@ class AdmissionNormalizationTest(unittest.TestCase):
         duplicates = [item for item in issues if item.code == "duplicate_admission_key"]
         self.assertEqual([(item.row, item.field) for item in duplicates], [(5, None)])
 
+    def test_school_code_has_one_stable_name_per_province_and_year(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary) / "dataset"
+            directory.mkdir()
+            (directory / "province.json").write_text(
+                json.dumps(strict_metadata(), ensure_ascii=False), encoding="utf-8"
+            )
+            headers = (
+                "year", "province", "subject_group", "school_code", "school_name",
+                "program_group", "min_score", "min_rank", "remarks",
+            )
+            write_csv(
+                directory / "tou_dang.csv",
+                headers,
+                (
+                    (2026, "测试省", "物理", "A01", "虚构甲大学", "第01组", 600, 1000, ""),
+                    (2026, "测试省", "物理", "A02", "虚构甲大学", "第01组", 600, 1000, ""),
+                    (2027, "测试省", "物理", "A01", "虚构乙大学", "第01组", 600, 1000, ""),
+                    (2026, "测试省", "物理", "A01", "虚构甲大学", "第02组", 601, 999, ""),
+                    (2026, "测试省", "物理", "A01", "虚构甲大学", "第03组", 602, 998, "专项"),
+                    (2026, "测试省", "物理", "A01", "冲突名称", "第04组", 603, 997, ""),
+                ),
+            )
+
+            conflicts = [
+                item for item in validate_dataset(directory.resolve())
+                if item.code == "conflicting_school_identity"
+            ]
+
+            self.assertEqual([(item.row, item.field) for item in conflicts], [(7, "school_name")])
+            serialized = json.dumps([item.to_dict() for item in conflicts], ensure_ascii=False)
+            self.assertNotIn("A01", serialized)
+            self.assertNotIn("冲突名称", serialized)
+
 
 class ValidatorCliTest(unittest.TestCase):
     def run_cli(self, *args):
@@ -252,6 +325,31 @@ class ValidatorCliTest(unittest.TestCase):
         payload = json.loads(process.stdout)
         duplicate = next(item for item in payload["issues"] if item["code"] == "duplicate_admission_key")
         self.assertEqual(duplicate["row"], 5)
+
+    def test_conflicting_school_identity_exits_two_without_echoing_values(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary) / "dataset"
+            directory.mkdir()
+            (directory / "province.json").write_text(
+                json.dumps(strict_metadata(), ensure_ascii=False), encoding="utf-8"
+            )
+            write_csv(
+                directory / "tou_dang.csv",
+                ("year", "province", "subject_group", "school_code", "school_name", "program_group", "min_score", "min_rank", "remarks"),
+                (
+                    (2026, "测试省", "物理", "SECRET-CODE", "不应回显甲", "第01组", 600, 1000, ""),
+                    (2026, "测试省", "物理", "SECRET-CODE", "不应回显乙", "第02组", 601, 999, ""),
+                ),
+            )
+
+            process = self.run_cli(directory)
+
+            self.assertEqual(process.returncode, 2, process.stdout + process.stderr)
+            payload = json.loads(process.stdout)
+            conflict = next(item for item in payload["issues"] if item["code"] == "conflicting_school_identity")
+            self.assertEqual(conflict["row"], 3)
+            self.assertNotIn("SECRET-CODE", process.stdout)
+            self.assertNotIn("不应回显", process.stdout)
 
 
 if __name__ == "__main__":

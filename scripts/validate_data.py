@@ -7,6 +7,7 @@ import json
 import os
 import re
 import sys
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,8 @@ try:
     )
     from scripts.province_registry import (
         ProvinceConfig,
+        ProvinceConfigError,
+        ProvincePathError,
         ProvinceRegistryError,
         _DirectoryIdentity,
         _parse_config,
@@ -28,6 +31,8 @@ except ModuleNotFoundError:  # Direct ``python scripts/validate_data.py`` compat
     from data_loader import DataError, _normalize_admission_row, _read_csv_records  # type: ignore
     from province_registry import (  # type: ignore
         ProvinceConfig,
+        ProvinceConfigError,
+        ProvincePathError,
         ProvinceRegistryError,
         _DirectoryIdentity,
         _parse_config,
@@ -100,14 +105,26 @@ def _issue(
     return ValidationIssue(code, message, table, os.fspath(path), row, field)
 
 
-def _load_config(directory: Path) -> ProvinceConfig:
-    parent = _DirectoryIdentity.capture(directory.parent, "省份数据父目录")
-    child = _DirectoryIdentity.capture(directory, "省份数据目录")
+def _verify_dataset_identity(
+    parent: _DirectoryIdentity, child: _DirectoryIdentity
+) -> None:
+    parent.verify("省份数据父目录")
+    child.verify("省份数据目录")
+    if child.path.parent != parent.path:
+        raise ProvincePathError("省份数据目录在校验期间越出父目录")
+
+
+def _load_config(
+    parent: _DirectoryIdentity, child: _DirectoryIdentity
+) -> ProvinceConfig:
+    _verify_dataset_identity(parent, child)
     document = _read_metadata(parent, child)
     if document is None:
-        raise DataError(f"省份配置缺失：{directory / 'province.json'}")
+        raise DataError(f"省份配置缺失：{child.path / 'province.json'}")
     document.verify(parent)
-    return _parse_config(document.payload, child.path)
+    config = _parse_config(document.payload, child.path)
+    _verify_dataset_identity(parent, child)
+    return config
 
 
 def _canonical_headers(table: str, headers: tuple[str, ...]) -> set[str]:
@@ -146,17 +163,33 @@ def _integer(raw: str) -> int | None:
         return None
 
 
-def _validate_table(path: Path, table: str, config: ProvinceConfig) -> list[ValidationIssue]:
+def _validate_table(
+    path: Path,
+    table: str,
+    config: ProvinceConfig,
+    parent_identity: _DirectoryIdentity,
+    dataset_identity: _DirectoryIdentity,
+    operation_hook: Callable[[], None] | None = None,
+) -> list[ValidationIssue]:
     issues: list[ValidationIssue] = []
     rule = _KNOWN_TABLES[table]
+    _verify_dataset_identity(parent_identity, dataset_identity)
     try:
-        headers, rows = _read_csv_records(path)
+        headers, rows = _read_csv_records(
+            path,
+            _parent_identity=dataset_identity,
+            _operation_hook=operation_hook,
+        )
     except DataError as error:
+        _verify_dataset_identity(parent_identity, dataset_identity)
         text = str(error)
         code = "duplicate_header" if "重复字段" in text else "unsafe_data_file"
+        if "发生变化" in text:
+            code = "data_file_changed"
         if "格式损坏" in text or "严格 UTF-8" in text:
             code = "invalid_csv"
         return [_issue(code, f"文件级错误：{text}", table, path)]
+    _verify_dataset_identity(parent_identity, dataset_identity)
 
     if not headers or not rows:
         return [_issue("empty_file", "文件级错误：文件为空（无数据行）", table, path)]
@@ -174,6 +207,7 @@ def _validate_table(path: Path, table: str, config: ProvinceConfig) -> list[Vali
         ]
 
     seen: set[tuple[str, ...]] = set()
+    school_identities: dict[tuple[int, str, str], str] = {}
     valid_years: set[int] = set()
     for line, source_row in enumerate(rows, start=2):
         try:
@@ -217,6 +251,26 @@ def _validate_table(path: Path, table: str, config: ProvinceConfig) -> list[Vali
                 issues.append(_issue("invalid_subject_group", f"行{line}：subject_group 不符合省份考试模式", table, path, line, "subject_group"))
         if table == "tou_dang" and row.get("province", "").strip() != config.province:
             issues.append(_issue("province_mismatch", f"行{line}：province 与 province.json 不一致", table, path, line, "province"))
+        if table == "tou_dang" and year is not None:
+            province = row.get("province", "").strip()
+            school_code = row.get("school_code", "").strip()
+            school_name = row.get("school_name", "").strip()
+            if province and school_code and school_name:
+                identity_key = (year, province, school_code)
+                existing_name = school_identities.get(identity_key)
+                if existing_name is None:
+                    school_identities[identity_key] = school_name
+                elif existing_name != school_name:
+                    issues.append(
+                        _issue(
+                            "conflicting_school_identity",
+                            f"行{line}：同一年度、省份和院校代码对应多个院校名称",
+                            table,
+                            path,
+                            line,
+                            "school_name",
+                        )
+                    )
 
         unique_fields = rule.get("unique")
         if unique_fields:
@@ -235,38 +289,79 @@ def _validate_table(path: Path, table: str, config: ProvinceConfig) -> list[Vali
 
     if "year" in rule["integers"] and not valid_years:
         issues.append(_issue("missing_year_coverage", "文件级错误：没有 2000..2100 内的有效年份覆盖", table, path))
+    _verify_dataset_identity(parent_identity, dataset_identity)
     return issues
 
 
 def validate_dataset(province_dir: os.PathLike[str] | str) -> list[ValidationIssue]:
     """Return a sorted issue list; malformed user data never escapes as a parser error."""
 
+    return _validate_dataset(province_dir)
+
+
+def _validate_dataset(
+    province_dir: os.PathLike[str] | str,
+    *,
+    operation_hook: Callable[[], None] | None = None,
+    table_operation_hook: Callable[[str, Path], None] | None = None,
+) -> list[ValidationIssue]:
+    """Internal implementation with deterministic filesystem race-test seams."""
+
     try:
         candidate = Path(province_dir)
         normalized = Path(os.path.abspath(os.fspath(candidate)))
         if not candidate.is_absolute() or candidate != normalized:
             return [_issue("unsafe_dataset_path", "数据目录必须是已解析的绝对规范路径", "dataset", normalized)]
-        directory = _DirectoryIdentity.capture(candidate, "省份数据目录").path
-        config = _load_config(directory)
-    except (DataError, ProvinceRegistryError, OSError, RuntimeError, TypeError, ValueError) as error:
+        parent_identity = _DirectoryIdentity.capture(normalized.parent, "省份数据父目录")
+        dataset_identity = _DirectoryIdentity.capture(normalized, "省份数据目录")
+        _verify_dataset_identity(parent_identity, dataset_identity)
+        config = _load_config(parent_identity, dataset_identity)
+    except ProvincePathError:
+        return [_issue("dataset_path_changed", "省份数据目录在校验期间发生变化", "dataset", normalized)]
+    except (DataError, ProvinceConfigError, ProvinceRegistryError, OSError, RuntimeError, TypeError, ValueError):
         path = Path(os.path.abspath(os.fspath(province_dir))) if isinstance(province_dir, (str, os.PathLike)) else Path(".").resolve()
         return [_issue("invalid_province_config", "province.json 未通过严格配置校验", "province", path / "province.json")]
 
+    directory = dataset_identity.path
     found = 0
     issues: list[ValidationIssue] = []
-    for table in sorted(_KNOWN_TABLES):
-        path = directory / f"{table}.csv"
-        try:
-            exists = path.exists()
-        except OSError:
-            exists = True
-        if not exists:
-            continue
-        found += 1
-        issues.extend(_validate_table(path, table, config))
-    if found == 0:
-        issues.append(_issue("no_known_data_files", "目录内未找到任何已知数据文件", "dataset", directory))
-    return sorted(issues, key=ValidationIssue.sort_key)
+    try:
+        if operation_hook is not None:
+            operation_hook()
+        _verify_dataset_identity(parent_identity, dataset_identity)
+        for table in sorted(_KNOWN_TABLES):
+            _verify_dataset_identity(parent_identity, dataset_identity)
+            path = directory / f"{table}.csv"
+            try:
+                os.lstat(path)
+            except FileNotFoundError:
+                continue
+            except OSError:
+                found += 1
+                issues.append(_issue("unsafe_data_file", "文件级错误：CSV 无法安全检查", table, path))
+                continue
+            found += 1
+            table_hook = None
+            if table_operation_hook is not None:
+                table_hook = lambda table=table, path=path: table_operation_hook(table, path)
+            issues.extend(
+                _validate_table(
+                    path,
+                    table,
+                    config,
+                    parent_identity,
+                    dataset_identity,
+                    table_hook,
+                )
+            )
+            _verify_dataset_identity(parent_identity, dataset_identity)
+        _verify_dataset_identity(parent_identity, dataset_identity)
+        if found == 0:
+            issues.append(_issue("no_known_data_files", "目录内未找到任何已知数据文件", "dataset", directory))
+        _verify_dataset_identity(parent_identity, dataset_identity)
+        return sorted(issues, key=ValidationIssue.sort_key)
+    except ProvincePathError:
+        return [_issue("dataset_path_changed", "省份数据目录在校验期间发生变化", "dataset", directory)]
 
 
 def main(argv: list[str] | None = None) -> int:
