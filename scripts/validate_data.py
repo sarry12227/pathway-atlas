@@ -96,6 +96,19 @@ class ValidationIssue:
         )
 
 
+def _cli_issue_dict(issue: ValidationIssue) -> dict[str, Any]:
+    """Serialize one issue without exposing a caller-controlled local path."""
+
+    payload = issue.to_dict()
+    if issue.table in _KNOWN_TABLES:
+        payload["path"] = f"{issue.table}.csv"
+    elif issue.table == "province":
+        payload["path"] = "province.json"
+    else:
+        payload["path"] = "."
+    return payload
+
+
 @dataclass(frozen=True)
 class ValidatedAdmissionRow:
     """One normalized admission row captured by the validator's secure read."""
@@ -498,8 +511,8 @@ def main(argv: list[str] | None = None) -> int:
     issues = validate_dataset(directory)
     payload = {
         "valid": not issues,
-        "directory": os.fspath(directory),
-        "issues": [item.to_dict() for item in issues],
+        "directory": ".",
+        "issues": [_cli_issue_dict(item) for item in issues],
     }
     print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
     return 0 if not issues else 2

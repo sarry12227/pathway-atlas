@@ -390,17 +390,43 @@ class ValidatorCliTest(unittest.TestCase):
             encoding="utf-8",
         )
 
+    def assert_cli_paths_are_logical(self, process, *, private_markers=()):
+        self.assertNotIn("Traceback", process.stderr)
+        payload = json.loads(process.stdout)
+        self.assertEqual(payload["directory"], ".")
+        allowed_paths = {
+            ".",
+            "province.json",
+            *(f"{table}.csv" for table in validator_module._KNOWN_TABLES),
+        }
+        self.assertLessEqual(
+            {issue["path"] for issue in payload["issues"]},
+            allowed_paths,
+        )
+        visible = process.stdout + process.stderr
+        for forbidden in (
+            *private_markers,
+            str(ROOT),
+            ".worktrees",
+            "C:",
+            "\\",
+            "/home/",
+        ):
+            self.assertNotIn(forbidden, visible)
+
     def test_positional_valid_fixture_exits_zero_with_json_output(self):
         process = self.run_cli(FIXTURES / "demo-33")
         self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
         payload = json.loads(process.stdout)
         self.assertTrue(payload["valid"])
         self.assertEqual(payload["issues"], [])
+        self.assert_cli_paths_are_logical(process, private_markers=("demo-33",))
 
     def test_deprecated_switch_uses_same_validator(self):
         process = self.run_cli("--province-dir", FIXTURES / "demo-312")
         self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
         self.assertTrue(json.loads(process.stdout)["valid"])
+        self.assert_cli_paths_are_logical(process, private_markers=("demo-312",))
 
     def test_invalid_fixture_exits_two_and_reports_real_line(self):
         process = self.run_cli(FIXTURES / "duplicate-program")
@@ -408,6 +434,56 @@ class ValidatorCliTest(unittest.TestCase):
         payload = json.loads(process.stdout)
         duplicate = next(item for item in payload["issues"] if item["code"] == "duplicate_admission_key")
         self.assertEqual(duplicate["row"], 5)
+        self.assertEqual(duplicate["path"], "tou_dang.csv")
+        self.assert_cli_paths_are_logical(
+            process, private_markers=("duplicate-program",)
+        )
+
+    def test_valid_and_invalid_absolute_pii_directories_are_not_serialized(self):
+        marker = "学生张三13800138000"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            valid = root / f"{marker}-valid"
+            invalid = root / f"{marker}-invalid"
+            shutil.copytree(FIXTURES / "demo-33", valid)
+            shutil.copytree(FIXTURES / "duplicate-program", invalid)
+
+            valid_process = self.run_cli(valid.resolve())
+            invalid_process = self.run_cli(invalid.resolve())
+
+        self.assertEqual(valid_process.returncode, 0, valid_process.stdout + valid_process.stderr)
+        self.assertEqual(invalid_process.returncode, 2, invalid_process.stdout + invalid_process.stderr)
+        self.assert_cli_paths_are_logical(valid_process, private_markers=(marker,))
+        self.assert_cli_paths_are_logical(invalid_process, private_markers=(marker,))
+
+    def test_dataset_and_unknown_issue_paths_use_the_stable_logical_fallback(self):
+        marker = "学生张三13800138000"
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary) / marker
+            directory.mkdir()
+            (directory / "province.json").write_text(
+                json.dumps(strict_metadata(), ensure_ascii=False), encoding="utf-8"
+            )
+
+            process = self.run_cli(directory.resolve())
+
+        self.assertEqual(process.returncode, 2, process.stdout + process.stderr)
+        payload = json.loads(process.stdout)
+        dataset_issue = next(
+            issue for issue in payload["issues"] if issue["code"] == "no_known_data_files"
+        )
+        self.assertEqual(dataset_issue["path"], ".")
+        self.assert_cli_paths_are_logical(process, private_markers=(marker,))
+
+        unknown = ValidationIssue(
+            code="synthetic_unknown",
+            message="合成未知表错误",
+            table="not-a-public-table",
+            path=f"C:/private/{marker}/secret.csv",
+        )
+        self.assertEqual(validator_module._cli_issue_dict(unknown)["path"], ".")
+        # The programmatic API retains the exact diagnostic path.
+        self.assertEqual(unknown.to_dict()["path"], f"C:/private/{marker}/secret.csv")
 
     def test_conflicting_school_identity_exits_two_without_echoing_values(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -433,6 +509,9 @@ class ValidatorCliTest(unittest.TestCase):
             self.assertEqual(conflict["row"], 3)
             self.assertNotIn("SECRET-CODE", process.stdout)
             self.assertNotIn("不应回显", process.stdout)
+            self.assert_cli_paths_are_logical(
+                process, private_markers=(directory.name,)
+            )
 
 
 if __name__ == "__main__":
