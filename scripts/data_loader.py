@@ -12,19 +12,15 @@ from pathlib import Path
 
 try:
     from scripts.province_registry import (
-        ProvinceConfigError,
         ProvinceRegistryError,
         _DirectoryIdentity,
         _resolve_legacy_province_dir,
-        resolve_province_dir,
     )
 except ModuleNotFoundError:  # Direct ``python scripts/*.py`` compatibility.
     from province_registry import (  # type: ignore
-        ProvinceConfigError,
         ProvinceRegistryError,
         _DirectoryIdentity,
         _resolve_legacy_province_dir,
-        resolve_province_dir,
     )
 
 SKILL_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -56,9 +52,10 @@ class DataError(Exception):
 def get_province_dir(province: str, root: os.PathLike[str] | str = DEFAULT_DATA_ROOT) -> Path:
     """Deprecated name-based bridge; new callers pass an explicit province_dir.
 
-    Strict v1 metadata is always attempted first.  The narrow fallback exists
-    for one migration release and reads only the display name from the same
-    safely scanned direct-child ``province.json`` files.
+    The compatibility resolver validates strict v1 metadata normally. Its
+    narrow legacy classification requires a missing schema version plus the
+    old ``subject_groups`` marker in the same safely scanned direct-child
+    ``province.json`` file.
     """
 
     warnings.warn(
@@ -69,10 +66,7 @@ def get_province_dir(province: str, root: os.PathLike[str] | str = DEFAULT_DATA_
     if not isinstance(province, str) or not province.strip():
         raise DataError("省份必填；请先解析省份数据目录")
     try:
-        try:
-            return resolve_province_dir(root, province.strip())
-        except ProvinceConfigError:
-            return _resolve_legacy_province_dir(root, province.strip())
+        return _resolve_legacy_province_dir(root, province.strip())
     except ProvinceRegistryError as error:
         raise DataError(str(error)) from error
 

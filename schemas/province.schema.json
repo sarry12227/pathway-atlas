@@ -25,13 +25,21 @@
       "type": "array",
       "minItems": 1,
       "uniqueItems": true,
-      "items": {"type": "string", "minLength": 1}
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "pattern": "^(?!.*[\\r\\n])\\S(?:[^\\r\\n]*\\S)?$"
+      }
     },
     "secondary_subjects": {
       "type": "array",
       "minItems": 1,
       "uniqueItems": true,
-      "items": {"type": "string", "minLength": 1}
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "pattern": "^(?!.*[\\r\\n])\\S(?:[^\\r\\n]*\\S)?$"
+      }
     },
     "score_scale": {
       "type": "number",
@@ -42,5 +50,20 @@
       "type": "string",
       "enum": ["1.0"]
     }
-  }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"mode": {"const": "3+1+2"}}},
+      "then": {"properties": {"secondary_subjects": {"minItems": 2}}}
+    },
+    {
+      "if": {"properties": {"mode": {"const": "3+3"}}},
+      "then": {
+        "anyOf": [
+          {"properties": {"primary_subjects": {"minItems": 2}}},
+          {"properties": {"secondary_subjects": {"minItems": 2}}}
+        ]
+      }
+    }
+  ]
 }

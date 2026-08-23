@@ -2,12 +2,14 @@ import csv
 import json
 import math
 import os
+import re
 import tempfile
 import unittest
 from dataclasses import FrozenInstanceError
 from pathlib import Path
 
-from scripts.data_loader import DataError, load_toudang
+from scripts.data_loader import DataError, get_province_dir, load_toudang
+from scripts import province_registry as registry_module
 from scripts.province_registry import (
     DuplicateProvinceError,
     ProvinceConfig,
@@ -89,6 +91,46 @@ class ProvinceRegistryTest(unittest.TestCase):
             with self.assertRaises(UnknownProvinceError):
                 resolve_province_dir(root, "改名测试省")
 
+    def test_in_call_same_name_directory_replacement_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "root"
+            entry = root / "entry"
+            moved = Path(temporary) / "moved"
+            write_metadata(entry, valid_metadata("竞态测试省"))
+
+            def replace_after_discovery() -> None:
+                entry.rename(moved)
+                entry.mkdir()
+
+            with self.assertRaises(ProvincePathError):
+                registry_module._resolve_province_dir(
+                    root,
+                    "竞态测试省",
+                    operation_hook=replace_after_discovery,
+                )
+
+    def test_in_call_same_name_metadata_replacement_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "root"
+            entry = root / "entry"
+            metadata = entry / "province.json"
+            moved = Path(temporary) / "original.json"
+            write_metadata(entry, valid_metadata("文件竞态省"))
+
+            def replace_after_discovery() -> None:
+                metadata.rename(moved)
+                metadata.write_text(
+                    json.dumps(valid_metadata("文件竞态省"), ensure_ascii=False),
+                    encoding="utf-8",
+                )
+
+            with self.assertRaises(ProvincePathError):
+                registry_module._resolve_province_dir(
+                    root,
+                    "文件竞态省",
+                    operation_hook=replace_after_discovery,
+                )
+
     def test_child_symlink_is_never_followed(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "root"
@@ -149,16 +191,35 @@ class ProvinceMetadataValidationTest(unittest.TestCase):
                 payload["score_scale"] = value
                 self.assert_invalid_payload(payload)
 
-    def test_subjects_are_trimmed_and_deduplicated_in_stable_order(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            payload = valid_metadata()
-            payload["primary_subjects"] = [" 物理 ", "历史", "物理"]
-            payload["secondary_subjects"] = [" 化学", "化学 ", "地理"]
-            write_metadata(root / "entry", payload)
-            config = discover_provinces(root)["虚构省"]
-            self.assertEqual(config.primary_subjects, ("物理", "历史"))
-            self.assertEqual(config.secondary_subjects, ("化学", "地理"))
+    def test_duplicate_or_noncanonical_subjects_are_rejected(self):
+        invalid_subject_lists = (
+            ["物理", "物理"],
+            ["物理", " 物理 "],
+            [" 物理", "历史"],
+            ["物理 ", "历史"],
+            ["物\n理", "历史"],
+            ["物\r理", "历史"],
+        )
+        for subjects in invalid_subject_lists:
+            with self.subTest(subjects=subjects):
+                payload = valid_metadata()
+                payload["primary_subjects"] = subjects
+                self.assert_invalid_payload(payload)
+
+    def test_mode_specific_subject_sets_are_rejected_when_incoherent(self):
+        overlap = valid_metadata()
+        overlap["secondary_subjects"] = ["物理", "化学"]
+        self.assert_invalid_payload(overlap)
+
+        too_few_secondary = valid_metadata()
+        too_few_secondary["secondary_subjects"] = ["化学"]
+        self.assert_invalid_payload(too_few_secondary)
+
+        too_few_for_33 = valid_metadata()
+        too_few_for_33["mode"] = "3+3"
+        too_few_for_33["primary_subjects"] = ["物理"]
+        too_few_for_33["secondary_subjects"] = ["化学"]
+        self.assert_invalid_payload(too_few_for_33)
 
     def test_empty_or_wrong_typed_subjects_are_rejected(self):
         for value in ([], [" "], "物理", [1, "物理"], None):
@@ -231,11 +292,103 @@ class ProvinceSchemaContractTest(unittest.TestCase):
         self.assertFalse(schema["additionalProperties"])
         self.assertEqual(schema["properties"]["mode"]["enum"], ["3+1+2", "3+3"])
         self.assertEqual(schema["properties"]["schema_version"]["enum"], ["1.0"])
+        for field in ("primary_subjects", "secondary_subjects"):
+            declaration = schema["properties"][field]
+            self.assertTrue(declaration["uniqueItems"])
+            pattern = declaration["items"]["pattern"]
+            self.assertIsNotNone(re.fullmatch(pattern, "思想政治"))
+            for invalid in (" 物理", "物理 ", "物\n理", "物\r理"):
+                self.assertIsNone(re.fullmatch(pattern, invalid))
         required = set(schema["required"])
         for path in sorted(FIXTURES.glob("*/province.json")):
             payload = json.loads(path.read_text(encoding="utf-8"))
             self.assertEqual(set(payload), required)
             self.assertIn(payload["mode"], schema["properties"]["mode"]["enum"])
+
+
+class DeprecatedProvinceBridgeTest(unittest.TestCase):
+    def test_unmistakable_legacy_metadata_resolves_with_warning(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            legacy = {
+                "province": "旧格式演示省",
+                "subject_groups": ["物理", "历史"],
+                "admission_unit": "虚构志愿单位",
+            }
+            write_metadata(root / "legacy-folder", legacy)
+            with self.assertWarns(DeprecationWarning):
+                resolved = get_province_dir("旧格式演示省", root)
+            self.assertEqual(resolved, (root / "legacy-folder").resolve())
+
+    def test_valid_v1_and_genuine_legacy_metadata_can_coexist(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            write_metadata(root / "v1", valid_metadata("新版省"))
+            write_metadata(
+                root / "legacy",
+                {"province": "旧版省", "subject_groups": ["物理", "历史"]},
+            )
+            with self.assertWarns(DeprecationWarning):
+                self.assertEqual(get_province_dir("新版省", root), (root / "v1").resolve())
+            with self.assertWarns(DeprecationWarning):
+                self.assertEqual(get_province_dir("旧版省", root), (root / "legacy").resolve())
+
+    def test_future_or_invalid_v1_metadata_never_falls_back(self):
+        invalid_payloads = []
+        future = valid_metadata("不可回退省")
+        future["schema_version"] = "2.0"
+        invalid_payloads.append(future)
+        invalid_mode = valid_metadata("不可回退省")
+        invalid_mode["mode"] = "traditional"
+        invalid_payloads.append(invalid_mode)
+        invalid_extra = valid_metadata("不可回退省")
+        invalid_extra["subject_groups"] = ["物理"]
+        invalid_payloads.append(invalid_extra)
+        invalid_subject = valid_metadata("不可回退省")
+        invalid_subject["primary_subjects"] = ["物理", "物理"]
+        invalid_payloads.append(invalid_subject)
+
+        for payload in invalid_payloads:
+            with self.subTest(payload=payload), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                write_metadata(root / "entry", payload)
+                with self.assertWarns(DeprecationWarning), self.assertRaises(DataError):
+                    get_province_dir("不可回退省", root)
+
+    def test_malformed_duplicate_key_and_nan_never_fall_back(self):
+        documents = (
+            "{invalid",
+            '{"province":"不可回退省","province":"替换省","subject_groups":["物理"]}',
+            '{"province":"不可回退省","subject_groups":["物理"],"value":NaN}',
+        )
+        for document in documents:
+            with self.subTest(document=document), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                entry = root / "entry"
+                entry.mkdir()
+                (entry / "province.json").write_text(document, encoding="utf-8")
+                with self.assertWarns(DeprecationWarning), self.assertRaises(DataError):
+                    get_province_dir("不可回退省", root)
+
+    def test_unrelated_corrupt_entry_blocks_legacy_resolution(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            write_metadata(
+                root / "target",
+                {"province": "旧版省", "subject_groups": ["物理", "历史"]},
+            )
+            corrupt = root / "corrupt"
+            corrupt.mkdir()
+            (corrupt / "province.json").write_text("{invalid", encoding="utf-8")
+            with self.assertWarns(DeprecationWarning), self.assertRaises(DataError):
+                get_province_dir("旧版省", root)
+
+    def test_metadata_without_schema_or_legacy_marker_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            write_metadata(root / "ambiguous", {"province": "含糊省"})
+            with self.assertWarns(DeprecationWarning), self.assertRaises(DataError):
+                get_province_dir("含糊省", root)
 
 
 class ExplicitProvinceDirectoryLoaderTest(unittest.TestCase):

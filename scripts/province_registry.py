@@ -10,6 +10,7 @@ import json
 import math
 import os
 import stat
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -122,6 +123,74 @@ class _DirectoryIdentity:
             raise ProvincePathError(f"{description}在扫描期间发生变化")
 
 
+@dataclass(frozen=True)
+class _FileIdentity:
+    path: Path
+    device: int
+    inode: int
+    attributes: int
+    size: int
+    modified_ns: int
+
+    @classmethod
+    def from_stat(cls, path: Path, info: os.stat_result) -> "_FileIdentity":
+        return cls(
+            path=path,
+            device=info.st_dev,
+            inode=info.st_ino,
+            attributes=getattr(info, "st_file_attributes", 0),
+            size=info.st_size,
+            modified_ns=info.st_mtime_ns,
+        )
+
+    def verify(self) -> None:
+        try:
+            info = os.lstat(self.path)
+            resolved = self.path.resolve(strict=True)
+        except (OSError, RuntimeError) as error:
+            raise ProvincePathError("province.json 在扫描期间发生变化") from error
+        attributes = getattr(info, "st_file_attributes", 0)
+        if (
+            resolved != self.path
+            or not stat.S_ISREG(info.st_mode)
+            or stat.S_ISLNK(info.st_mode)
+            or attributes & _REPARSE_POINT
+            or (
+                info.st_dev,
+                info.st_ino,
+                attributes,
+                info.st_size,
+                info.st_mtime_ns,
+            )
+            != (
+                self.device,
+                self.inode,
+                self.attributes,
+                self.size,
+                self.modified_ns,
+            )
+        ):
+            raise ProvincePathError("province.json 在扫描期间发生变化")
+
+
+@dataclass(frozen=True)
+class _MetadataDocument:
+    child: _DirectoryIdentity
+    metadata: _FileIdentity
+    payload: dict[str, Any]
+
+    def verify(self, root: _DirectoryIdentity) -> None:
+        root.verify("省份数据根目录")
+        self.child.verify("省份数据目录")
+        self.metadata.verify()
+        if (
+            not _is_below(self.child.path, root.path)
+            or not _is_below(self.metadata.path, self.child.path)
+            or self.metadata.path != self.child.path / "province.json"
+        ):
+            raise ProvincePathError("省份元数据越出数据根目录")
+
+
 def _is_below(path: Path, root: Path) -> bool:
     try:
         path.relative_to(root)
@@ -143,7 +212,7 @@ def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
-def _read_metadata(root: _DirectoryIdentity, child: _DirectoryIdentity) -> dict[str, Any] | None:
+def _read_metadata(root: _DirectoryIdentity, child: _DirectoryIdentity) -> _MetadataDocument | None:
     metadata = child.path / "province.json"
     try:
         before = os.lstat(metadata)
@@ -164,13 +233,24 @@ def _read_metadata(root: _DirectoryIdentity, child: _DirectoryIdentity) -> dict[
         raise ProvincePathError("province.json 必须是数据根目录内的真实普通文件")
     if before.st_size > _MAX_METADATA_BYTES:
         raise ProvinceConfigError("province.json 超过允许的元数据大小")
+    metadata_identity = _FileIdentity.from_stat(metadata, before)
 
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
         descriptor = os.open(metadata, flags)
         try:
             opened = os.fstat(descriptor)
-            if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
+            if (
+                opened.st_dev,
+                opened.st_ino,
+                opened.st_size,
+                opened.st_mtime_ns,
+            ) != (
+                before.st_dev,
+                before.st_ino,
+                before.st_size,
+                before.st_mtime_ns,
+            ):
                 raise ProvincePathError("province.json 在读取期间发生变化")
             chunks: list[bytes] = []
             size = 0
@@ -189,12 +269,7 @@ def _read_metadata(root: _DirectoryIdentity, child: _DirectoryIdentity) -> dict[
     except OSError as error:
         raise ProvincePathError("province.json 无法安全读取") from error
 
-    try:
-        after = os.lstat(metadata)
-    except OSError as error:
-        raise ProvincePathError("province.json 在读取期间发生变化") from error
-    if (after.st_dev, after.st_ino) != (before.st_dev, before.st_ino):
-        raise ProvincePathError("province.json 在读取期间发生变化")
+    metadata_identity.verify()
     child.verify("省份数据目录")
     root.verify("省份数据根目录")
 
@@ -209,7 +284,7 @@ def _read_metadata(root: _DirectoryIdentity, child: _DirectoryIdentity) -> dict[
         raise ProvinceConfigError("province.json 不是严格 UTF-8 JSON") from error
     if not isinstance(payload, dict):
         raise ProvinceConfigError("province.json 顶层必须是对象")
-    return payload
+    return _MetadataDocument(child=child, metadata=metadata_identity, payload=payload)
 
 
 def _normalize_province(value: Any) -> str:
@@ -224,18 +299,22 @@ def _normalize_province(value: Any) -> str:
 def _normalize_subjects(value: Any, field: str) -> tuple[str, ...]:
     if not isinstance(value, list) or not value:
         raise ProvinceConfigError(f"{field} 必须是非空字符串数组")
-    normalized: list[str] = []
+    subjects: list[str] = []
     seen: set[str] = set()
     for item in value:
-        if not isinstance(item, str) or not item.strip():
-            raise ProvinceConfigError(f"{field} 只能包含非空字符串")
-        subject = item.strip()
-        if subject not in seen:
-            seen.add(subject)
-            normalized.append(subject)
-    if not normalized:
-        raise ProvinceConfigError(f"{field} 去空白去重后不能为空")
-    return tuple(normalized)
+        if (
+            not isinstance(item, str)
+            or not item
+            or item != item.strip()
+            or "\r" in item
+            or "\n" in item
+        ):
+            raise ProvinceConfigError(f"{field} 只能包含无需清洗的非空科目字符串")
+        if item in seen:
+            raise ProvinceConfigError(f"{field} 不得包含重复科目")
+        seen.add(item)
+        subjects.append(item)
+    return tuple(subjects)
 
 
 def _parse_config(payload: dict[str, Any], directory: Path) -> ProvinceConfig:
@@ -256,6 +335,12 @@ def _parse_config(payload: dict[str, Any], directory: Path) -> ProvinceConfig:
         raise ProvinceConfigError("mode 仅支持 3+1+2 或 3+3")
     primary = _normalize_subjects(payload["primary_subjects"], "primary_subjects")
     secondary = _normalize_subjects(payload["secondary_subjects"], "secondary_subjects")
+    if set(primary) & set(secondary):
+        raise ProvinceConfigError("primary_subjects 与 secondary_subjects 不得重叠")
+    if mode == "3+1+2" and len(secondary) < 2:
+        raise ProvinceConfigError("3+1+2 模式至少需要两个可配置再选科目")
+    if mode == "3+3" and len(primary) + len(secondary) < 3:
+        raise ProvinceConfigError("3+3 模式至少需要三个不同的可配置科目")
 
     score_scale = payload["score_scale"]
     if (
@@ -280,9 +365,11 @@ def _parse_config(payload: dict[str, Any], directory: Path) -> ProvinceConfig:
     )
 
 
-def _scan_metadata(root: os.PathLike[str] | str) -> tuple[_DirectoryIdentity, list[tuple[Path, dict[str, Any]]]]:
+def _scan_metadata(
+    root: os.PathLike[str] | str,
+) -> tuple[_DirectoryIdentity, list[_MetadataDocument]]:
     root_identity = _DirectoryIdentity.capture(root, "省份数据根目录")
-    documents: list[tuple[Path, dict[str, Any]]] = []
+    documents: list[_MetadataDocument] = []
     try:
         with os.scandir(root_identity.path) as iterator:
             entries = sorted(iterator, key=lambda entry: entry.name)
@@ -301,62 +388,88 @@ def _scan_metadata(root: os.PathLike[str] | str) -> tuple[_DirectoryIdentity, li
         child = _DirectoryIdentity.capture(Path(entry.path), "省份数据目录")
         if not _is_below(child.path, root_identity.path):
             raise ProvincePathError("省份数据目录越出数据根目录")
-        payload = _read_metadata(root_identity, child)
-        if payload is not None:
-            documents.append((child.path, payload))
+        document = _read_metadata(root_identity, child)
+        if document is not None:
+            documents.append(document)
     root_identity.verify("省份数据根目录")
     return root_identity, documents
+
+
+def _discover_strict_records(
+    root: os.PathLike[str] | str,
+) -> tuple[_DirectoryIdentity, dict[str, tuple[ProvinceConfig, _MetadataDocument]]]:
+    root_identity, documents = _scan_metadata(root)
+    discovered: dict[str, tuple[ProvinceConfig, _MetadataDocument]] = {}
+    for document in documents:
+        config = _parse_config(document.payload, document.child.path)
+        if config.province in discovered:
+            raise DuplicateProvinceError(f"省份名称重复：{config.province}")
+        discovered[config.province] = (config, document)
+    return root_identity, dict(sorted(discovered.items()))
 
 
 def discover_provinces(root: os.PathLike[str] | str) -> dict[str, ProvinceConfig]:
     """Discover strict province metadata from direct child directories only."""
 
-    _root, documents = _scan_metadata(root)
-    discovered: dict[str, ProvinceConfig] = {}
-    for directory, payload in documents:
-        config = _parse_config(payload, directory)
-        if config.province in discovered:
-            raise DuplicateProvinceError(f"省份名称重复：{config.province}")
-        discovered[config.province] = config
-    return dict(sorted(discovered.items()))
+    _root, records = _discover_strict_records(root)
+    return {name: record[0] for name, record in records.items()}
 
 
 def resolve_province_dir(root: os.PathLike[str] | str, province: str) -> Path:
     """Resolve a dataset by metadata display name, never by path concatenation."""
 
-    discovered = discover_provinces(root)
-    if not isinstance(province, str) or province not in discovered:
-        available = "、".join(sorted(discovered)) or "无"
+    return _resolve_province_dir(root, province)
+
+
+def _resolve_province_dir(
+    root: os.PathLike[str] | str,
+    province: str,
+    operation_hook: Callable[[], None] | None = None,
+) -> Path:
+    """Internal resolver with a deterministic post-discovery race-test seam."""
+
+    root_identity, records = _discover_strict_records(root)
+    if not isinstance(province, str) or province not in records:
+        available = "、".join(sorted(records)) or "无"
         raise UnknownProvinceError(f"未知省份「{province}」；可用省份：{available}")
-    config = discovered[province]
-    identity = _DirectoryIdentity.capture(config.directory, "省份数据目录")
-    root_identity = _DirectoryIdentity.capture(root, "省份数据根目录")
-    if not _is_below(identity.path, root_identity.path):
-        raise ProvincePathError("省份数据目录越出数据根目录")
-    return identity.path
+    config, document = records[province]
+    if operation_hook is not None:
+        operation_hook()
+    document.verify(root_identity)
+    return config.directory
 
 
 def _resolve_legacy_province_dir(root: os.PathLike[str] | str, province: str) -> Path:
-    """Narrow one-release bridge for old metadata that only declared province."""
+    """Resolve strict v1 or unmistakable pre-v1 metadata for one release."""
 
     root_identity, documents = _scan_metadata(root)
-    matched: Path | None = None
-    names: list[str] = []
-    for directory, payload in documents:
-        name = _normalize_province(payload.get("province"))
-        if name in names:
+    records: dict[str, _MetadataDocument] = {}
+    for document in documents:
+        payload = document.payload
+        if "schema_version" in payload:
+            name = _parse_config(payload, document.child.path).province
+        else:
+            if "province" not in payload or "subject_groups" not in payload:
+                raise ProvinceConfigError(
+                    "无 schema_version 的 province.json 必须包含旧版 subject_groups 标记"
+                )
+            name = _normalize_province(payload["province"])
+            legacy_subjects = payload["subject_groups"]
+            if (
+                not isinstance(legacy_subjects, list)
+                or not legacy_subjects
+                or any(not isinstance(item, str) or not item.strip() for item in legacy_subjects)
+            ):
+                raise ProvinceConfigError("旧版 subject_groups 必须是非空科目字符串数组")
+        if name in records:
             raise DuplicateProvinceError(f"省份名称重复：{name}")
-        names.append(name)
-        if name == province:
-            matched = directory
-    if matched is None:
-        available = "、".join(sorted(names)) or "无"
+        records[name] = document
+    if province not in records:
+        available = "、".join(sorted(records)) or "无"
         raise UnknownProvinceError(f"未知省份「{province}」；可用省份：{available}")
-    identity = _DirectoryIdentity.capture(matched, "省份数据目录")
-    root_identity.verify("省份数据根目录")
-    if not _is_below(identity.path, root_identity.path):
-        raise ProvincePathError("省份数据目录越出数据根目录")
-    return identity.path
+    selected = records[province]
+    selected.verify(root_identity)
+    return selected.child.path
 
 
 def _normalize_selection(value: Any, field: str) -> str:
