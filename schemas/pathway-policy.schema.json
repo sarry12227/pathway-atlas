@@ -27,6 +27,10 @@
     "valid_year",
     "eligibility_requirements",
     "disqualifying_facts",
+    "professional_options",
+    "training_arrangements",
+    "transition_rules",
+    "outcomes",
     "service_employment_obligations",
     "penalty_exit_rules",
     "fees_and_subsidies",
@@ -91,6 +95,30 @@
         "minLength": 1,
         "pattern": "^\\S(?:.*\\S)?$"
       }
+    },
+    "professional_options": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "pattern": "^\\S(?:.*\\S)?$"
+      }
+    },
+    "training_arrangements": {
+      "type": ["string", "null"],
+      "minLength": 1,
+      "pattern": "^\\S(?:.*\\S)?$"
+    },
+    "transition_rules": {
+      "type": ["string", "null"],
+      "minLength": 1,
+      "pattern": "^\\S(?:.*\\S)?$"
+    },
+    "outcomes": {
+      "type": ["string", "null"],
+      "minLength": 1,
+      "pattern": "^\\S(?:.*\\S)?$"
     },
     "service_employment_obligations": {
       "type": ["string", "null"],

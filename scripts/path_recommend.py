@@ -90,6 +90,50 @@ _EXACT_EVIDENCE_MINIMUMS = {
     EvidenceStatus.REFERENCE: 3,
 }
 _MODEL_METHODS = frozenset({"documented_rank_delta"})
+_PHONE = re.compile(r"(?<!\d)1[3-9]\d{9}(?!\d)")
+_LANDLINE = re.compile(r"(?<!\d)0(?:10|\d{3})\d{7,8}(?!\d)")
+_PHONE_SEPARATORS = re.compile(r"[\s.\-·‐‑–—_]+")
+_IDENTITY = re.compile(r"(?<!\d)\d{17}[0-9Xx](?!\d)")
+_EMAIL = re.compile(r"(?i)(?<![\w.-])[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}(?![\w.-])")
+_URL_OR_LOCAL_PATH = re.compile(
+    r"(?i)(?:"
+    r"https?://|file://|www\.[a-z0-9-]+(?:\.[a-z0-9-]+)+(?:[\\/]|\b)|"
+    r"\$(?:home|userprofile|appdata|codex_home)[\\/]|"
+    r"%(?:home|userprofile|appdata|codex_home)%[\\/]|"
+    r"(?:^|[\s(])\.\.?\\(?:[^\\\s]+\\)*[^\\\s]+|"
+    r"[a-z]:[\\/]|\\\\[^\\\s]+[\\/]|//[^/\s]+/|~/|"
+    r"/(?:home|users|tmp|var|etc|opt|srv|mnt|root)(?:/|$)|"
+    r"/(?!/)(?:[a-z0-9._~-]+/)+[a-z0-9._~-]+|(?:^|\s)/[^/\s]+"
+    r")"
+)
+_SCHEMELESS_DOMAIN = re.compile(
+    r"(?i)(?<![\w@.-])(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+"
+    r"[a-z]{2,}(?:[/:?#][^\s]*)?"
+)
+_PRIVATE_OUTPUT_MARKERS = (
+    "姓名", "studentname", "wechat", "weixin", "微信", "手机号",
+    "联系电话", "电话", "就读学校", "currentschool", "studentschool",
+    "班级", "住址",
+)
+_PRIVATE_LABEL = re.compile(
+    r"(?i)(?<!\w)(?:student\s+name|name|wechat|weixin|phone|telephone|"
+    r"current\s+school|student\s+school|address|api[\s_-]*key|secret|token|"
+    r"private[\s_-]*key)\s*[:=]"
+)
+_WECHAT_ID = re.compile(r"(?i)(?<![a-z0-9])wxid[_-][a-z0-9_-]+")
+_STRUCTURED_SECRET = re.compile(
+    r"(?i)(?<![a-z0-9])(?:"
+    r"gh[pousr]_[a-z0-9]{20,}|github_pat_[a-z0-9_]{20,}|"
+    r"(?:akia|asia)[a-z0-9]{16}|"
+    r"sk-(?:proj-)?[a-z0-9_-]{20,}|sk_(?:live|test)_[a-z0-9]{16,}|"
+    r"glpat-[a-z0-9_-]{20,}|xox[baprs]-[a-z0-9-]{20,}|"
+    r"aiza[a-z0-9_-]{30,}"
+    r")"
+)
+_JWT_SECRET = re.compile(
+    r"(?i)(?<![a-z0-9_-])eyj[a-z0-9_-]{8,}\.eyj[a-z0-9_-]{8,}\."
+    r"[a-z0-9_-]{8,}(?![a-z0-9_-])"
+)
 _CHINESE_OUTPUT_CLAIMS = frozenset(
     {
         "保录",
@@ -286,6 +330,33 @@ def _validate_output_text(value: str) -> None:
         raise ValueError(_PROMISE_ERROR)
 
 
+def validate_public_output_text(value: str) -> None:
+    """Reject PII, secrets, URLs, and local paths from persisted output text."""
+
+    normalized = "".join(
+        character
+        for character in unicodedata.normalize("NFKC", value).casefold()
+        if unicodedata.category(character) != "Cf"
+    )
+    compact = re.sub(r"[\s_\-:：=]+", "", normalized)
+    phone_view = _PHONE_SEPARATORS.sub("", normalized)
+    if (
+        _PHONE.search(phone_view)
+        or _LANDLINE.search(phone_view)
+        or _IDENTITY.search(normalized)
+        or _EMAIL.search(normalized)
+        or _URL_OR_LOCAL_PATH.search(normalized)
+        or _SCHEMELESS_DOMAIN.search(normalized)
+        or any(marker in compact for marker in _PRIVATE_OUTPUT_MARKERS)
+        or _PRIVATE_LABEL.search(normalized)
+        or _WECHAT_ID.search(normalized)
+        or _STRUCTURED_SECRET.search(normalized)
+        or _JWT_SECRET.search(normalized)
+        or re.search(r"高三[（(]?\d+[)）]?班", compact)
+    ):
+        raise ValueError("output text contains private or non-public content")
+
+
 def _validate_source_id_claim(value: str) -> None:
     segments = tuple(
         segment.casefold()
@@ -306,6 +377,7 @@ def _validate_source_id_claim(value: str) -> None:
 def _output_text(value: Any, name: str, *, optional: bool = False) -> str | None:
     normalized = _text(value, name, optional=optional)
     if normalized is not None:
+        validate_public_output_text(normalized)
         _validate_output_text(normalized)
     return normalized
 
@@ -350,6 +422,7 @@ def _output_string_tuple(
 ) -> tuple[str, ...]:
     normalized = _string_tuple(value, name, allow_empty=allow_empty)
     for item in normalized:
+        validate_public_output_text(item)
         _validate_output_text(item)
     return normalized
 
@@ -398,8 +471,8 @@ class PathwayProfile(_Serializable):
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "rank", _strict_positive_int(self.rank, "rank"))
-        for name in ("province", "subject_mode"):
-            object.__setattr__(self, name, _text(getattr(self, name), name))
+        object.__setattr__(self, "province", _output_text(self.province, "province"))
+        object.__setattr__(self, "subject_mode", _text(self.subject_mode, "subject_mode"))
         if self.subject_mode not in _SUBJECT_MODES:
             raise ValueError("subject_mode must be 3+1+2 or 3+3")
         object.__setattr__(
@@ -412,7 +485,7 @@ class PathwayProfile(_Serializable):
         object.__setattr__(
             self,
             "eligibility_facts",
-            _string_tuple(self.eligibility_facts, "eligibility_facts", sort=True),
+            tuple(sorted(_output_string_tuple(self.eligibility_facts, "eligibility_facts"))),
         )
 
 
@@ -429,6 +502,10 @@ class PathwayPolicy(_Serializable):
     valid_year: int | None
     eligibility_requirements: tuple[str, ...]
     disqualifying_facts: tuple[str, ...]
+    professional_options: tuple[str, ...]
+    training_arrangements: str | None
+    transition_rules: str | None
+    outcomes: str | None
     service_employment_obligations: str | None
     penalty_exit_rules: str | None
     fees_and_subsidies: str | None
@@ -461,7 +538,15 @@ class PathwayPolicy(_Serializable):
                 name,
                 tuple(sorted(_output_string_tuple(getattr(self, name), name))),
             )
+        object.__setattr__(
+            self,
+            "professional_options",
+            tuple(sorted(_output_string_tuple(self.professional_options, "professional_options"))),
+        )
         for name in (
+            "training_arrangements",
+            "transition_rules",
+            "outcomes",
             "service_employment_obligations",
             "penalty_exit_rules",
             "fees_and_subsidies",
@@ -566,6 +651,13 @@ class PathwayItem(_Serializable):
     status: str
     eligibility: str
     missing_constraints: tuple[str, ...]
+    professional_options: tuple[str, ...]
+    training_arrangements: str | None
+    transition_rules: str | None
+    outcomes: str | None
+    service_employment_obligations: str | None
+    penalty_exit_rules: str | None
+    fees_and_subsidies: str | None
     policy_source_ids: tuple[str, ...]
     evidence_status: EvidenceStatus
     calculation_basis: str
@@ -599,6 +691,37 @@ class PathwayItem(_Serializable):
         object.__setattr__(self, "missing_constraints", constraints)
         object.__setattr__(
             self,
+            "professional_options",
+            tuple(sorted(_output_string_tuple(self.professional_options, "professional_options"))),
+        )
+        for name in (
+            "training_arrangements",
+            "transition_rules",
+            "outcomes",
+            "service_employment_obligations",
+            "penalty_exit_rules",
+            "fees_and_subsidies",
+        ):
+            object.__setattr__(
+                self,
+                name,
+                _output_text(getattr(self, name), name, optional=True),
+            )
+        complete_details = bool(self.professional_options) and all(
+            getattr(self, name) is not None
+            for name in (
+                "training_arrangements",
+                "transition_rules",
+                "outcomes",
+                "service_employment_obligations",
+                "penalty_exit_rules",
+                "fees_and_subsidies",
+            )
+        )
+        if self.status == "formal" and not complete_details:
+            raise ValueError("formal items require complete policy details")
+        object.__setattr__(
+            self,
             "policy_source_ids",
             _source_id_tuple(self.policy_source_ids, "policy_source_ids"),
         )
@@ -628,6 +751,9 @@ class PathwayResult(_Serializable):
     target_rank: int | None = None
     transformation: str | None = None
     model_source_ids: tuple[str, ...] = ()
+    model_id: str | None = None
+    model_method: str | None = None
+    model_evidence_status: EvidenceStatus | None = None
     warnings: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
@@ -664,6 +790,8 @@ class PathwayResult(_Serializable):
                 raise ValueError("item target ranks require a result target_rank")
             if self.model_source_ids:
                 raise ValueError("model_source_ids require a target_rank")
+            if self.model_id is not None or self.model_method is not None or self.model_evidence_status is not None:
+                raise ValueError("model metadata requires a target_rank")
         else:
             target_rank = _strict_positive_int(self.target_rank, "target_rank")
             object.__setattr__(self, "target_rank", target_rank)
@@ -683,6 +811,20 @@ class PathwayResult(_Serializable):
         if self.target_rank is not None and not model_source_ids:
             raise ValueError("target_rank requires model_source_ids")
         object.__setattr__(self, "model_source_ids", model_source_ids)
+        if self.target_rank is not None:
+            model_id = _text(self.model_id, "model_id")
+            assert model_id is not None
+            if _SAFE_ID.fullmatch(model_id) is None:
+                raise ValueError("model_id must use the public safe-ID syntax")
+            model_method = _text(self.model_method, "model_method")
+            if model_method not in _MODEL_METHODS:
+                raise ValueError("unsupported model method")
+            model_status = _status(self.model_evidence_status, "model_evidence_status")
+            if _exact_evidence_problem(model_status, model_source_ids, "位次模型") is not None:
+                raise ValueError("target_rank requires exact sufficient model evidence")
+            object.__setattr__(self, "model_id", model_id)
+            object.__setattr__(self, "model_method", model_method)
+            object.__setattr__(self, "model_evidence_status", model_status)
         object.__setattr__(
             self, "warnings", _output_string_tuple(self.warnings, "warnings")
         )
@@ -758,6 +900,9 @@ def evaluate_pathways(
         target_rank=target_rank,
         transformation=transformation,
         model_source_ids=model.source_ids if target_rank is not None else (),
+        model_id=model.model_id if target_rank is not None else None,
+        model_method=model.method if target_rank is not None else None,
+        model_evidence_status=model.evidence_status if target_rank is not None else None,
         warnings=tuple(warnings),
     )
 
@@ -824,6 +969,9 @@ def _evaluate_policy(
         if item not in profile.eligibility_facts
     )
     critical_fields = (
+        ("training_arrangements", "培养安排未核实"),
+        ("transition_rules", "转段规则未核实"),
+        ("outcomes", "毕业或升学出口未核实"),
         ("service_employment_obligations", "服务期或就业义务未核实"),
         ("penalty_exit_rules", "违约或退出规则未核实"),
         ("fees_and_subsidies", "费用或补助未核实"),
@@ -831,6 +979,8 @@ def _evaluate_policy(
     missing.extend(
         label for field_name, label in critical_fields if getattr(policy, field_name) is None
     )
+    if not policy.professional_options:
+        missing.append("专业选项未核实")
     if policy.valid_year is None:
         missing.append("政策有效年份未核实")
     elif policy.valid_year != profile.current_year:
@@ -867,6 +1017,13 @@ def _evaluate_policy(
         status=status,
         eligibility=eligibility,
         missing_constraints=constraints,
+        professional_options=policy.professional_options,
+        training_arrangements=policy.training_arrangements,
+        transition_rules=policy.transition_rules,
+        outcomes=policy.outcomes,
+        service_employment_obligations=policy.service_employment_obligations,
+        penalty_exit_rules=policy.penalty_exit_rules,
+        fees_and_subsidies=policy.fees_and_subsidies,
         policy_source_ids=policy.policy_source_ids,
         evidence_status=policy.evidence_status,
         calculation_basis=basis,

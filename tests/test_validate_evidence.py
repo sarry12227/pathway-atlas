@@ -7,8 +7,13 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from dataclasses import FrozenInstanceError, replace
 
 from scripts.evidence import EvidenceStore
+from scripts.validate_evidence import (
+    ValidatedEvidenceSnapshot,
+    validate_bundle_snapshot,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -106,6 +111,47 @@ class ValidateEvidenceCliTest(unittest.TestCase):
         self.assertEqual(summary["errors"], [])
         self.assertEqual(summary["candidate_count"], 3)
         self.assertEqual(summary["fact_count"], 1)
+
+    def test_public_snapshot_is_factory_only_deep_frozen_and_hash_bound(self):
+        result = validate_bundle_snapshot(FIXTURES / "three-source-consensus")
+
+        self.assertEqual(result.issues, ())
+        self.assertIsInstance(result.snapshot, ValidatedEvidenceSnapshot)
+        snapshot = result.snapshot
+        assert snapshot is not None
+        self.assertEqual(snapshot.retrieval_dates, ("2026-08-23",))
+        self.assertEqual(snapshot.manifest.manifest_hash, snapshot.manifest_hash)
+        payload = snapshot.facts[0].to_dict()
+        payload["field"] = "tampered"
+        self.assertNotEqual(snapshot.facts[0].to_dict()["field"], "tampered")
+        with self.assertRaises(FrozenInstanceError):
+            snapshot.retrieval_dates = ("2026-08-24",)
+        with self.assertRaises(TypeError):
+            replace(snapshot, retrieval_dates=("2026-08-24",))
+        with self.assertRaises(TypeError):
+            ValidatedEvidenceSnapshot()
+
+    def test_invalid_bundle_snapshot_returns_issues_and_no_data(self):
+        result = validate_bundle_snapshot(FIXTURES / "repost-conflict")
+
+        self.assertIsNone(result.snapshot)
+        self.assertTrue(result.issues)
+
+    def test_rehashed_future_candidate_date_stays_bound_to_snapshot(self):
+        bundle = self.copy_fixture("three-source-consensus")
+
+        def future(_index, candidate):
+            candidate["retrieved_at"] = "2099-01-02T00:00:00Z"
+            return candidate
+
+        self.rewrite_candidates(bundle, future)
+        self.rewrite_manifest_hash(bundle)
+
+        result = validate_bundle_snapshot(bundle)
+
+        self.assertEqual(result.issues, ())
+        assert result.snapshot is not None
+        self.assertEqual(result.snapshot.retrieval_dates, ("2099-01-02",))
 
     def test_fixture_artifacts_checkout_with_hash_stable_lf_endings(self):
         fixture_files = sorted(

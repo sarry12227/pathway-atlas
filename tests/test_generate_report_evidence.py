@@ -7,11 +7,11 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import shutil
 
 from scripts.contracts import (
     CapabilityReport,
     CapabilityTier,
-    EvidenceManifest,
     EvidenceFact,
     EvidenceStatus,
     RecommendationItem,
@@ -23,7 +23,9 @@ from scripts.contracts import (
 from scripts.evidence import EvidenceStore
 from scripts.path_recommend import PathwayItem, PathwayResult
 from scripts.rank_calc import RankEstimate
-from scripts.report_model import StudentProfile, build_report_model, render_markdown
+from scripts.report_model import ReportModel, StudentProfile, build_report_model, render_markdown
+from scripts.validate_evidence import validate_bundle_snapshot
+from scripts import generate_report as report_cli
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -41,16 +43,13 @@ def capability(tier: CapabilityTier = CapabilityTier.STANDARD) -> CapabilityRepo
     )
 
 
-def manifest() -> EvidenceManifest:
-    return EvidenceManifest(
-        schema_version="1.0",
-        session_id="11111111111111111111111111111111",
-        capability_tier=CapabilityTier.STANDARD,
-        candidates_filename="candidates.jsonl",
-        facts_filename="normalized/facts.jsonl",
-        rejected_count=0,
-        manifest_hash="sha256:" + "1" * 64,
+def evidence_snapshot():
+    result = validate_bundle_snapshot(
+        ROOT / "tests" / "fixtures" / "evidence" / "three-source-consensus"
     )
+    if result.snapshot is None:
+        raise AssertionError(result.issues)
+    return result.snapshot
 
 
 def student(**overrides) -> StudentProfile:
@@ -138,6 +137,13 @@ def pathway_result() -> PathwayResult:
         status="pending_verification",
         eligibility="pending_verification",
         missing_constraints=("服务期未核实",),
+        professional_options=("虚构专业",),
+        training_arrangements="合成培养安排",
+        transition_rules="合成转段规则",
+        outcomes="合成出口说明",
+        service_employment_obligations=None,
+        penalty_exit_rules="合成退出规则",
+        fees_and_subsidies="合成费用说明",
         policy_source_ids=("s1",),
         evidence_status=EvidenceStatus.CONFLICT,
         calculation_basis="仅核验资格条件，未执行位次换算",
@@ -153,15 +159,48 @@ def pathway_result() -> PathwayResult:
     )
 
 
+def formal_pathway_result() -> PathwayResult:
+    formal = PathwayItem(
+        policy_id="policy-formal",
+        pathway_type="special_program",
+        title="虚构正式专项",
+        institution="虚构乙大学",
+        status="formal",
+        eligibility="eligible",
+        missing_constraints=(),
+        professional_options=("虚构专业",),
+        training_arrangements="合成培养安排",
+        transition_rules="合成转段规则",
+        outcomes="合成出口说明",
+        service_employment_obligations="合成服务就业说明",
+        penalty_exit_rules="合成退出规则",
+        fees_and_subsidies="合成费用说明",
+        policy_source_ids=("s5",),
+        evidence_status=EvidenceStatus.OFFICIAL,
+        calculation_basis="已验证政策资格与版本化模型共同形成目标",
+        target_rank=3500,
+    )
+    return PathwayResult(
+        items=(formal,),
+        formal_shortlist=("policy-formal",),
+        target_rank=3500,
+        transformation="以用户位次为输入的合成版本化转换",
+        model_source_ids=("s6",),
+        model_id="model-report",
+        model_method="documented_rank_delta",
+        model_evidence_status=EvidenceStatus.OFFICIAL,
+        warnings=(),
+    )
+
+
 class EvidenceReportModelTest(unittest.TestCase):
     def build(self, **overrides):
         values = {
             "profile": student(),
-            "capability": capability(),
             "recommendations": recommendations(),
             "rank": rank_estimate(),
             "pathways": pathway_result(),
-            "manifest": manifest(),
+            "evidence": evidence_snapshot(),
         }
         values.update(overrides)
         return build_report_model(**values)
@@ -174,7 +213,7 @@ class EvidenceReportModelTest(unittest.TestCase):
         self.assertIn("查询覆盖", text)
         self.assertIn("来源编号", text)
         self.assertIn("s1、s2、s3、s4", text)
-        self.assertIn(manifest().manifest_hash, text)
+        self.assertIn(evidence_snapshot().manifest_hash, text)
         self.assertGreaterEqual(text.count("AI 生成，仅供参考"), 3)
         self.assertNotIn("http://", text)
         self.assertNotIn("https://", text)
@@ -231,15 +270,205 @@ class EvidenceReportModelTest(unittest.TestCase):
         json.dumps(model.to_dict(), ensure_ascii=False, sort_keys=True)
 
     def test_model_snapshots_mutable_sequences_and_replace_revalidates(self):
-        warnings = ["合成提示"]
-        model = replace(self.build(), warnings=warnings)
-        warnings.append("后加内容")
-        self.assertEqual(model.warnings, ("合成提示",))
+        model = self.build()
+        expected_warnings = model.warnings
         payload = model.to_dict()
         payload["warnings"].append("外部修改")
-        self.assertEqual(model.warnings, ("合成提示",))
+        self.assertEqual(model.warnings, expected_warnings)
+        with self.assertRaises(TypeError):
+            replace(model, warnings=model.warnings)
+        with self.assertRaises(TypeError):
+            ReportModel()
+
+    def test_recommendation_result_invariants_survive_direct_replace(self):
+        model = self.build()
+        item = model.recommendations[0]
+        invalid_changes = (
+            {"verified_rank_coverage": None},
+            {"verified_rank_coverage": (5000, 10000)},
+            {"recommendation_empty_reason": "no_match_within_verified_coverage"},
+            {"recommendation_coverage_status": EvidenceStatus.MISSING},
+            {"recommendation_coverage_status": EvidenceStatus.OFFICIAL},
+        )
+        for changes in invalid_changes:
+            with self.subTest(changes=changes), self.assertRaises((TypeError, ValueError)):
+                replace(model, **changes)
         with self.assertRaises((TypeError, ValueError)):
-            replace(model, source_ids=("../unsafe",))
+            replace(model, recommendations=(replace(item, delta=999),))
+        with self.assertRaises((TypeError, ValueError)):
+            replace(model, recommendations=(replace(item, calculation_basis="伪造依据"),))
+        outside_rank = 20000
+        outside_delta = outside_rank - model.profile.rank
+        with self.assertRaises((TypeError, ValueError)):
+            replace(
+                model,
+                recommendations=(
+                    replace(
+                        item,
+                        min_rank=outside_rank,
+                        delta=outside_delta,
+                        calculation_basis=(
+                            "2026 年已验证投档记录；最低位次与用户位次差 "
+                            f"Δ={outside_delta:+d}"
+                        ),
+                    ),
+                ),
+            )
+        with self.assertRaises((TypeError, ValueError)):
+            replace(model, warnings=())
+
+    def test_capability_snapshot_rechecks_overlap_tier_and_degradation(self):
+        model = self.build()
+        self.assertEqual(model.host_capabilities, ("browse", "search"))
+        self.assertEqual(model.python_version, "3.10.0")
+        with self.assertRaises((TypeError, ValueError)):
+            replace(
+                model,
+                available_capabilities=("browse", "search", "vision"),
+                missing_capabilities=("vision",),
+            )
+        with self.assertRaises((TypeError, ValueError)):
+            replace(model, host_capabilities=("browse",),)
+        with self.assertRaises((TypeError, ValueError)):
+            replace(model, degradations=(), warnings=())
+        with self.assertRaises((TypeError, ValueError)):
+            replace(
+                model,
+                optional_modules=("docx",),
+                missing_capabilities=("docx", "vision"),
+            )
+        with self.assertRaises((TypeError, ValueError)):
+            replace(
+                model,
+                capability_tier=CapabilityTier.OFFLINE,
+                query_coverage="仅使用本地或用户提供的已验证证据包",
+                python_version="3.9.18",
+            )
+
+    def test_unicode_pii_and_local_paths_are_rejected_contextually(self):
+        profile_secrets = (
+            "name: Zhang San",
+            "WECHAT：student-id",
+            "微 信 ： student-id",
+            "电话：01012345678",
+            "就读 学校：某中学",
+            "高三（1）班",
+            "住址：某路1号",
+            "api_key：secret",
+        )
+        for secret in profile_secrets:
+            with self.subTest(secret=secret), self.assertRaises((TypeError, ValueError)):
+                student(province=secret)
+        for secret in ("姓名：张三", "wechat: wx-student", "就读学校：某中学", "高三（1）班"):
+            with self.subTest(visible_secret=secret), self.assertRaises((TypeError, ValueError)):
+                self.build(
+                    recommendations=recommendations(
+                        items=(school_item(remarks=secret),)
+                    )
+                )
+        visible_paths = (
+            "前缀C:\\Users\\hp\\secret.txt",
+            "\\\\server\\share\\secret.txt",
+            "/home/hp/secret.txt",
+            "~/secret.txt",
+            "/tmp/secret.txt",
+            "前缀/custom/private.txt",
+            "https：//example.test/private",
+        )
+        for path in visible_paths:
+            with self.subTest(path=path), self.assertRaises((TypeError, ValueError)):
+                self.build(
+                    recommendations=recommendations(
+                        items=(school_item(remarks=path),)
+                    )
+                )
+        # Context matters: an institution name is not a student-school label.
+        self.build(
+            recommendations=recommendations(
+                items=(school_item(school_name="虚构学校大学"),)
+            )
+        )
+
+    def test_retrieval_dates_coverage_actions_and_pathway_details_are_projected(self):
+        text = render_markdown(self.build(pathways=formal_pathway_result()))
+        self.assertIn("检索日期：2026-08-23", text)
+        self.assertIn("输入年份：2026", text)
+        self.assertIn("可用年份：2026", text)
+        self.assertIn("下一步行动建议", text)
+        self.assertIn("虚构专业", text)
+        self.assertIn("合成培养安排", text)
+        self.assertIn("合成转段规则", text)
+        self.assertIn("合成出口说明", text)
+        self.assertIn("转换过程：以用户位次为输入的合成版本化转换", text)
+        self.assertIn("模型来源编号：s6", text)
+        self.assertRegex(text, r"有依据的路径目标位次：3500.*位次模型证据状态：官方")
+        self.assertIn("正式路径政策证据状态：官方", text)
+        model = self.build(pathways=formal_pathway_result())
+        self.assertEqual(model.pathway_target_evidence_status, EvidenceStatus.OFFICIAL)
+        with self.assertRaises((TypeError, ValueError)):
+            replace(model, pathway_target_evidence_status=EvidenceStatus.OFFICIAL)
+
+    def test_retrieval_dates_and_action_items_are_strict_model_fields(self):
+        model = self.build()
+        with self.assertRaises((TypeError, ValueError)):
+            replace(model, retrieval_dates=("2026-02-30",))
+        with self.assertRaises((TypeError, ValueError)):
+            replace(model, retrieval_dates=("9999-12-31",))
+        with self.assertRaises((TypeError, ValueError)):
+            replace(model, retrieval_dates=("2026-08-24",))
+        with self.assertRaises((TypeError, ValueError)):
+            replace(model, retrieval_dates=())
+        with self.assertRaises((TypeError, ValueError)):
+            replace(model, action_items=("随意发明一个建议",))
+
+    def test_rehashed_future_candidate_snapshot_cannot_bind_to_current_profile(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            bundle = Path(temporary) / "bundle"
+            shutil.copytree(
+                ROOT / "tests" / "fixtures" / "evidence" / "three-source-consensus",
+                bundle,
+            )
+            candidate_path = bundle / "candidates.jsonl"
+            candidates = [
+                json.loads(line)
+                for line in candidate_path.read_text(encoding="utf-8").splitlines()
+            ]
+            for candidate in candidates:
+                candidate["retrieved_at"] = "2099-01-02T00:00:00Z"
+            candidate_path.write_text(
+                "".join(
+                    json.dumps(item, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
+                    for item in candidates
+                ),
+                encoding="utf-8",
+                newline="\n",
+            )
+            manifest_path = bundle / "manifest.json"
+            manifest_payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+            capability_payload = json.loads((bundle / "capability.json").read_text(encoding="utf-8"))
+            rejection_lines = (bundle / "rejections.jsonl").read_text(encoding="utf-8").splitlines()
+            store = object.__new__(EvidenceStore)
+            store._capability = capability_payload
+            store._rejections = {str(index): None for index in range(len(rejection_lines))}
+            records = {
+                name: (bundle / name).read_text(encoding="utf-8")
+                for name in (
+                    "capability.json", "candidates.jsonl", "context.jsonl",
+                    "normalized/facts.jsonl", "rejections.jsonl",
+                )
+            }
+            manifest_payload["manifest_hash"] = EvidenceStore._manifest_hash(store, records)
+            manifest_path.write_text(
+                json.dumps(manifest_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            result = validate_bundle_snapshot(bundle)
+            self.assertEqual(result.issues, ())
+            assert result.snapshot is not None
+
+            with self.assertRaises((TypeError, ValueError)):
+                self.build(evidence=result.snapshot)
 
     def test_direct_pathway_projection_cannot_bypass_status_invariants(self):
         model = self.build()
@@ -256,6 +485,20 @@ class EvidenceReportModelTest(unittest.TestCase):
                 model_source_ids=("s5",),
                 source_ids=(*model.source_ids, "s5"),
             )
+
+        formal = self.build(pathways=formal_pathway_result()).pathways[0]
+        for missing_detail in (
+            {"professional_options": ()},
+            {"training_arrangements": None},
+            {"transition_rules": None},
+            {"outcomes": None},
+            {"service_employment_obligations": None},
+            {"penalty_exit_rules": None},
+            {"fees_and_subsidies": None},
+        ):
+            with self.subTest(missing_detail=missing_detail):
+                with self.assertRaises((TypeError, ValueError)):
+                    replace(formal, **missing_detail)
 
     def test_free_text_is_one_line_escaped_and_pii_is_rejected(self):
         piped = school_item(school_name="虚构甲大学 | 伪造列")
@@ -274,29 +517,62 @@ class EvidenceReportModelTest(unittest.TestCase):
             student(province="手机号 13800138000")
 
     def test_capability_and_manifest_are_strict_snapshots(self):
+        model = self.build()
+        self.assertEqual(model.manifest_hash, evidence_snapshot().manifest_hash)
+        with self.assertRaises(TypeError):
+            replace(model, manifest_hash="sha256:" + "0" * 64)
         with self.assertRaises((TypeError, ValueError)):
-            self.build(manifest=replace(manifest(), manifest_hash=""))
-        with self.assertRaises((TypeError, ValueError)):
-            self.build(capability=replace(capability(), degradations=["x\n## injected"]))
-        with self.assertRaises((TypeError, ValueError)):
-            self.build(manifest={"capability_tier": "official"})
-        fake_full = CapabilityReport(
-            tier=CapabilityTier.FULL,
-            host_capabilities=(),
-            available_capabilities=(),
-            missing_capabilities=(),
-            degradations=(),
-            python_version="3.10.0",
-            optional_modules=(),
-        )
-        with self.assertRaises((TypeError, ValueError)):
-            self.build(
-                capability=fake_full,
-                manifest=replace(manifest(), capability_tier=CapabilityTier.FULL),
-            )
+            self.build(evidence={"manifest_hash": "sha256:" + "0" * 64})
 
 
 class EvidenceReportCliTest(unittest.TestCase):
+    def test_cli_profile_rejects_private_user_free_text_before_engine_use(self):
+        payload = json.loads(
+            (ROOT / "tests" / "fixtures" / "profiles" / "demo.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        payload["target_schools"] = ["name：Zhang San"]
+        with tempfile.TemporaryDirectory() as temporary:
+            profile = Path(temporary) / "profile.json"
+            profile.write_text(
+                json.dumps(payload, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            with self.assertRaises(report_cli.EvidenceReportInputError):
+                report_cli._load_public_profile(profile)
+
+    def test_new_recommendation_path_consumes_authenticated_rows_not_a_path(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary) / "dataset"
+            shutil.copytree(
+                ROOT / "tests" / "fixtures" / "provinces" / "demo-312",
+                directory,
+            )
+            validated = report_cli.validate_dataset_snapshot(directory.resolve())
+            self.assertEqual(validated.issues, ())
+            assert validated.snapshot is not None
+            original = directory / "authenticated-tou_dang.csv"
+            (directory / "tou_dang.csv").rename(original)
+            (directory / "tou_dang.csv").write_text(
+                original.read_text(encoding="utf-8").replace("虚构甲大学", "替换大学"),
+                encoding="utf-8",
+            )
+            profile = report_cli.RecommendationProfile(
+                rank=4200,
+                target_province="演示甲省",
+                subject_group="物理",
+                secondary_subjects=frozenset(("化学", "地理")),
+            )
+
+            result = report_cli._public_recommendations(
+                validated.snapshot.admission_rows,
+                profile,
+                (),
+            )
+
+        self.assertTrue(all(item.school_name != "替换大学" for item in result.items))
+
     def command(self, *extra: str) -> list[str]:
         return [
             sys.executable,
@@ -342,6 +618,52 @@ class EvidenceReportCliTest(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertEqual(result.stdout, "")
         self.assertIn("证据包", result.stderr)
+
+    def test_authenticated_visible_text_rejected_by_report_gate_is_exit_2(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            bundle = Path(temporary) / "bundle"
+            shutil.copytree(
+                ROOT / "tests" / "fixtures" / "evidence" / "three-source-consensus",
+                bundle,
+            )
+            capability_path = bundle / "capability.json"
+            capability_payload = json.loads(capability_path.read_text(encoding="utf-8"))
+            capability_payload["degradations"] = ["wechat: wx-student"]
+            capability_path.write_text(
+                json.dumps(capability_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            manifest_path = bundle / "manifest.json"
+            manifest_payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+            rejection_lines = (bundle / "rejections.jsonl").read_text(encoding="utf-8").splitlines()
+            store = object.__new__(EvidenceStore)
+            store._capability = capability_payload
+            store._rejections = {str(index): None for index in range(len(rejection_lines))}
+            records = {
+                name: (bundle / name).read_text(encoding="utf-8")
+                for name in (
+                    "capability.json", "candidates.jsonl", "context.jsonl",
+                    "normalized/facts.jsonl", "rejections.jsonl",
+                )
+            }
+            manifest_payload["manifest_hash"] = EvidenceStore._manifest_hash(store, records)
+            manifest_path.write_text(
+                json.dumps(manifest_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+
+            result = subprocess.run(
+                self.command("--evidence", str(bundle)),
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(result.stdout, "")
+        self.assertNotIn("Traceback", result.stderr)
 
     def test_public_cli_does_not_overwrite_an_existing_report(self):
         with tempfile.TemporaryDirectory() as temporary:

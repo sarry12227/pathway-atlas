@@ -8,6 +8,7 @@ renderers project those decisions and never recalculate them.
 from __future__ import annotations
 
 from dataclasses import dataclass, fields, is_dataclass
+from datetime import date
 from enum import Enum
 import re
 from typing import Any, Iterable
@@ -21,8 +22,13 @@ if __package__:
         RecommendationItem,
         RecommendationResult,
     )
-    from .path_recommend import PathwayItem, PathwayResult
+    from .path_recommend import (
+        PathwayItem,
+        PathwayResult,
+        validate_public_output_text,
+    )
     from .rank_calc import RankEstimate
+    from .validate_evidence import ValidatedEvidenceSnapshot
 else:  # pragma: no cover - direct scripts-path compatibility
     from contracts import (
         CapabilityReport,
@@ -32,18 +38,14 @@ else:  # pragma: no cover - direct scripts-path compatibility
         RecommendationItem,
         RecommendationResult,
     )
-    from path_recommend import PathwayItem, PathwayResult
+    from path_recommend import PathwayItem, PathwayResult, validate_public_output_text
     from rank_calc import RankEstimate
+    from validate_evidence import ValidatedEvidenceSnapshot
 
 
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _HASH = re.compile(r"^sha256:[0-9a-f]{64}$")
 _REASON = re.compile(r"^[a-z][a-z0-9_-]{0,127}$")
-_PHONE = re.compile(r"(?<!\d)1[3-9]\d{9}(?!\d)")
-_IDENTITY = re.compile(r"(?<!\d)\d{17}[0-9Xx](?!\d)")
-_EMAIL = re.compile(r"(?i)(?<![\w.-])[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}(?![\w.-])")
-_URL_OR_PATH = re.compile(r"(?i)(?:https?://|file://|(?:^|\s)[A-Za-z]:[\\/])")
-_PII_LABELS = ("手机号", "联系电话", "微信", "身份证", "姓名：", "姓名:", "班级")
 _SUBJECT_MODES = frozenset({"3+1+2", "3+3"})
 _GRADES = frozenset({"高一", "高二", "高三"})
 _ACCEPTED_EXACT = frozenset(
@@ -53,6 +55,11 @@ _ACCEPTED_EXACT = frozenset(
         EvidenceStatus.REFERENCE,
     }
 )
+_ACCEPTED_STRENGTH = {
+    EvidenceStatus.REFERENCE: 1,
+    EvidenceStatus.CORROBORATED: 2,
+    EvidenceStatus.OFFICIAL: 3,
+}
 _STATUS_PRECEDENCE = (
     EvidenceStatus.CONFLICT,
     EvidenceStatus.MASKED,
@@ -129,17 +136,21 @@ def _nonnegative_int(value: Any, name: str) -> int:
     return _positive_int(value, name, minimum=0)
 
 
-def _privacy_safe(value: str) -> bool:
-    return not (
-        _PHONE.search(value)
-        or _IDENTITY.search(value)
-        or _EMAIL.search(value)
-        or _URL_OR_PATH.search(value)
-        or any(label in value for label in _PII_LABELS)
-    )
+def _privacy_safe(value: str, *, profile_text: bool = False) -> bool:
+    try:
+        validate_public_output_text(value)
+    except ValueError:
+        return False
+    return True
 
 
-def _text(value: Any, name: str, *, optional: bool = False) -> str | None:
+def _text(
+    value: Any,
+    name: str,
+    *,
+    optional: bool = False,
+    profile_text: bool = False,
+) -> str | None:
     if value is None and optional:
         return None
     if not isinstance(value, str):
@@ -148,9 +159,17 @@ def _text(value: Any, name: str, *, optional: bool = False) -> str | None:
         raise ValueError(f"{name} must be a non-empty trimmed string")
     if len(value) > 2048 or any(ord(char) < 32 or ord(char) == 127 for char in value):
         raise ValueError(f"{name} must be a bounded single-line string")
-    if not _privacy_safe(value):
+    if not _privacy_safe(value, profile_text=profile_text):
         raise ValueError(f"{name} contains private or non-public content")
     return value
+
+
+def validate_profile_text(value: Any, name: str = "profile_text") -> str:
+    """Validate one caller-provided profile string without retaining PII."""
+
+    result = _text(value, name, profile_text=True)
+    assert result is not None
+    return result
 
 
 def _text_tuple(
@@ -160,6 +179,7 @@ def _text_tuple(
     safe_ids: bool = False,
     unique: bool = False,
     sort: bool = False,
+    profile_text: bool = False,
 ) -> tuple[str, ...]:
     if isinstance(value, (str, bytes, bytearray)):
         raise TypeError(f"{name} must be a collection of strings")
@@ -169,7 +189,7 @@ def _text_tuple(
         raise TypeError(f"{name} must be a collection of strings") from error
     normalized: list[str] = []
     for item in items:
-        text = _text(item, f"{name} item")
+        text = _text(item, f"{name} item", profile_text=profile_text)
         assert text is not None
         if safe_ids and _SAFE_ID.fullmatch(text) is None:
             raise ValueError(f"{name} contains an unsafe ID")
@@ -195,6 +215,20 @@ def _year_tuple(value: Any, name: str) -> tuple[int, ...]:
     if len(years) != len(set(years)):
         raise ValueError(f"{name} must contain unique years")
     return tuple(sorted(years))
+
+
+def _date_tuple(value: Any, name: str) -> tuple[str, ...]:
+    values = _text_tuple(value, name, unique=True, sort=True)
+    if not values:
+        raise ValueError(f"{name} must not be empty")
+    for item in values:
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", item) is None:
+            raise ValueError(f"{name} must contain ISO calendar dates")
+        try:
+            date.fromisoformat(item)
+        except ValueError as error:
+            raise ValueError(f"{name} contains an invalid calendar date") from error
+    return values
 
 
 def _status(value: Any, name: str = "status") -> EvidenceStatus:
@@ -227,6 +261,39 @@ def _aggregate_status(values: Iterable[EvidenceStatus]) -> EvidenceStatus:
     return EvidenceStatus.MISSING
 
 
+def _recommendation_basis(data_year: int, min_rank: int, profile_rank: int) -> str:
+    delta = min_rank - profile_rank
+    return f"{data_year} 年已验证投档记录；最低位次与用户位次差 Δ={delta:+d}"
+
+
+def _canonical_action_items(
+    recommendation_status: EvidenceStatus,
+    recommendations: tuple["ReportRecommendation", ...],
+    rank: RankEstimate | None,
+    pathways_available: bool,
+    pathways: tuple["ReportPathway", ...],
+) -> tuple[str, ...]:
+    actions: list[str] = []
+    if recommendation_status in {
+        EvidenceStatus.CONFLICT,
+        EvidenceStatus.MASKED,
+        EvidenceStatus.PARTIAL,
+        EvidenceStatus.MISSING,
+        EvidenceStatus.INFERRED,
+    }:
+        actions.append("优先补齐或复核冲突、屏蔽、部分覆盖及缺失的普通批证据")
+    if rank is None or rank.status is not EvidenceStatus.INFERRED:
+        actions.append("如需校排名折算，补充版本明确且来源可核验的喜报锚点")
+    if recommendations:
+        actions.append("按冲稳保分层逐校核对当年招生章程、专业组与选科要求")
+    else:
+        actions.append("普通批未形成数值推荐前，不依据空结果排除院校")
+    if not pathways_available or any(item.status != "formal" for item in pathways):
+        actions.append("逐项核验多元路径资格、时间节点与待补约束后再决定是否申报")
+    actions.append("正式填报或申报前，以省教育考试院和高校当年正式信息作最终复核")
+    return tuple(actions)
+
+
 @dataclass(frozen=True)
 class StudentProfile(_Serializable):
     """Privacy-minimal report profile; no name, contact, school, or class."""
@@ -241,7 +308,11 @@ class StudentProfile(_Serializable):
 
     def __post_init__(self) -> None:
         for name in ("province", "subject_mode", "subject_group", "grade"):
-            object.__setattr__(self, name, _text(getattr(self, name), name))
+            object.__setattr__(
+                self,
+                name,
+                _text(getattr(self, name), name, profile_text=True),
+            )
         if self.subject_mode not in _SUBJECT_MODES:
             raise ValueError("subject_mode must be 3+1+2 or 3+3")
         if self.grade not in _GRADES:
@@ -254,6 +325,7 @@ class StudentProfile(_Serializable):
                 "secondary_subjects",
                 unique=True,
                 sort=True,
+                profile_text=True,
             ),
         )
         object.__setattr__(self, "rank", _positive_int(self.rank, "rank"))
@@ -322,6 +394,13 @@ class ReportPathway(_Serializable):
     status: str
     eligibility: str
     missing_constraints: tuple[str, ...]
+    professional_options: tuple[str, ...]
+    training_arrangements: str | None
+    transition_rules: str | None
+    outcomes: str | None
+    service_employment_obligations: str | None
+    penalty_exit_rules: str | None
+    fees_and_subsidies: str | None
     source_ids: tuple[str, ...]
     evidence_status: EvidenceStatus
     calculation_basis: str
@@ -346,10 +425,41 @@ class ReportPathway(_Serializable):
             "missing_constraints",
             _text_tuple(self.missing_constraints, "missing_constraints"),
         )
+        object.__setattr__(
+            self,
+            "professional_options",
+            _text_tuple(self.professional_options, "professional_options", unique=True, sort=True),
+        )
+        for name in (
+            "training_arrangements",
+            "transition_rules",
+            "outcomes",
+            "service_employment_obligations",
+            "penalty_exit_rules",
+            "fees_and_subsidies",
+        ):
+            object.__setattr__(
+                self,
+                name,
+                _text(getattr(self, name), name, optional=True),
+            )
         if self.status == "formal" and self.missing_constraints:
             raise ValueError("formal pathways cannot carry missing constraints")
         if self.status != "formal" and not self.missing_constraints:
             raise ValueError("non-formal pathways require an explicit reason")
+        complete_details = bool(self.professional_options) and all(
+            getattr(self, name) is not None
+            for name in (
+                "training_arrangements",
+                "transition_rules",
+                "outcomes",
+                "service_employment_obligations",
+                "penalty_exit_rules",
+                "fees_and_subsidies",
+            )
+        )
+        if self.status == "formal" and not complete_details:
+            raise ValueError("formal pathways require complete policy details")
         object.__setattr__(
             self,
             "source_ids",
@@ -373,14 +483,17 @@ class ReportPathway(_Serializable):
                 raise ValueError("only formal pathways may carry a target rank")
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, init=False)
 class ReportModel(_Serializable):
     profile: StudentProfile
     capability_tier: CapabilityTier
     query_coverage: str
+    host_capabilities: tuple[str, ...]
     available_capabilities: tuple[str, ...]
     missing_capabilities: tuple[str, ...]
     degradations: tuple[str, ...]
+    python_version: str
+    optional_modules: tuple[str, ...]
     recommendations: tuple[ReportRecommendation, ...]
     recommendation_coverage_status: EvidenceStatus
     verified_rank_coverage: tuple[int, int] | None
@@ -397,11 +510,31 @@ class ReportModel(_Serializable):
     pathway_target_rank: int | None
     pathway_transformation: str | None
     model_source_ids: tuple[str, ...]
+    model_id: str | None
+    model_method: str | None
+    pathway_policy_evidence_status: EvidenceStatus | None
+    pathway_target_evidence_status: EvidenceStatus | None
     manifest_session_id: str
     manifest_hash: str
+    retrieval_dates: tuple[str, ...]
     source_ids: tuple[str, ...]
     evidence_status: EvidenceStatus
     warnings: tuple[str, ...]
+    action_items: tuple[str, ...]
+
+    def __init__(self) -> None:
+        raise TypeError("ReportModel is factory-only")
+
+    @classmethod
+    def _create(cls, **values: Any) -> "ReportModel":
+        expected = {item.name for item in fields(cls)}
+        if set(values) != expected:
+            raise TypeError("ReportModel factory fields do not match the contract")
+        instance = object.__new__(cls)
+        for name, value in values.items():
+            object.__setattr__(instance, name, value)
+        instance.__post_init__()
+        return instance
 
     def __post_init__(self) -> None:
         if not isinstance(self.profile, StudentProfile):
@@ -413,12 +546,30 @@ class ReportModel(_Serializable):
         if self.query_coverage != expected_query:
             raise ValueError("query coverage must be derived from capability tier")
         object.__setattr__(self, "query_coverage", _text(self.query_coverage, "query_coverage"))
-        for name in ("available_capabilities", "missing_capabilities", "degradations"):
+        for name in (
+            "host_capabilities",
+            "available_capabilities",
+            "missing_capabilities",
+            "degradations",
+            "optional_modules",
+        ):
             object.__setattr__(
                 self,
                 name,
                 _text_tuple(getattr(self, name), name, unique=True, sort=True),
             )
+        version = _text(self.python_version, "python_version")
+        assert version is not None
+        object.__setattr__(self, "python_version", version)
+        _validate_capability_snapshot(
+            tier,
+            self.host_capabilities,
+            self.available_capabilities,
+            self.missing_capabilities,
+            self.degradations,
+            self.python_version,
+            self.optional_modules,
+        )
 
         if isinstance(self.recommendations, (str, bytes, bytearray)):
             raise TypeError("recommendations must be a collection")
@@ -458,6 +609,55 @@ class ReportModel(_Serializable):
         object.__setattr__(self, "usable_years", _year_tuple(self.usable_years, "usable_years"))
         if set(self.usable_years).difference(self.input_years):
             raise ValueError("usable years must be a subset of input years")
+        if recommendations:
+            if self.verified_rank_coverage is None:
+                raise ValueError("numeric recommendations require verified rank coverage")
+            lower, upper = self.verified_rank_coverage
+            if not lower <= self.profile.rank <= upper:
+                raise ValueError("profile rank must be inside recommendation coverage")
+            if self.recommendation_empty_reason is not None:
+                raise ValueError("non-empty recommendations cannot carry an empty reason")
+            if coverage_status not in _ACCEPTED_EXACT | {EvidenceStatus.PARTIAL}:
+                raise ValueError("numeric recommendations require usable aggregate evidence")
+            aggregate_strength = _ACCEPTED_STRENGTH.get(coverage_status)
+            if aggregate_strength is not None and any(
+                _ACCEPTED_STRENGTH[item.evidence_status] < aggregate_strength
+                for item in recommendations
+            ):
+                raise ValueError("recommendation aggregate status overstates item evidence")
+            for item in recommendations:
+                if not lower <= item.min_rank <= upper:
+                    raise ValueError("recommendation rank must be inside verified coverage")
+                expected_delta = item.min_rank - self.profile.rank
+                if item.delta != expected_delta:
+                    raise ValueError("recommendation delta must derive from profile rank")
+                expected_basis = _recommendation_basis(
+                    item.data_year,
+                    item.min_rank,
+                    self.profile.rank,
+                )
+                if item.calculation_basis != expected_basis:
+                    raise ValueError("recommendation calculation basis is not canonical")
+                if item.data_year not in self.usable_years:
+                    raise ValueError("recommendation year must be usable")
+        elif self.recommendation_empty_reason is None:
+            raise ValueError("empty recommendations require an explicit stable reason")
+        if coverage_status not in _ACCEPTED_EXACT and not self.recommendation_warnings:
+            raise ValueError("degraded recommendation coverage requires a warning")
+        if self.recommendation_empty_reason == "missing_verified_coverage" and self.verified_rank_coverage is not None:
+            raise ValueError("missing coverage reason cannot carry a coverage interval")
+        if self.recommendation_empty_reason == "rank_outside_verified_coverage":
+            if self.verified_rank_coverage is None:
+                raise ValueError("outside-coverage reason requires a known interval")
+            lower, upper = self.verified_rank_coverage
+            if lower <= self.profile.rank <= upper:
+                raise ValueError("outside-coverage reason contradicts profile rank")
+        if self.recommendation_empty_reason == "no_match_within_verified_coverage":
+            if self.verified_rank_coverage is None:
+                raise ValueError("verified empty result requires a coverage interval")
+            lower, upper = self.verified_rank_coverage
+            if not lower <= self.profile.rank <= upper:
+                raise ValueError("verified empty result requires rank inside coverage")
 
         if self.rank is not None:
             if not isinstance(self.rank, RankEstimate):
@@ -494,7 +694,13 @@ class ReportModel(_Serializable):
             raise ValueError("pathway target rank requires model sources")
         formal_pathways = tuple(item for item in pathways if item.status == "formal")
         if self.pathway_target_rank is None:
-            if self.pathway_transformation is not None or self.model_source_ids:
+            if (
+                self.pathway_transformation is not None
+                or self.model_source_ids
+                or self.model_id is not None
+                or self.model_method is not None
+                or self.pathway_target_evidence_status is not None
+            ):
                 raise ValueError("pathway model output requires a target rank")
             if any(item.target_rank is not None for item in pathways):
                 raise ValueError("pathway item targets require a result target rank")
@@ -503,6 +709,43 @@ class ReportModel(_Serializable):
                 raise ValueError("pathway target rank requires a documented formal pathway")
             if any(item.target_rank != self.pathway_target_rank for item in formal_pathways):
                 raise ValueError("formal pathway targets must match the result target")
+            model_id = _text(self.model_id, "model_id")
+            model_method = _text(self.model_method, "model_method")
+            assert model_id is not None and model_method is not None
+            if _SAFE_ID.fullmatch(model_id) is None or _SAFE_ID.fullmatch(model_method) is None:
+                raise ValueError("pathway model identity and method must use safe-ID syntax")
+            object.__setattr__(self, "model_id", model_id)
+            object.__setattr__(self, "model_method", model_method)
+        expected_policy_status = (
+            _aggregate_status(item.evidence_status for item in formal_pathways)
+            if self.pathway_target_rank is not None
+            else None
+        )
+        if self.pathway_policy_evidence_status is None:
+            policy_status = None
+        else:
+            policy_status = _status(
+                self.pathway_policy_evidence_status,
+                "pathway_policy_evidence_status",
+            )
+        if policy_status != expected_policy_status:
+            raise ValueError("pathway policy evidence status must derive from formal pathways")
+        object.__setattr__(self, "pathway_policy_evidence_status", policy_status)
+        if self.pathway_target_rank is None:
+            target_status = None
+        else:
+            target_status = _status(
+                self.pathway_target_evidence_status,
+                "pathway_target_evidence_status",
+            )
+            minimum = {
+                EvidenceStatus.OFFICIAL: 1,
+                EvidenceStatus.CORROBORATED: 2,
+                EvidenceStatus.REFERENCE: 3,
+            }.get(target_status)
+            if minimum is None or len(self.model_source_ids) < minimum:
+                raise ValueError("pathway target requires sufficient exact model evidence")
+        object.__setattr__(self, "pathway_target_evidence_status", target_status)
         if not self.pathways_available and (
             self.pathway_warnings
             or self.pathway_target_rank is not None
@@ -521,6 +764,10 @@ class ReportModel(_Serializable):
         if _HASH.fullmatch(manifest_hash) is None:
             raise ValueError("manifest hash is invalid")
         object.__setattr__(self, "manifest_hash", manifest_hash)
+        retrieval_dates = _date_tuple(self.retrieval_dates, "retrieval_dates")
+        if any(int(item[:4]) != self.profile.current_year for item in retrieval_dates):
+            raise ValueError("retrieval dates must match the profile current year")
+        object.__setattr__(self, "retrieval_dates", retrieval_dates)
 
         source_ids = _text_tuple(self.source_ids, "source_ids", safe_ids=True, unique=True, sort=True)
         expected_sources = {
@@ -543,34 +790,76 @@ class ReportModel(_Serializable):
             statuses.extend(item.evidence_status for item in pathways)
         else:
             statuses.append(EvidenceStatus.MISSING)
+        if self.pathway_target_evidence_status is not None:
+            statuses.append(self.pathway_target_evidence_status)
         expected_status = _aggregate_status(statuses)
         if _status(self.evidence_status) != expected_status:
             raise ValueError("evidence_status must follow conservative precedence")
         object.__setattr__(self, "evidence_status", expected_status)
-        object.__setattr__(self, "warnings", _text_tuple(self.warnings, "warnings"))
+        warnings = _text_tuple(self.warnings, "warnings")
+        required_warnings = tuple(
+            dict.fromkeys(
+                (
+                    *self.degradations,
+                    *self.recommendation_warnings,
+                    *self.pathway_warnings,
+                    *(
+                        ("喜报位次模型未提供，未执行校排名折算",)
+                        if self.rank is None
+                        else ()
+                    ),
+                    *(
+                        ("多元升学结果未提供，本章节降级",)
+                        if not self.pathways_available
+                        else ()
+                    ),
+                )
+            )
+        )
+        if warnings != required_warnings:
+            raise ValueError("warnings must be the exact required degradation union")
+        object.__setattr__(self, "warnings", warnings)
+        expected_actions = _canonical_action_items(
+            coverage_status,
+            recommendations,
+            self.rank,
+            self.pathways_available,
+            pathways,
+        )
+        actions = _text_tuple(self.action_items, "action_items")
+        if actions != expected_actions:
+            raise ValueError("action_items must be the canonical deterministic actions")
+        object.__setattr__(self, "action_items", actions)
 
 
-def _snapshot_capability(capability: CapabilityReport) -> tuple[
-    CapabilityTier, tuple[str, ...], tuple[str, ...], tuple[str, ...]
-]:
-    if not isinstance(capability, CapabilityReport):
-        raise TypeError("capability must be a CapabilityReport")
-    tier = _capability_tier(capability.tier)
-    host = _text_tuple(capability.host_capabilities, "host_capabilities", unique=True, sort=True)
-    available = _text_tuple(capability.available_capabilities, "available_capabilities", unique=True, sort=True)
-    missing = _text_tuple(capability.missing_capabilities, "missing_capabilities", unique=True, sort=True)
-    degradations = _text_tuple(capability.degradations, "degradations", unique=True, sort=True)
-    optional = _text_tuple(capability.optional_modules, "optional_modules", unique=True, sort=True)
-    version = _text(capability.python_version, "python_version")
-    assert version is not None
+def _validate_capability_snapshot(
+    tier: CapabilityTier,
+    host: tuple[str, ...],
+    available: tuple[str, ...],
+    missing: tuple[str, ...],
+    degradations: tuple[str, ...],
+    version: str,
+    optional: tuple[str, ...],
+) -> None:
+    known_missing = _HOST_CAPABILITIES | _OPTIONAL_MODULES | {"python>=3.10"}
     if set(host).difference(_HOST_CAPABILITIES) or available != host:
         raise ValueError("capability host declarations are inconsistent")
+    if set(available).intersection(missing):
+        raise ValueError("available and missing capabilities must be disjoint")
+    if set(missing).difference(known_missing):
+        raise ValueError("capability missing declaration is unsupported")
+    if not (_HOST_CAPABILITIES - set(host)).issubset(missing):
+        raise ValueError("missing host capabilities cannot be hidden")
     if set(optional).difference(_OPTIONAL_MODULES):
         raise ValueError("capability optional-module declaration is unsupported")
+    if set(optional).intersection(missing):
+        raise ValueError("available optional modules cannot also be missing")
     match = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", version)
     if match is None:
         raise ValueError("capability python version is invalid")
     supported_python = (int(match.group(1)), int(match.group(2))) >= (3, 10)
+    if supported_python == ("python>=3.10" in missing):
+        raise ValueError("python capability declaration is inconsistent")
     has_network = {"search", "browse"}.issubset(host)
     is_full = (
         has_network
@@ -587,12 +876,43 @@ def _snapshot_capability(capability: CapabilityReport) -> tuple[
     )
     if tier is not expected_tier:
         raise ValueError("capability tier does not match the declared capabilities")
-    return tier, available, missing, degradations
+    degraded = tier is not CapabilityTier.FULL
+    if degraded and not degradations:
+        raise ValueError("degraded capability tiers require explicit degradations")
+    if not degraded and (missing or degradations):
+        raise ValueError("full capability tier cannot carry missing or degradation output")
+
+
+def _snapshot_capability(capability: CapabilityReport) -> tuple[
+    CapabilityTier,
+    tuple[str, ...],
+    tuple[str, ...],
+    tuple[str, ...],
+    tuple[str, ...],
+    str,
+    tuple[str, ...],
+]:
+    tier = _capability_tier(capability.tier)
+    host = _text_tuple(capability.host_capabilities, "host_capabilities", unique=True, sort=True)
+    available = _text_tuple(capability.available_capabilities, "available_capabilities", unique=True, sort=True)
+    missing = _text_tuple(capability.missing_capabilities, "missing_capabilities", unique=True, sort=True)
+    degradations = _text_tuple(capability.degradations, "degradations", unique=True, sort=True)
+    optional = _text_tuple(capability.optional_modules, "optional_modules", unique=True, sort=True)
+    version = _text(capability.python_version, "python_version")
+    assert version is not None
+    _validate_capability_snapshot(
+        tier,
+        host,
+        available,
+        missing,
+        degradations,
+        version,
+        optional,
+    )
+    return tier, host, available, missing, degradations, version, optional
 
 
 def _snapshot_manifest(manifest: EvidenceManifest, tier: CapabilityTier) -> tuple[str, str]:
-    if not isinstance(manifest, EvidenceManifest):
-        raise TypeError("manifest must be a validated EvidenceManifest")
     if manifest.schema_version != "1.0":
         raise ValueError("only evidence manifest schema 1.0 is supported")
     if _capability_tier(manifest.capability_tier) != tier:
@@ -608,7 +928,10 @@ def _snapshot_manifest(manifest: EvidenceManifest, tier: CapabilityTier) -> tupl
     return session, digest
 
 
-def _project_recommendation(item: RecommendationItem) -> ReportRecommendation:
+def _project_recommendation(
+    item: RecommendationItem,
+    profile_rank: int,
+) -> ReportRecommendation:
     if not isinstance(item, RecommendationItem):
         raise TypeError("recommendation items must be RecommendationItem records")
     if not isinstance(item.province_match, bool) or not isinstance(item.subject_match, bool):
@@ -628,7 +951,11 @@ def _project_recommendation(item: RecommendationItem) -> ReportRecommendation:
         data_year=item.data_year,
         source_ids=item.source_ids,
         evidence_status=item.evidence_status,
-        calculation_basis=f"{item.data_year} 年已验证投档记录；最低位次与用户位次差 Δ={item.delta:+d}",
+        calculation_basis=_recommendation_basis(
+            item.data_year,
+            item.min_rank,
+            profile_rank,
+        ),
     )
 
 
@@ -643,6 +970,13 @@ def _project_pathway(item: PathwayItem) -> ReportPathway:
         status=item.status,
         eligibility=item.eligibility,
         missing_constraints=item.missing_constraints,
+        professional_options=item.professional_options,
+        training_arrangements=item.training_arrangements,
+        transition_rules=item.transition_rules,
+        outcomes=item.outcomes,
+        service_employment_obligations=item.service_employment_obligations,
+        penalty_exit_rules=item.penalty_exit_rules,
+        fees_and_subsidies=item.fees_and_subsidies,
         source_ids=item.policy_source_ids,
         evidence_status=item.evidence_status,
         calculation_basis=item.calculation_basis,
@@ -652,23 +986,30 @@ def _project_pathway(item: PathwayItem) -> ReportPathway:
 
 def build_report_model(
     profile: StudentProfile,
-    capability: CapabilityReport,
     recommendations: RecommendationResult,
     rank: RankEstimate | None,
     pathways: PathwayResult | None,
-    manifest: EvidenceManifest,
+    evidence: ValidatedEvidenceSnapshot,
 ) -> ReportModel:
     """Snapshot validated engine decisions into one renderer-neutral model."""
 
     if not isinstance(profile, StudentProfile):
         raise TypeError("profile must be a StudentProfile")
+    if not isinstance(evidence, ValidatedEvidenceSnapshot):
+        raise TypeError("evidence must be a ValidatedEvidenceSnapshot")
     profile_snapshot = StudentProfile(**profile.to_dict())
-    tier, available, missing, degradations = _snapshot_capability(capability)
+    capability = evidence.capability
+    manifest = evidence.manifest
+    tier, host, available, missing, degradations, python_version, optional = (
+        _snapshot_capability(capability)
+    )
     session_id, manifest_hash = _snapshot_manifest(manifest, tier)
+    retrieval_date_snapshot = _date_tuple(evidence.retrieval_dates, "retrieval_dates")
     if not isinstance(recommendations, RecommendationResult):
         raise TypeError("recommendations must be a RecommendationResult")
     projected_recommendations = tuple(
-        _project_recommendation(item) for item in tuple(recommendations.items)
+        _project_recommendation(item, profile_snapshot.rank)
+        for item in tuple(recommendations.items)
     )
     recommendation_status = _status(recommendations.coverage_status, "recommendation coverage status")
     recommendation_warnings = _text_tuple(recommendations.warnings, "recommendation warnings")
@@ -688,6 +1029,10 @@ def build_report_model(
         pathway_target_rank = None
         pathway_transformation = None
         model_source_ids: tuple[str, ...] = ()
+        model_id = None
+        model_method = None
+        pathway_policy_evidence_status = None
+        pathway_target_evidence_status = None
     else:
         if not isinstance(pathways, PathwayResult):
             raise TypeError("pathways must be a PathwayResult or None")
@@ -697,6 +1042,19 @@ def build_report_model(
         pathway_target_rank = pathways.target_rank
         pathway_transformation = pathways.transformation
         model_source_ids = _text_tuple(pathways.model_source_ids, "model source IDs", safe_ids=True, unique=True, sort=True)
+        model_id = pathways.model_id
+        model_method = pathways.model_method
+        formal_statuses = tuple(
+            item.evidence_status
+            for item in projected_pathways
+            if item.status == "formal"
+        )
+        pathway_policy_evidence_status = (
+            _aggregate_status(formal_statuses)
+            if pathway_target_rank is not None
+            else None
+        )
+        pathway_target_evidence_status = pathways.model_evidence_status
 
     source_ids = {
         source_id
@@ -714,14 +1072,36 @@ def build_report_model(
         statuses.extend(item.evidence_status for item in projected_pathways)
     else:
         statuses.append(EvidenceStatus.MISSING)
-    warnings = tuple(dict.fromkeys((*degradations, *recommendation_warnings, *pathway_warnings)))
-    return ReportModel(
+    if pathway_target_evidence_status is not None:
+        statuses.append(_status(pathway_target_evidence_status))
+    warnings = tuple(
+        dict.fromkeys(
+            (
+                *degradations,
+                *recommendation_warnings,
+                *pathway_warnings,
+                *(("喜报位次模型未提供，未执行校排名折算",) if rank_snapshot is None else ()),
+                *(("多元升学结果未提供，本章节降级",) if not pathways_available else ()),
+            )
+        )
+    )
+    action_items = _canonical_action_items(
+        recommendation_status,
+        projected_recommendations,
+        rank_snapshot,
+        pathways_available,
+        projected_pathways,
+    )
+    return ReportModel._create(
         profile=profile_snapshot,
         capability_tier=tier,
         query_coverage=_QUERY_COVERAGE[tier],
+        host_capabilities=host,
         available_capabilities=available,
         missing_capabilities=missing,
         degradations=degradations,
+        python_version=python_version,
+        optional_modules=optional,
         recommendations=projected_recommendations,
         recommendation_coverage_status=recommendation_status,
         verified_rank_coverage=recommendations.verified_rank_coverage,
@@ -738,11 +1118,17 @@ def build_report_model(
         pathway_target_rank=pathway_target_rank,
         pathway_transformation=pathway_transformation,
         model_source_ids=model_source_ids,
+        model_id=model_id,
+        model_method=model_method,
+        pathway_policy_evidence_status=pathway_policy_evidence_status,
+        pathway_target_evidence_status=pathway_target_evidence_status,
         manifest_session_id=session_id,
         manifest_hash=manifest_hash,
+        retrieval_dates=retrieval_date_snapshot,
         source_ids=tuple(sorted(source_ids)),
         evidence_status=_aggregate_status(statuses),
         warnings=warnings,
+        action_items=action_items,
     )
 
 
@@ -815,6 +1201,9 @@ def render_markdown(model: ReportModel) -> str:
         f"- 证据状态：{_STATUS_LABEL[model.evidence_status]}",
         f"- 证据置信度：{_CONFIDENCE_LABEL[model.evidence_status]}",
         f"- 数据覆盖：{_STATUS_LABEL[model.recommendation_coverage_status]}",
+        f"- 检索日期：{'、'.join(model.retrieval_dates)}",
+        f"- 普通批输入年份：{'、'.join(str(year) for year in model.input_years) or '无'}",
+        f"- 普通批可用年份：{'、'.join(str(year) for year in model.usable_years) or '无'}",
         f"- 证据包标识：{_md(model.manifest_session_id)}",
         f"- 清单哈希：{_md(model.manifest_hash)}",
         f"- 来源编号：{_ids(model.source_ids)}",
@@ -880,7 +1269,12 @@ def render_markdown(model: ReportModel) -> str:
     else:
         lines.extend(
             _table(
-                ("路径", "院校", "状态", "证据状态", "来源编号", "待核实约束", "计算依据"),
+                (
+                    "路径", "院校", "状态", "政策证据状态", "政策来源编号",
+                    "专业选项", "培养安排", "转段规则", "毕业/升学出口",
+                    "服务/就业义务", "退出/违约规则", "费用/补助",
+                    "待核实约束", "计算依据",
+                ),
                 (
                     (
                         item.title,
@@ -888,6 +1282,13 @@ def render_markdown(model: ReportModel) -> str:
                         "正式候选" if item.status == "formal" else ("待核实" if item.status == "pending_verification" else "不符合"),
                         _STATUS_LABEL[item.evidence_status],
                         "、".join(item.source_ids),
+                        "、".join(item.professional_options) or "当前证据未提供",
+                        item.training_arrangements or "当前证据未提供",
+                        item.transition_rules or "当前证据未提供",
+                        item.outcomes or "当前证据未提供",
+                        item.service_employment_obligations or "当前证据未提供",
+                        item.penalty_exit_rules or "当前证据未提供",
+                        item.fees_and_subsidies or "当前证据未提供",
                         "；".join(item.missing_constraints) or "无",
                         item.calculation_basis,
                     )
@@ -896,14 +1297,28 @@ def render_markdown(model: ReportModel) -> str:
             )
         )
     if model.pathway_target_rank is not None:
-        lines.append(f"- 有依据的路径目标位次：{model.pathway_target_rank}")
+        assert model.pathway_policy_evidence_status is not None
+        assert model.pathway_target_evidence_status is not None
+        lines.extend(
+            [
+                f"- 有依据的路径目标位次：{model.pathway_target_rank}；位次模型证据状态：{_STATUS_LABEL[model.pathway_target_evidence_status]}",
+                f"- 正式路径政策证据状态：{_STATUS_LABEL[model.pathway_policy_evidence_status]}",
+                f"- 位次模型标识：{_md(model.model_id)}；方法：{_md(model.model_method)}",
+                f"- 转换过程：{_md(model.pathway_transformation)}",
+                f"- 模型来源编号：{_ids(model.model_source_ids)}",
+            ]
+        )
     for warning in model.pathway_warnings:
         lines.append(f"- 风险提示：{_md(warning)}")
 
     lines.extend(
         [
             "",
-            "## 五、证据清单与免责声明",
+            "## 五、下一步行动建议",
+            "",
+            *(f"{index}. {_md(item)}" for index, item in enumerate(model.action_items, 1)),
+            "",
+            "## 六、证据清单与免责声明",
             "",
             f"- 来源编号：{_ids(model.source_ids)}",
             f"- 证据包清单哈希：{_md(model.manifest_hash)}",
@@ -923,4 +1338,5 @@ __all__ = [
     "StudentProfile",
     "build_report_model",
     "render_markdown",
+    "validate_profile_text",
 ]

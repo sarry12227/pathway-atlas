@@ -22,7 +22,6 @@ import json
 import os
 import re
 import sys
-import tempfile
 from datetime import date
 from pathlib import Path
 
@@ -40,15 +39,13 @@ from school_recommend import (SchoolRecommendError, params_from_config,  # noqa:
 
 # Evidence-aware v0.1 public path.  The historical imports above remain only
 # for the one-release CLI adapter exercised by existing users and tests.
-from contracts import (CapabilityReport, CapabilityTier, EvidenceManifest,  # noqa: E402
-                       EvidenceStatus, RecommendationProfile)
+from contracts import EvidenceStatus, RecommendationProfile  # noqa: E402
 from path_recommend import PathwayProfile, evaluate_pathways  # noqa: E402
-from province_registry import (discover_provinces,  # noqa: E402
-                               validate_subject_selection)
-from report_model import StudentProfile, build_report_model, render_markdown  # noqa: E402
-from validate_data import validate_dataset  # noqa: E402
-from validate_evidence import (_BundleReader, _EXPECTED_ARTIFACTS,  # noqa: E402
-                               validate_bundle)
+from report_model import (StudentProfile, build_report_model, render_markdown,  # noqa: E402
+                          validate_profile_text)
+from validate_data import (ValidatedAdmissionRow,  # noqa: E402
+                           validate_dataset_snapshot)
+from validate_evidence import validate_bundle_snapshot  # noqa: E402
 
 DISCLAIMER = ("本方案基于历史公开数据生成，仅为数据参考，不构成录取承诺；"
               "志愿填报与路径申报以省教育考试院及各高校官方发布的当年信息为准。")
@@ -674,71 +671,23 @@ def _strict_json_file(path: Path, label: str):
     return _strict_json_text(text, label)
 
 
-def _strict_jsonl_text(text: str, label: str):
-    records = []
-    for index, line in enumerate(text.splitlines(), 1):
-        if not line.strip():
-            raise EvidenceReportInputError(f"{label} 包含空记录")
-        records.append(_strict_json_text(line, f"{label}:{index}"))
-    return tuple(records)
-
-
 def _validated_evidence_snapshot(bundle: Path):
-    """Read once through the hardened reader, then validate that exact snapshot."""
+    """Return only validate_evidence's public authenticated bundle snapshot."""
 
-    try:
-        reader = _BundleReader(bundle)
-        texts = {name: reader.read(name) for name in _EXPECTED_ARTIFACTS}
-    except Exception as error:
-        raise EvidenceReportInputError("证据包无法安全读取") from error
-
-    # validate_bundle is intentionally path-bounded.  Validate an in-memory
-    # snapshot materialized in a private temporary directory so later parsing
-    # cannot observe a different original file after validation.
-    with tempfile.TemporaryDirectory(prefix="shengxue-evidence-") as temporary:
-        snapshot_root = Path(temporary)
-        (snapshot_root / "normalized").mkdir()
-        for relative_name, text in texts.items():
-            destination = snapshot_root.joinpath(*relative_name.split("/"))
-            destination.write_text(text, encoding="utf-8", newline="\n")
-        summary = validate_bundle(snapshot_root)
-    if not summary.get("valid"):
+    result = validate_bundle_snapshot(bundle)
+    if result.snapshot is None or result.issues:
         raise EvidenceReportInputError("证据包未通过完整性与来源门禁")
-
-    manifest_payload = _strict_json_text(texts["manifest.json"], "证据清单")
-    capability_payload = _strict_json_text(texts["capability.json"], "能力报告")
-    if not isinstance(manifest_payload, dict) or not isinstance(capability_payload, dict):
-        raise EvidenceReportInputError("证据包主记录格式无效")
-    try:
-        manifest = EvidenceManifest(
-            schema_version=manifest_payload["schema_version"],
-            session_id=manifest_payload["session_id"],
-            capability_tier=CapabilityTier(manifest_payload["capability_tier"]),
-            candidates_filename=manifest_payload["candidates_filename"],
-            facts_filename=manifest_payload["facts_filename"],
-            rejected_count=manifest_payload["rejected_count"],
-            manifest_hash=manifest_payload["manifest_hash"],
-        )
-        capability = CapabilityReport(
-            tier=CapabilityTier(capability_payload["tier"]),
-            host_capabilities=tuple(capability_payload["host_capabilities"]),
-            available_capabilities=tuple(capability_payload["available_capabilities"]),
-            missing_capabilities=tuple(capability_payload["missing_capabilities"]),
-            degradations=tuple(capability_payload["degradations"]),
-            python_version=capability_payload["python_version"],
-            optional_modules=tuple(capability_payload["optional_modules"]),
-        )
-    except (KeyError, TypeError, ValueError) as error:
-        raise EvidenceReportInputError("证据包公共契约无效") from error
-    facts = _strict_jsonl_text(texts["normalized/facts.jsonl"], "标准化事实")
-    return manifest, capability, facts
+    return result.snapshot
 
 
 def _profile_collection(payload: dict, name: str) -> tuple[str, ...]:
     value = payload[name]
     if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
         raise EvidenceReportInputError(f"画像字段 {name} 必须是字符串数组")
-    return tuple(value)
+    try:
+        return tuple(validate_profile_text(item, name) for item in value)
+    except (TypeError, ValueError) as error:
+        raise EvidenceReportInputError(f"画像字段 {name} 包含隐私或不安全文本") from error
 
 
 def _load_public_profile(path: Path):
@@ -797,27 +746,22 @@ def _resolve_public_dataset(dataset: Path, profile: StudentProfile):
         resolved = dataset.resolve(strict=True)
     except OSError as error:
         raise EvidenceReportInputError("数据目录不存在") from error
-    issues = validate_dataset(resolved)
-    if issues:
+    validation = validate_dataset_snapshot(resolved)
+    if validation.issues or validation.snapshot is None:
         raise EvidenceReportInputError("数据目录未通过省份数据校验")
     try:
-        configs = discover_provinces(resolved.parent)
-        matches = [config for config in configs.values() if config.directory == resolved]
-        if len(matches) != 1:
-            raise EvidenceReportInputError("数据目录无法绑定唯一省份配置")
-        config = matches[0]
+        config = validation.snapshot.config
         if config.province != profile.province or config.mode != profile.subject_mode:
             raise EvidenceReportInputError("用户画像与省份数据配置不匹配")
-        validate_subject_selection(
-            config,
+        validation.snapshot.validate_subjects(
             profile.subject_group,
-            list(profile.secondary_subjects),
+            profile.secondary_subjects,
         )
     except EvidenceReportInputError:
         raise
     except Exception as error:
         raise EvidenceReportInputError("省份或选科配置无效") from error
-    return resolved
+    return validation.snapshot
 
 
 _ADMISSION_FACT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
@@ -907,7 +851,11 @@ def _admission_fact_index(facts):
     return index
 
 
-def _public_recommendations(dataset: Path, profile: RecommendationProfile, facts):
+def _public_recommendations(
+    admission_rows: tuple[ValidatedAdmissionRow, ...],
+    profile: RecommendationProfile,
+    facts,
+):
     """Run Task 3 without assigning unscoped facts to admission rows.
 
     v1 evidence facts must name the exact normalized admission field before a
@@ -917,11 +865,24 @@ def _public_recommendations(dataset: Path, profile: RecommendationProfile, facts
     """
 
     try:
-        _year, rows = load_toudang(
-            None,
-            profile.subject_group,
-            province_dir=dataset,
-        )
+        if not isinstance(admission_rows, tuple) or not all(
+            isinstance(row, ValidatedAdmissionRow) for row in admission_rows
+        ):
+            raise TypeError("admission rows must come from validated snapshot")
+        rows = [row.to_dict() for row in admission_rows]
+        matching_years = [
+            row["year"]
+            for row in rows
+            if row.get("subject_group") == profile.subject_group
+        ]
+        if not matching_years:
+            raise DataError("已验证投档数据没有匹配的科目组")
+        latest_year = max(matching_years)
+        rows = [
+            row for row in rows
+            if row.get("subject_group") == profile.subject_group
+            and row.get("year") == latest_year
+        ]
         evidence_by_row = _admission_fact_index(facts)
         bounded_rows = []
         for original in rows:
@@ -991,19 +952,23 @@ def _evidence_main(argv) -> int:
             args.profile
         )
         dataset = _resolve_public_dataset(args.dataset, report_profile)
-        manifest, capability, facts = _validated_evidence_snapshot(args.evidence)
-        recommendations = _public_recommendations(dataset, recommendation_profile, facts)
+        evidence = _validated_evidence_snapshot(args.evidence)
+        facts = tuple(record.to_dict() for record in evidence.facts)
+        recommendations = _public_recommendations(
+            dataset.admission_rows,
+            recommendation_profile,
+            facts,
+        )
         # The public replay fixture carries no policy records or versioned rank
         # anchors.  Task 5 is still entered through its new API; Task 4 remains
         # explicitly unavailable instead of falling back to bundled xibao data.
         pathways = evaluate_pathways(pathway_profile, (), model=None)
         model = build_report_model(
             report_profile,
-            capability,
             recommendations,
             rank=None,
             pathways=pathways,
-            manifest=manifest,
+            evidence=evidence,
         )
         markdown = render_markdown(model)
         hit = find_price_text(markdown)
@@ -1022,7 +987,7 @@ def _evidence_main(argv) -> int:
     except EvidenceReportCapabilityError as error:
         print(f"缺少能力：{error}", file=sys.stderr)
         return 3
-    except (EvidenceReportInputError, OSError) as error:
+    except (EvidenceReportInputError, OSError, TypeError, ValueError) as error:
         print(f"错误[REPORT_002]：{error}", file=sys.stderr)
         return 2
     print(markdown, end="")

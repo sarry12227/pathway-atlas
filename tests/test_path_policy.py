@@ -111,6 +111,10 @@ def policy(policy_id="policy-a", pathway_type="strong_foundation", **changes):
         "valid_year": 2026,
         "eligibility_requirements": ("完成高考报名",),
         "disqualifying_facts": (),
+        "professional_options": ("虚构专业甲", "虚构专业乙"),
+        "training_arrangements": "校内合成培养方案",
+        "transition_rules": "按合成政策完成阶段考核后转段",
+        "outcomes": "合成毕业与升学出口说明",
         "service_employment_obligations": "明确无服务期或就业义务",
         "penalty_exit_rules": "可按简章规定退出，无额外违约金",
         "fees_and_subsidies": "按普通专业学费标准，无专项补助",
@@ -143,6 +147,60 @@ def model(**changes):
 
 
 class PathPolicySafetyTest(unittest.TestCase):
+    def test_complete_policy_details_are_preserved_and_each_missing_field_is_pending(self):
+        complete = path_recommend.evaluate_pathways(profile(), (policy(),)).items[0]
+        self.assertEqual(complete.status, "formal")
+        self.assertEqual(set(complete.professional_options), {"虚构专业甲", "虚构专业乙"})
+        self.assertEqual(complete.training_arrangements, "校内合成培养方案")
+        self.assertEqual(complete.transition_rules, "按合成政策完成阶段考核后转段")
+        self.assertEqual(complete.outcomes, "合成毕业与升学出口说明")
+        self.assertEqual(complete.service_employment_obligations, "明确无服务期或就业义务")
+        self.assertEqual(complete.penalty_exit_rules, "可按简章规定退出，无额外违约金")
+        self.assertEqual(complete.fees_and_subsidies, "按普通专业学费标准，无专项补助")
+
+        missing_cases = {
+            "professional_options": (),
+            "training_arrangements": None,
+            "transition_rules": None,
+            "outcomes": None,
+            "service_employment_obligations": None,
+            "penalty_exit_rules": None,
+            "fees_and_subsidies": None,
+        }
+        for field, value in missing_cases.items():
+            with self.subTest(field=field):
+                item = path_recommend.evaluate_pathways(
+                    profile(), (policy(**{field: value}),)
+                ).items[0]
+                self.assertEqual(item.status, "pending_verification")
+                self.assertTrue(item.missing_constraints)
+
+    def test_target_result_carries_strict_model_identity_method_and_evidence(self):
+        documented = model()
+        result = path_recommend.evaluate_pathways(
+            profile(), (policy(),), documented
+        )
+
+        self.assertEqual(result.model_id, documented.model_id)
+        self.assertEqual(result.model_method, documented.method)
+        self.assertEqual(result.model_evidence_status, documented.evidence_status)
+        with self.assertRaises((TypeError, ValueError)):
+            replace(result, model_evidence_status=None)
+        with self.assertRaises((TypeError, ValueError)):
+            replace(
+                result,
+                model_evidence_status=EvidenceStatus.REFERENCE,
+                model_source_ids=("only-a", "only-b"),
+            )
+        with self.assertRaises((TypeError, ValueError)):
+            path_recommend.PathwayResult(
+                items=result.items,
+                formal_shortlist=result.formal_shortlist,
+                target_rank=result.target_rank,
+                transformation=result.transformation,
+                model_source_ids=result.model_source_ids,
+            )
+
     def test_no_model_never_creates_an_unexplained_target_rank(self):
         """Catches reintroducing a hidden fixed rank adjustment."""
 
@@ -697,6 +755,71 @@ class PathwayContractTest(unittest.TestCase):
                     ):
                         constructor()
 
+    def test_private_output_gate_covers_every_visible_text_contract(self):
+        """Catches PII, secrets, and paths leaking through non-profile fields."""
+
+        item = path_recommend.evaluate_pathways(profile(), (policy(),)).items[0]
+        unsafe_texts = (
+            "姓名：张三",
+            "Student Name: Alice",
+            "wechat: wx-student",
+            "微 信：wx-student",
+            "手机号 13800138000",
+            "手机号 138 0013 8000",
+            "联系电话 138-0013-8000",
+            "联系电话 138.0013.8000",
+            "联系电话 138·0013·8000",
+            "联系电话 138\u200b0013\u200b8000",
+            "电话 010-12345678",
+            "wxid_abc123",
+            "就读学校：某中学",
+            "current school: Example High",
+            "高三（1）班",
+            "住址：某路1号",
+            "api_key: secret-value",
+            "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789",
+            "前缀C:\\Users\\student\\record.txt",
+            "\\\\server\\share\\record.txt",
+            "/home/student/record.txt",
+            "https://example.invalid/private",
+            "www.example.com/private",
+            "example.com/private",
+            "$HOME/private",
+            "$USERPROFILE\\private",
+            "$APPDATA\\private",
+            "$CODEX_HOME/private",
+            "%USERPROFILE%\\private\\report.md",
+            "..\\private\\report.md",
+            ".\\private\\report.md",
+            "ghp_abcdefghijklmnopqrstuvwxyz0123456789",
+            "AKIAIOSFODNN7EXAMPLE",
+            "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJzdHVkZW50In0.signature123456",
+        )
+        for unsafe in unsafe_texts:
+            constructors = (
+                lambda unsafe=unsafe: policy(training_arrangements=unsafe),
+                lambda unsafe=unsafe: policy(professional_options=(unsafe,)),
+                lambda unsafe=unsafe: model(province=unsafe),
+                lambda unsafe=unsafe: replace(item, calculation_basis=unsafe),
+                lambda unsafe=unsafe: replace(item, outcomes=unsafe),
+                lambda unsafe=unsafe: path_recommend.PathwayResult(warnings=(unsafe,)),
+            )
+            for constructor in constructors:
+                with self.subTest(unsafe=unsafe, constructor=constructor):
+                    with self.assertRaisesRegex(
+                        ValueError, "output text contains private or non-public content"
+                    ):
+                        constructor()
+
+        # Institution fields may carry ordinary university names; only student-school
+        # context labels are private.
+        self.assertEqual(policy(institution="虚构学校大学").institution, "虚构学校大学")
+        for benign in ("Saxophone", "Secretarial", "Token Economy"):
+            with self.subTest(benign=benign):
+                self.assertEqual(policy(training_arrangements=benign).training_arrangements, benign)
+                self.assertEqual(replace(item, outcomes=benign).outcomes, benign)
+                self.assertEqual(path_recommend.PathwayResult(warnings=(benign,)).warnings, (benign,))
+
     def test_marketing_source_ids_are_rejected_and_model_sources_stay_structured(self):
         """Catches marketing slugs and source IDs leaking into prose output."""
 
@@ -782,6 +905,9 @@ class PathwayContractTest(unittest.TestCase):
                         target_rank=base_item.target_rank,
                         transformation="documented transformation",
                         model_source_ids=(source_id,),
+                        model_id="model-a",
+                        model_method="documented_rank_delta",
+                        model_evidence_status=EvidenceStatus.OFFICIAL,
                     ).model_source_ids,
                     (source_id,),
                 )
@@ -820,6 +946,9 @@ class PathwayContractTest(unittest.TestCase):
             target_rank=1,
             transformation="documented transformation",
             model_source_ids=("documented-model-source",),
+            model_id="model-a",
+            model_method="documented_rank_delta",
+            model_evidence_status=EvidenceStatus.OFFICIAL,
             warnings=(),
         )
         self.assertEqual(result.target_rank, 1)
@@ -876,7 +1005,8 @@ class PathwayPolicySchemaTest(unittest.TestCase):
                 self.assertTrue(structural_schema_errors(self.schema, payload))
 
         for field in (
-            "valid_year", "service_employment_obligations",
+            "valid_year", "training_arrangements", "transition_rules", "outcomes",
+            "service_employment_obligations",
             "penalty_exit_rules", "fees_and_subsidies",
         ):
             nullable = dict(valid, **{field: None})

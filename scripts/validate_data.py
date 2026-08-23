@@ -26,6 +26,7 @@ try:
         _DirectoryIdentity,
         _parse_config,
         _read_metadata,
+        validate_subject_selection,
     )
 except ModuleNotFoundError:  # Direct ``python scripts/validate_data.py`` compatibility.
     from data_loader import DataError, _normalize_admission_row, _read_csv_records  # type: ignore
@@ -37,6 +38,7 @@ except ModuleNotFoundError:  # Direct ``python scripts/validate_data.py`` compat
         _DirectoryIdentity,
         _parse_config,
         _read_metadata,
+        validate_subject_selection,
     )
 
 
@@ -92,6 +94,75 @@ class ValidationIssue:
             self.code,
             self.message,
         )
+
+
+@dataclass(frozen=True)
+class ValidatedAdmissionRow:
+    """One normalized admission row captured by the validator's secure read."""
+
+    _items: tuple[tuple[str, str | int], ...]
+
+    def __post_init__(self) -> None:
+        if not self._items or tuple(sorted(self._items)) != self._items:
+            raise ValueError("validated admission row must be a sorted non-empty snapshot")
+        if len({key for key, _value in self._items}) != len(self._items):
+            raise ValueError("validated admission row keys must be unique")
+        if any(
+            not isinstance(key, str)
+            or not key
+            or not isinstance(value, (str, int))
+            or isinstance(value, bool)
+            for key, value in self._items
+        ):
+            raise TypeError("validated admission row must contain JSON scalar fields")
+
+    @classmethod
+    def from_mapping(cls, row: dict[str, str | int]) -> "ValidatedAdmissionRow":
+        return cls(tuple(sorted(row.items())))
+
+    def to_dict(self) -> dict[str, str | int]:
+        return dict(self._items)
+
+
+@dataclass(frozen=True)
+class ValidatedDatasetSnapshot:
+    """Authenticated province metadata and data parsed during one validation pass."""
+
+    config: ProvinceConfig
+    admission_rows: tuple[ValidatedAdmissionRow, ...]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.config, ProvinceConfig):
+            raise TypeError("snapshot config must be ProvinceConfig")
+        rows = tuple(self.admission_rows)
+        if not all(isinstance(row, ValidatedAdmissionRow) for row in rows):
+            raise TypeError("snapshot rows must be ValidatedAdmissionRow records")
+        object.__setattr__(self, "admission_rows", rows)
+
+    def validate_subjects(
+        self,
+        primary_subject: str,
+        secondary_subjects: tuple[str, ...],
+    ) -> None:
+        validate_subject_selection(
+            self.config,
+            primary_subject,
+            list(secondary_subjects),
+        )
+
+
+@dataclass(frozen=True)
+class DatasetValidationResult:
+    snapshot: ValidatedDatasetSnapshot | None
+    issues: tuple[ValidationIssue, ...]
+
+    def __post_init__(self) -> None:
+        issues = tuple(self.issues)
+        if not all(isinstance(issue, ValidationIssue) for issue in issues):
+            raise TypeError("validation result issues must be ValidationIssue records")
+        if (self.snapshot is None) == (not issues):
+            raise ValueError("validation result must contain exactly snapshot or issues")
+        object.__setattr__(self, "issues", issues)
 
 
 def _issue(
@@ -170,7 +241,7 @@ def _validate_table(
     parent_identity: _DirectoryIdentity,
     dataset_identity: _DirectoryIdentity,
     operation_hook: Callable[[], None] | None = None,
-) -> list[ValidationIssue]:
+) -> tuple[list[ValidationIssue], tuple[ValidatedAdmissionRow, ...]]:
     issues: list[ValidationIssue] = []
     rule = _KNOWN_TABLES[table]
     _verify_dataset_identity(parent_identity, dataset_identity)
@@ -188,11 +259,11 @@ def _validate_table(
             code = "data_file_changed"
         if "格式损坏" in text or "严格 UTF-8" in text:
             code = "invalid_csv"
-        return [_issue(code, f"文件级错误：{text}", table, path)]
+        return [_issue(code, f"文件级错误：{text}", table, path)], ()
     _verify_dataset_identity(parent_identity, dataset_identity)
 
     if not headers or not rows:
-        return [_issue("empty_file", "文件级错误：文件为空（无数据行）", table, path)]
+        return [_issue("empty_file", "文件级错误：文件为空（无数据行）", table, path)], ()
 
     canonical_headers = _canonical_headers(table, headers)
     missing = [field for field in rule["required_headers"] if field not in canonical_headers]
@@ -204,17 +275,27 @@ def _validate_table(
                 table,
                 path,
             )
-        ]
+        ], ()
 
     seen: set[tuple[str, ...]] = set()
     school_identities: dict[tuple[int, str, str], str] = {}
     valid_years: set[int] = set()
+    admission_rows: list[ValidatedAdmissionRow] = []
     for line, source_row in enumerate(rows, start=2):
         try:
             row = _normalize_admission_row(source_row) if table == "tou_dang" else source_row
         except DataError:
             issues.append(_issue("alias_conflict", f"行{line}：字段迁移别名冲突", table, path, line))
             continue
+
+        if table == "tou_dang":
+            typed_row: dict[str, str | int] = dict(row)
+            for integer_field in rule["integers"]:
+                parsed_value = _integer(row.get(integer_field, ""))
+                if parsed_value is not None:
+                    typed_row[integer_field] = parsed_value
+            typed_row["major_group_name"] = row.get("program_group", "")
+            admission_rows.append(ValidatedAdmissionRow.from_mapping(typed_row))
 
         for field in rule["nonempty"]:
             value = row.get(field, "")
@@ -290,13 +371,21 @@ def _validate_table(
     if "year" in rule["integers"] and not valid_years:
         issues.append(_issue("missing_year_coverage", "文件级错误：没有 2000..2100 内的有效年份覆盖", table, path))
     _verify_dataset_identity(parent_identity, dataset_identity)
-    return issues
+    return issues, tuple(admission_rows)
 
 
 def validate_dataset(province_dir: os.PathLike[str] | str) -> list[ValidationIssue]:
     """Return a sorted issue list; malformed user data never escapes as a parser error."""
 
-    return _validate_dataset(province_dir)
+    return list(_validate_dataset_snapshot(province_dir).issues)
+
+
+def validate_dataset_snapshot(
+    province_dir: os.PathLike[str] | str,
+) -> DatasetValidationResult:
+    """Validate and return only data parsed by the authenticated secure reads."""
+
+    return _validate_dataset_snapshot(province_dir)
 
 
 def _validate_dataset(
@@ -307,24 +396,42 @@ def _validate_dataset(
 ) -> list[ValidationIssue]:
     """Internal implementation with deterministic filesystem race-test seams."""
 
+    return list(
+        _validate_dataset_snapshot(
+            province_dir,
+            operation_hook=operation_hook,
+            table_operation_hook=table_operation_hook,
+        ).issues
+    )
+
+
+def _validate_dataset_snapshot(
+    province_dir: os.PathLike[str] | str,
+    *,
+    operation_hook: Callable[[], None] | None = None,
+    table_operation_hook: Callable[[str, Path], None] | None = None,
+) -> DatasetValidationResult:
+    """Internal authenticated snapshot implementation with race-test seams."""
+
     try:
         candidate = Path(province_dir)
         normalized = Path(os.path.abspath(os.fspath(candidate)))
         if not candidate.is_absolute() or candidate != normalized:
-            return [_issue("unsafe_dataset_path", "数据目录必须是已解析的绝对规范路径", "dataset", normalized)]
+            return DatasetValidationResult(None, (_issue("unsafe_dataset_path", "数据目录必须是已解析的绝对规范路径", "dataset", normalized),))
         parent_identity = _DirectoryIdentity.capture(normalized.parent, "省份数据父目录")
         dataset_identity = _DirectoryIdentity.capture(normalized, "省份数据目录")
         _verify_dataset_identity(parent_identity, dataset_identity)
         config = _load_config(parent_identity, dataset_identity)
     except ProvincePathError:
-        return [_issue("dataset_path_changed", "省份数据目录在校验期间发生变化", "dataset", normalized)]
+        return DatasetValidationResult(None, (_issue("dataset_path_changed", "省份数据目录在校验期间发生变化", "dataset", normalized),))
     except (DataError, ProvinceConfigError, ProvinceRegistryError, OSError, RuntimeError, TypeError, ValueError):
         path = Path(os.path.abspath(os.fspath(province_dir))) if isinstance(province_dir, (str, os.PathLike)) else Path(".").resolve()
-        return [_issue("invalid_province_config", "province.json 未通过严格配置校验", "province", path / "province.json")]
+        return DatasetValidationResult(None, (_issue("invalid_province_config", "province.json 未通过严格配置校验", "province", path / "province.json"),))
 
     directory = dataset_identity.path
     found = 0
     issues: list[ValidationIssue] = []
+    admission_rows: tuple[ValidatedAdmissionRow, ...] = ()
     try:
         if operation_hook is not None:
             operation_hook()
@@ -344,24 +451,31 @@ def _validate_dataset(
             table_hook = None
             if table_operation_hook is not None:
                 table_hook = lambda table=table, path=path: table_operation_hook(table, path)
-            issues.extend(
-                _validate_table(
-                    path,
-                    table,
-                    config,
-                    parent_identity,
-                    dataset_identity,
-                    table_hook,
-                )
+            table_issues, table_rows = _validate_table(
+                path,
+                table,
+                config,
+                parent_identity,
+                dataset_identity,
+                table_hook,
             )
+            issues.extend(table_issues)
+            if table == "tou_dang":
+                admission_rows = table_rows
             _verify_dataset_identity(parent_identity, dataset_identity)
         _verify_dataset_identity(parent_identity, dataset_identity)
         if found == 0:
             issues.append(_issue("no_known_data_files", "目录内未找到任何已知数据文件", "dataset", directory))
         _verify_dataset_identity(parent_identity, dataset_identity)
-        return sorted(issues, key=ValidationIssue.sort_key)
+        ordered = tuple(sorted(issues, key=ValidationIssue.sort_key))
+        if ordered:
+            return DatasetValidationResult(None, ordered)
+        return DatasetValidationResult(
+            ValidatedDatasetSnapshot(config=config, admission_rows=admission_rows),
+            (),
+        )
     except ProvincePathError:
-        return [_issue("dataset_path_changed", "省份数据目录在校验期间发生变化", "dataset", directory)]
+        return DatasetValidationResult(None, (_issue("dataset_path_changed", "省份数据目录在校验期间发生变化", "dataset", directory),))
 
 
 def main(argv: list[str] | None = None) -> int:

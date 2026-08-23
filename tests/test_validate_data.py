@@ -11,7 +11,12 @@ from pathlib import Path
 
 from scripts.data_loader import DataError, load_admission_rows, load_toudang
 from scripts import validate_data as validator_module
-from scripts.validate_data import ValidationIssue, validate_dataset
+from scripts.validate_data import (
+    ValidatedDatasetSnapshot,
+    ValidationIssue,
+    validate_dataset,
+    validate_dataset_snapshot,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -44,6 +49,84 @@ def write_csv(path, headers, rows):
 
 
 class ValidationContractTest(unittest.TestCase):
+    def test_validated_snapshot_is_authenticated_deep_frozen_and_detached(self):
+        result = validate_dataset_snapshot((FIXTURES / "demo-312").resolve())
+
+        self.assertEqual(result.issues, ())
+        self.assertIsInstance(result.snapshot, ValidatedDatasetSnapshot)
+        snapshot = result.snapshot
+        assert snapshot is not None
+        self.assertEqual(snapshot.config.province, "演示甲省")
+        self.assertEqual(snapshot.admission_rows[0].to_dict()["school_name"], "虚构甲大学")
+        with self.assertRaises(FrozenInstanceError):
+            snapshot.admission_rows = ()
+        payload = snapshot.admission_rows[0].to_dict()
+        payload["school_name"] = "外部篡改"
+        self.assertEqual(snapshot.admission_rows[0].to_dict()["school_name"], "虚构甲大学")
+
+    def test_invalid_dataset_snapshot_fails_closed_without_data(self):
+        result = validate_dataset_snapshot((FIXTURES / "duplicate-program").resolve())
+
+        self.assertIsNone(result.snapshot)
+        self.assertIn("duplicate_admission_key", {issue.code for issue in result.issues})
+
+    def test_snapshot_survives_post_validation_same_name_file_replacement(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary) / "dataset"
+            shutil.copytree(FIXTURES / "demo-312", directory)
+            result = validate_dataset_snapshot(directory.resolve())
+            self.assertEqual(result.issues, ())
+            assert result.snapshot is not None
+
+            replacement = directory / "replacement.csv"
+            write_csv(
+                replacement,
+                ("year", "province", "subject_group", "school_code", "school_name", "program_group", "min_score", "min_rank", "remarks"),
+                ((2026, "演示甲省", "物理", "EVIL", "替换大学", "第99组", 1, 999999, ""),),
+            )
+            authenticated = directory / "authenticated.csv"
+            (directory / "tou_dang.csv").rename(authenticated)
+            replacement.rename(directory / "tou_dang.csv")
+
+            self.assertEqual(
+                result.snapshot.admission_rows[0].to_dict()["school_name"],
+                "虚构甲大学",
+            )
+
+    def test_snapshot_same_name_dataset_and_csv_races_fail_closed(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            directory = root / "dataset"
+            moved = root / "authenticated-dataset"
+            shutil.copytree(FIXTURES / "demo-312", directory)
+
+            def replace_dataset():
+                directory.rename(moved)
+                directory.mkdir()
+                shutil.copy2(moved / "tou_dang.csv", directory / "tou_dang.csv")
+
+            dataset_result = validator_module._validate_dataset_snapshot(
+                directory.resolve(), operation_hook=replace_dataset
+            )
+            self.assertIsNone(dataset_result.snapshot)
+            self.assertEqual([issue.code for issue in dataset_result.issues], ["dataset_path_changed"])
+
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary) / "dataset"
+            shutil.copytree(FIXTURES / "demo-312", directory)
+            original = directory / "authenticated-tou_dang.csv"
+
+            def replace_table(table, path):
+                if table == "tou_dang":
+                    path.rename(original)
+                    shutil.copy2(original, path)
+
+            file_result = validator_module._validate_dataset_snapshot(
+                directory.resolve(), table_operation_hook=replace_table
+            )
+            self.assertIsNone(file_result.snapshot)
+            self.assertIn("data_file_changed", {issue.code for issue in file_result.issues})
+
     def test_issue_is_immutable_serializable_and_has_stable_fields(self):
         issue = ValidationIssue(
             code="invalid_integer",

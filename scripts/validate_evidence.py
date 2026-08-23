@@ -9,6 +9,8 @@ hash, and reapplies the shared source-independence policy.
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
+from datetime import date, datetime
 import json
 import os
 from pathlib import Path
@@ -21,7 +23,9 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from scripts.contracts import (  # noqa: E402
+    CapabilityReport,
     CapabilityTier,
+    EvidenceManifest,
     EvidenceStatus,
     FactClaim,
     SourceCandidate,
@@ -53,6 +57,68 @@ _MAX_ARTIFACT_BYTES = 8 * 1024 * 1024
 _MAX_BUNDLE_BYTES = 24 * 1024 * 1024
 _REPARSE_POINT = 0x0400
 _SOURCE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
+
+
+@dataclass(frozen=True)
+class FrozenJsonRecord:
+    """Canonical JSON object whose callers only receive detached copies."""
+
+    _canonical_json: str
+
+    @classmethod
+    def _from_mapping(cls, value: dict[str, Any]) -> "FrozenJsonRecord":
+        return cls(json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+
+    def to_dict(self) -> dict[str, Any]:
+        value = json.loads(self._canonical_json)
+        if not isinstance(value, dict):  # Defensive invariant for corrupted instances.
+            raise TypeError("frozen JSON record is not an object")
+        return value
+
+
+@dataclass(frozen=True, init=False)
+class ValidatedEvidenceSnapshot:
+    """Factory-only, hash-bound snapshot of one successfully validated bundle."""
+
+    manifest: EvidenceManifest
+    capability: CapabilityReport
+    retrieval_dates: tuple[str, ...]
+    facts: tuple[FrozenJsonRecord, ...]
+    rejections: tuple[FrozenJsonRecord, ...]
+    manifest_hash: str
+
+    def __init__(self) -> None:
+        raise TypeError("ValidatedEvidenceSnapshot is factory-only")
+
+    @classmethod
+    def _create(
+        cls,
+        manifest: EvidenceManifest,
+        capability: CapabilityReport,
+        retrieval_dates: tuple[str, ...],
+        facts: tuple[FrozenJsonRecord, ...],
+        rejections: tuple[FrozenJsonRecord, ...],
+    ) -> "ValidatedEvidenceSnapshot":
+        instance = object.__new__(cls)
+        object.__setattr__(instance, "manifest", manifest)
+        object.__setattr__(instance, "capability", capability)
+        object.__setattr__(instance, "retrieval_dates", retrieval_dates)
+        object.__setattr__(instance, "facts", facts)
+        object.__setattr__(instance, "rejections", rejections)
+        object.__setattr__(instance, "manifest_hash", manifest.manifest_hash)
+        return instance
+
+
+@dataclass(frozen=True)
+class EvidenceValidationResult:
+    snapshot: ValidatedEvidenceSnapshot | None
+    issues: tuple[tuple[str, str, str], ...]
+
+    def __post_init__(self) -> None:
+        issues = tuple(self.issues)
+        if (self.snapshot is None) == (not issues):
+            raise ValueError("evidence validation must contain exactly snapshot or issues")
+        object.__setattr__(self, "issues", issues)
 
 
 class BundleArtifactError(Exception):
@@ -214,6 +280,22 @@ def _is_integer(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
 
+def _retrieval_date(value: Any) -> str | None:
+    if not isinstance(value, str) or re.fullmatch(
+        r"\d{4}-\d{2}-\d{2}T.+(?:Z|[+-]\d{2}:\d{2})", value
+    ) is None:
+        return None
+    try:
+        parsed = datetime.fromisoformat(
+            value[:-1] + "+00:00" if value.endswith("Z") else value
+        )
+        result = parsed.date().isoformat()
+        date.fromisoformat(result)
+    except ValueError:
+        return None
+    return result if parsed.tzinfo is not None else None
+
+
 def _is_string_array(value: Any) -> bool:
     return isinstance(value, list) and all(isinstance(item, str) for item in value)
 
@@ -269,7 +351,7 @@ _CANDIDATE_FIELDS = {
     "publisher": lambda value: isinstance(value, str) and bool(value.strip()),
     "tier": _one_of({item.value for item in SourceTier}),
     "published_at": _is_nullable_string,
-    "retrieved_at": _is_string,
+    "retrieved_at": lambda value: _retrieval_date(value) is not None,
     "content_hash": lambda value: isinstance(value, str) and bool(value.strip()),
     "citation_root": lambda value: isinstance(value, str) and bool(value.strip()),
     "summary": _is_string,
@@ -555,7 +637,9 @@ def _validate_policy(
     return errors, len(unique)
 
 
-def validate_bundle(bundle: Path) -> dict[str, Any]:
+def _validate_bundle_with_payload(
+    bundle: Path,
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
     summary: dict[str, Any] = {
         "valid": False,
         "candidate_count": 0,
@@ -568,7 +652,7 @@ def validate_bundle(bundle: Path) -> dict[str, Any]:
         texts = {name: reader.read(name) for name in _EXPECTED_ARTIFACTS}
     except BundleArtifactError as error:
         summary["errors"].append(_error("artifact", str(error)))
-        return summary
+        return summary, None
 
     try:
         manifest = _parse_json(texts["manifest.json"], "manifest.json")
@@ -579,7 +663,7 @@ def validate_bundle(bundle: Path) -> dict[str, Any]:
         rejections = _parse_jsonl(texts["rejections.jsonl"], "rejections.jsonl")
     except JsonDataError as error:
         summary["errors"].append(_error("schema", str(error)))
-        return summary
+        return summary, None
 
     summary["candidate_count"] = len(candidates)
     summary["fact_count"] = len(facts)
@@ -617,7 +701,81 @@ def validate_bundle(bundle: Path) -> dict[str, Any]:
 
     summary["errors"] = errors
     summary["valid"] = not errors
+    payload = {
+        "manifest": manifest,
+        "capability": capability,
+        "candidates": candidates,
+        "facts": facts,
+        "rejections": rejections,
+    }
+    return summary, payload
+
+
+def validate_bundle(bundle: Path) -> dict[str, Any]:
+    """Return the historical machine-readable validation summary."""
+
+    summary, _payload = _validate_bundle_with_payload(bundle)
     return summary
+
+
+def validate_bundle_snapshot(bundle: Path) -> EvidenceValidationResult:
+    """Return a factory-only snapshot only when the exact read bundle is valid."""
+
+    summary, payload = _validate_bundle_with_payload(bundle)
+    if not summary["valid"] or payload is None:
+        issues = tuple(
+            (
+                str(item.get("code", "invalid")),
+                str(item.get("message", "bundle validation failed")),
+                str(item.get("location", "bundle")),
+            )
+            for item in summary["errors"]
+        )
+        if not issues:
+            issues = (("invalid", "bundle validation failed", "bundle"),)
+        return EvidenceValidationResult(None, issues)
+    try:
+        manifest_value = payload["manifest"]
+        capability_value = payload["capability"]
+        candidates = payload["candidates"]
+        facts = payload["facts"]
+        rejections = payload["rejections"]
+        manifest = EvidenceManifest(
+            schema_version=manifest_value["schema_version"],
+            session_id=manifest_value["session_id"],
+            capability_tier=CapabilityTier(manifest_value["capability_tier"]),
+            candidates_filename=manifest_value["candidates_filename"],
+            facts_filename=manifest_value["facts_filename"],
+            rejected_count=manifest_value["rejected_count"],
+            manifest_hash=manifest_value["manifest_hash"],
+        )
+        capability = CapabilityReport(
+            tier=CapabilityTier(capability_value["tier"]),
+            host_capabilities=tuple(capability_value["host_capabilities"]),
+            available_capabilities=tuple(capability_value["available_capabilities"]),
+            missing_capabilities=tuple(capability_value["missing_capabilities"]),
+            degradations=tuple(capability_value["degradations"]),
+            python_version=capability_value["python_version"],
+            optional_modules=tuple(capability_value["optional_modules"]),
+        )
+        retrieval_dates = tuple(
+            sorted({_retrieval_date(item["retrieved_at"]) for item in candidates})
+        )
+        if not retrieval_dates or any(item is None for item in retrieval_dates):
+            raise ValueError("validated candidates lack retrieval dates")
+        snapshot = ValidatedEvidenceSnapshot._create(
+            manifest,
+            capability,
+            tuple(item for item in retrieval_dates if item is not None),
+            tuple(FrozenJsonRecord._from_mapping(item) for item in facts),
+            tuple(FrozenJsonRecord._from_mapping(item) for item in rejections),
+        )
+    except (KeyError, TypeError, ValueError) as error:
+        return EvidenceValidationResult(
+            None,
+            (("snapshot", "validated bundle could not form a snapshot", "bundle"),),
+        )
+    return EvidenceValidationResult(snapshot, ())
 
 
 def _parser() -> argparse.ArgumentParser:
