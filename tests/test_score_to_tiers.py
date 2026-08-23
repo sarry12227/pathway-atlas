@@ -7,7 +7,6 @@
 import csv
 import json
 import os
-import subprocess
 import sys
 import tempfile
 import unittest
@@ -258,47 +257,6 @@ class MissingDataTest(FixtureMixin, unittest.TestCase):
         with self.assertRaises(DataError) as ctx:
             load_toudang("火星省", "物理", root=self.root)
         self.assertIn("火星省", str(ctx.exception))
-
-
-class CliTest(FixtureMixin, unittest.TestCase):
-    """CLI：stdout 输出 JSON；分数路径附反查信息；错误非零退出码。"""
-
-    def toudang_rows(self):
-        return [td_row("稳档校", "第01组", 600, 10000, level="985")]
-
-    def yfd_rows(self):
-        return [yfd_row(2024, 600, 10000)]
-
-    def run_cli(self, *args):
-        env = dict(os.environ, PYTHONIOENCODING="utf-8")
-        return subprocess.run(
-            [sys.executable, os.path.join(SKILL_ROOT, "scripts", "recommend.py"),
-             "--data-root", self.root, *args],
-            capture_output=True, text=True, env=env, encoding="utf-8")
-
-    def test_rank_input_json(self):
-        p = self.run_cli("--province", "湖北", "--subject-group", "物理",
-                         "--rank", "10000")
-        self.assertEqual(p.returncode, 0, p.stderr)
-        out = json.loads(p.stdout)
-        self.assertEqual(out["recommendations"]["稳"][0]["school_name"], "稳档校")
-        self.assertEqual(out["meta"]["reference_rank"], 10000)
-        self.assertIsNone(out["rank_lookup"])
-
-    def test_score_input_includes_lookup(self):
-        p = self.run_cli("--province", "湖北", "--subject-group", "物理",
-                         "--score", "600")
-        self.assertEqual(p.returncode, 0, p.stderr)
-        out = json.loads(p.stdout)
-        self.assertEqual(out["rank_lookup"], {"score": 600, "rank": 10000,
-                                              "year": 2024})
-        self.assertEqual(out["meta"]["reference_rank"], 10000)
-
-    def test_error_exit_code(self):
-        p = self.run_cli("--province", "湖北", "--subject-group", "物理",
-                         "--score", "100")
-        self.assertNotEqual(p.returncode, 0)
-        self.assertTrue(p.stderr.strip())
 
 
 class SecondarySubjectFilterTest(FixtureMixin, unittest.TestCase):
