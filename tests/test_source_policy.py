@@ -202,6 +202,40 @@ class SourcePolicyTest(unittest.TestCase):
         self.assertEqual(fact.value, 588)
         self.assertEqual(fact.source_ids, ("b1",))
 
+    def test_a_representative_survives_same_root_b_repost_with_earlier_id(self):
+        shared_root = "https://official.test/notices?id=1"
+        official = self.candidate(
+            "z-official",
+            tier=SourceTier.A,
+            url=shared_root,
+            citation_root=shared_root,
+        )
+        repost = self.candidate(
+            "a-repost",
+            tier=SourceTier.B,
+            citation_root=shared_root,
+        )
+        unique, _ = deduplicate_candidates([repost, official])
+        fact = evaluate_claims("min_score", [self.claim("a-repost", 588)], [repost, official])
+        self.assertEqual([source.source_id for source in unique], ["z-official"])
+        self.assertEqual(fact.status, EvidenceStatus.OFFICIAL)
+        self.assertEqual(fact.value, 588)
+        self.assertEqual(fact.source_ids, ("z-official",))
+
+    def test_two_traceable_b_claims_can_corroborate_despite_untraceable_agreement(self):
+        fact = evaluate_claims(
+            "min_score",
+            [self.claim("b1", 588), self.claim("b2", 588), self.claim("b3", 588)],
+            [
+                self.candidate("b1", tier=SourceTier.B),
+                self.candidate("b2", tier=SourceTier.B),
+                self.candidate("b3", tier=SourceTier.B, citation_root=""),
+            ],
+        )
+        self.assertEqual(fact.status, EvidenceStatus.CORROBORATED)
+        self.assertEqual(fact.value, 588)
+        self.assertEqual(fact.source_ids, ("b1", "b2"))
+
     def test_rejected_source_claim_is_not_counted_toward_consensus(self):
         fact = evaluate_claims(
             "min_score",

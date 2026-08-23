@@ -6,6 +6,7 @@ import hashlib
 import json
 import unicodedata
 from collections import defaultdict
+from dataclasses import replace
 from typing import Any, Iterable
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
@@ -92,6 +93,15 @@ def deduplicate_candidates(
 ) -> tuple[list[SourceCandidate], dict[str, str]]:
     """Keep one deterministic candidate from every non-independent component."""
 
+    unique, rejected, _ = _deduplicate_with_representatives(candidates)
+    return unique, rejected
+
+
+def _deduplicate_with_representatives(
+    candidates: Iterable[SourceCandidate],
+) -> tuple[list[SourceCandidate], dict[str, str], dict[str, str]]:
+    """Deduplicate candidates and retain a source-ID-to-representative map."""
+
     ordered = sorted(candidates, key=_candidate_sort_key)
     parents = list(range(len(ordered)))
 
@@ -126,15 +136,27 @@ def deduplicate_candidates(
         components[find(index)].append(index)
 
     unique: list[SourceCandidate] = []
-    rejected: dict[str, str] = {}
-    for component in sorted(components.values(), key=lambda members: _candidate_sort_key(ordered[members[0]])):
+    rejected_reasons: dict[str, str] = {}
+    representatives: dict[str, str] = {}
+    for component in components.values():
         component.sort()
-        retained = component[0]
+        retained = min(component, key=lambda index: _representative_sort_key(ordered[index]))
         unique.append(ordered[retained])
         reason = _component_rejection_reason([ordered[index] for index in component])
-        for index in component[1:]:
-            rejected[ordered[index].source_id] = reason
-    return unique, rejected
+        representative_id = ordered[retained].source_id
+        for index in component:
+            source_id = ordered[index].source_id
+            representatives[source_id] = representative_id
+            if index != retained:
+                rejected_reasons[source_id] = reason
+
+    unique.sort(key=_candidate_sort_key)
+    rejected = {
+        candidate.source_id: rejected_reasons[candidate.source_id]
+        for candidate in ordered
+        if candidate.source_id in rejected_reasons
+    }
+    return unique, rejected, representatives
 
 
 def evaluate_claims(
@@ -144,13 +166,13 @@ def evaluate_claims(
 ) -> EvidenceFact:
     """Apply tiered evidence policy to claims for one field without estimation."""
 
-    unique_sources, _ = deduplicate_candidates(sources)
+    unique_sources, _, representatives = _deduplicate_with_representatives(sources)
     sources_by_id = {source.source_id: source for source in unique_sources}
     field_claims = sorted(
         (
-            claim
+            replace(claim, source_id=representatives[claim.source_id])
             for claim in claims
-            if claim.field == field and claim.source_id in sources_by_id
+            if claim.field == field and claim.source_id in representatives
         ),
         key=_claim_sort_key,
     )
@@ -200,10 +222,10 @@ def evaluate_claims(
         ]
         if _has_conflict(b_claims):
             return _conflict_fact(field, b_claims)
-        if len(traceable_b_claims) == len(b_claims) and len(_source_ids(b_claims)) >= 2:
+        if len(_source_ids(traceable_b_claims)) >= 2:
             return _evaluate_layer(
                 field,
-                b_claims,
+                traceable_b_claims,
                 EvidenceStatus.CORROBORATED,
                 2,
                 "two-source-consensus",
@@ -252,6 +274,15 @@ def _candidate_sort_key(candidate: SourceCandidate) -> tuple[str, ...]:
         candidate.retrieved_at,
         candidate.summary,
     )
+
+
+def _representative_sort_key(candidate: SourceCandidate) -> tuple[int, tuple[str, ...]]:
+    tier_priority = {
+        SourceTier.A: 0,
+        SourceTier.B: 1,
+        SourceTier.C: 2,
+    }
+    return (tier_priority[candidate.tier], _candidate_sort_key(candidate))
 
 
 def _candidate_identities(candidate: SourceCandidate) -> dict[str, str]:
