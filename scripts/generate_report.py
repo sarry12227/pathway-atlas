@@ -10,8 +10,7 @@
 
 用法：
     python scripts/generate_report.py --province 湖北 --subject-group 物理 \
-        --grade 高三 (--score 620 | --rank 15000 | \
-        --school 武汉XXX中学 --exam-rank 120 [--best-rank 80 --normal-rank 150]) \
+        --grade 高三 (--score 620 | --rank 15000) \
         [--intent-schools 武汉大学] [--major-category 计算机] [--city 武汉] \
         [--hkmo-willingness 考虑|不考虑|可了解] [--has-awards] [--has-activities] \
         [--name 张三] [--output output/张三_升学方案_20260821.md]
@@ -33,7 +32,6 @@ from data_loader import (DEFAULT_DATA_ROOT, DataError, load_path_table,  # noqa:
                          score_to_rank)
 from path_recommend import (HKMO_POSITIVE, PathRecommendError,  # noqa: E402
                             equiv_adjust_from_config, recommend_paths)
-from rank_calc import RankCalcError, estimate_rank  # noqa: E402
 from school_recommend import (SchoolRecommendError, params_from_config,  # noqa: E402
                               recommend_schools)
 
@@ -178,19 +176,10 @@ def collect_context(args) -> dict:
         ref_rank = lookup["rank"]
         tables_used.append("yifenyiduan")
     else:
-        if args.exam_rank is None:
-            raise DataError("估分路径缺少 --exam-rank（最近一次校排名）")
-        ctx["method"] = "school"
-        ctx["school"] = args.school
-        ctx["exam_rank"] = args.exam_rank
-        ctx["best_rank"] = args.best_rank
-        ctx["normal_rank"] = args.normal_rank
-        m3 = estimate_rank(args.province, args.school, args.subject_group,
-                           exam_rank=args.exam_rank, best_rank=args.best_rank,
-                           normal_rank=args.normal_rank, root=args.data_root)
-        ctx["m3"] = m3
-        ref_rank = m3["normal_estimate"]["prov_rank"]
-        tables_used.extend(["xibao", "schools", "yifenyiduan"])
+        raise DataError(
+            "校排名折算必须使用通过证据门禁的 RankEstimate；请改用 "
+            "--dataset、--profile、--evidence 进入证据感知报告流程"
+        )
     ctx["ref_rank"] = ref_rank
 
     # Step 2：M4 普通批冲稳保
@@ -1009,8 +998,7 @@ def main(argv=None) -> int:
     args = build_parser().parse_args(raw_argv)
     try:
         ctx = collect_context(args)
-    except (DataError, RankCalcError, SchoolRecommendError,
-            PathRecommendError) as e:
+    except (DataError, SchoolRecommendError, PathRecommendError) as e:
         code = getattr(e, "code", "DATA_001")
         print(f"错误[{code}]：{e}", file=sys.stderr)
         return 2

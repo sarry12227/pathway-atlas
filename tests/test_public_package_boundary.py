@@ -1,10 +1,17 @@
 import ast
 import csv
+import contextlib
+import importlib
+import io
 import json
 import os
+import re
+import shutil
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -23,6 +30,7 @@ PRIVATE_OR_UNREVIEWED_PATHS = (
     "data/demo-xx",
     "scripts/estimate_rank.py",
     "tests/test_rank_estimation.py",
+    "tests/test_generate_report.py",
 )
 
 FORBIDDEN_MODULE_BASENAMES = frozenset(
@@ -34,6 +42,68 @@ FORBIDDEN_PATH_FRAGMENTS = tuple(
     relative.replace("\\", "/").casefold().strip("/")
     for relative in PRIVATE_OR_UNREVIEWED_PATHS
 )
+
+_MAX_STATIC_AST_DEPTH = 12
+_MAX_STATIC_TEXT_LENGTH = 4096
+_PATH_CONSTRUCTORS = frozenset({"Path", "PurePath", "pathlib.Path", "pathlib.PurePath"})
+_PATH_JOIN_CALLS = frozenset({"os.path.join", "posixpath.join", "ntpath.join"})
+_DYNAMIC_IMPORT_CALLS = frozenset(
+    {"importlib.import_module", "import_module", "__import__"}
+)
+
+
+def _dotted_name(node: ast.AST) -> str | None:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        owner = _dotted_name(node.value)
+        if owner is not None:
+            return f"{owner}.{node.attr}"
+    return None
+
+
+def _join_static_path(parts: tuple[str, ...]) -> str | None:
+    if not parts:
+        return None
+    normalized = [part.replace("\\", "/") for part in parts]
+    result = normalized[0].rstrip("/")
+    for part in normalized[1:]:
+        result = f"{result}/{part.strip('/')}"
+    if len(result) > _MAX_STATIC_TEXT_LENGTH:
+        return None
+    return result
+
+
+def _fold_static_text(node: ast.AST, depth: int = 0) -> str | None:
+    """Fold a deliberately finite subset of string/path AST without eval."""
+
+    if depth > _MAX_STATIC_AST_DEPTH:
+        return None
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        if len(node.value) <= _MAX_STATIC_TEXT_LENGTH:
+            return node.value
+        return None
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left = _fold_static_text(node.left, depth + 1)
+        right = _fold_static_text(node.right, depth + 1)
+        if left is None or right is None or len(left) + len(right) > _MAX_STATIC_TEXT_LENGTH:
+            return None
+        return left + right
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+        left = _fold_static_text(node.left, depth + 1)
+        right = _fold_static_text(node.right, depth + 1)
+        if left is None or right is None:
+            return None
+        return _join_static_path((left, right))
+    if isinstance(node, ast.Call) and not node.keywords:
+        function_name = _dotted_name(node.func)
+        if function_name not in _PATH_CONSTRUCTORS | _PATH_JOIN_CALLS:
+            return None
+        parts = tuple(_fold_static_text(argument, depth + 1) for argument in node.args)
+        if any(part is None for part in parts):
+            return None
+        return _join_static_path(tuple(part for part in parts if part is not None))
+    return None
 
 
 def _is_forbidden_path_reference(value: str) -> bool:
@@ -87,6 +157,24 @@ def _runtime_references(path: Path) -> tuple[str, ...]:
             if isinstance(node.value, str):
                 self._record(node.value)
 
+        def visit_BinOp(self, node: ast.BinOp) -> None:
+            folded = _fold_static_text(node)
+            if folded is not None:
+                self._record(folded)
+            self.generic_visit(node)
+
+        def visit_Call(self, node: ast.Call) -> None:
+            function_name = _dotted_name(node.func)
+            if function_name in _DYNAMIC_IMPORT_CALLS and node.args:
+                module = _fold_static_text(node.args[0])
+                if module is not None:
+                    self._record_import(module)
+                    self._record(module)
+            folded = _fold_static_text(node)
+            if folded is not None:
+                self._record(folded)
+            self.generic_visit(node)
+
         def _record(self, value: str) -> None:
             normalized = value.replace("\\", "/").casefold()
             if "shengxue-system" in normalized:
@@ -109,6 +197,111 @@ def _runtime_references(path: Path) -> tuple[str, ...]:
     return tuple(dict.fromkeys(references))
 
 
+def _strict_json_file(path: Path):
+    def object_without_duplicates(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate JSON key")
+            result[key] = value
+        return result
+
+    def reject_nonfinite(value):
+        raise ValueError(f"non-finite JSON value: {value}")
+
+    return json.loads(
+        path.read_text("utf-8"),
+        object_pairs_hook=object_without_duplicates,
+        parse_constant=reject_nonfinite,
+    )
+
+
+_FIXTURE_SENSITIVE_TEXT = re.compile(
+    r"https?://|www\."
+    r"|(?<![0-9])1[3-9][0-9]{9}(?![0-9])"
+    r"|(?<![0-9])[0-9]{17}[0-9Xx](?![0-9])"
+    r"|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"
+)
+
+
+def _fixture_policy_issues(fixtures: Path) -> tuple[str, ...]:
+    issues = []
+    policy_path = fixtures / "fixture-policy.json"
+    try:
+        policy = _strict_json_file(policy_path)
+    except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
+        return ("fixture policy 缺失或不是严格 UTF-8 JSON",)
+
+    if not isinstance(policy, dict) or set(policy) != {"schema_version", "fixtures"}:
+        return ("fixture policy 顶层 schema 不严格",)
+    if policy["schema_version"] != "1.0" or not isinstance(
+        policy["fixtures"], dict
+    ):
+        return ("fixture policy 版本或 fixtures 字段无效",)
+
+    children = [
+        child
+        for child in fixtures.iterdir()
+        if child.is_dir() or child.is_symlink()
+    ]
+    discovered = {child.name for child in children}
+    declared = set(policy["fixtures"])
+    if discovered != declared:
+        issues.append(
+            "fixture 目录全集与 policy keys 不一致："
+            f"missing={sorted(discovered - declared)!r}, "
+            f"extra={sorted(declared - discovered)!r}"
+        )
+
+    for name in sorted(discovered & declared):
+        directory = fixtures / name
+        declaration = policy["fixtures"][name]
+        if directory.is_symlink():
+            issues.append(f"{name}: fixture 目录不得为符号链接")
+            continue
+        if declaration != {"classification": "synthetic"}:
+            issues.append(f"{name}: v0.1 fixture 必须严格声明 synthetic")
+            continue
+        try:
+            metadata = _strict_json_file(directory / "province.json")
+        except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
+            issues.append(f"{name}: province.json 无效")
+            continue
+        province = metadata.get("province") if isinstance(metadata, dict) else None
+        if not isinstance(province, str) or not (
+            province.startswith("演示") or province.startswith("虚构")
+        ):
+            issues.append(f"{name}: province 必须明确标记为演示或虚构")
+
+        for path in sorted(directory.iterdir()):
+            if not path.is_file() or path.suffix.casefold() not in {".csv", ".json"}:
+                continue
+            try:
+                text = path.read_text("utf-8")
+            except (OSError, UnicodeError):
+                issues.append(f"{name}/{path.name}: 不是安全 UTF-8 文本")
+                continue
+            if _FIXTURE_SENSITIVE_TEXT.search(text):
+                issues.append(f"{name}/{path.name}: 含 PII、邮箱或 URL")
+
+        admission_path = directory / "tou_dang.csv"
+        try:
+            with admission_path.open("r", encoding="utf-8", newline="") as handle:
+                rows = list(csv.DictReader(handle))
+        except (OSError, UnicodeError, csv.Error):
+            issues.append(f"{name}: tou_dang.csv 无效")
+            continue
+        if not rows:
+            issues.append(f"{name}: tou_dang.csv 不得为空")
+            continue
+        if any(not (row.get("school_code") or "").startswith("SYN") for row in rows):
+            issues.append(f"{name}: synthetic school_code 必须以 SYN 开头")
+        if any(not (row.get("school_name") or "").startswith("虚构") for row in rows):
+            issues.append(f"{name}: synthetic school_name 必须以虚构开头")
+
+    return tuple(sorted(issues))
+
+
 def _public_python_files():
     for path in sorted(ROOT.rglob("*.py")):
         relative = path.relative_to(ROOT)
@@ -122,6 +315,146 @@ def _public_python_files():
 
 
 class PublicPackageBoundaryTest(unittest.TestCase):
+    def test_legacy_school_cli_fails_closed_before_default_rank_estimator(self):
+        from scripts import generate_report
+
+        legacy_estimator = mock.Mock(
+            return_value={"normal_estimate": {"prov_rank": 1}}
+        )
+        stderr = io.StringIO()
+        with mock.patch.object(
+            generate_report, "estimate_rank", legacy_estimator, create=True
+        ), contextlib.redirect_stderr(stderr):
+            exit_code = generate_report.main(
+                [
+                    "--province",
+                    "演示甲省",
+                    "--subject-group",
+                    "物理",
+                    "--grade",
+                    "高三",
+                    "--school",
+                    "虚构高中",
+                    "--exam-rank",
+                    "10",
+                ]
+            )
+
+        self.assertEqual(exit_code, 2)
+        legacy_estimator.assert_not_called()
+        self.assertIn("--dataset", stderr.getvalue())
+        self.assertIn("--profile", stderr.getvalue())
+        self.assertIn("--evidence", stderr.getvalue())
+
+    def test_rank_module_has_no_public_default_xibao_estimator(self):
+        rank_module = importlib.import_module("scripts.rank_calc")
+        self.assertFalse(hasattr(rank_module, "estimate_rank"))
+
+        rank_tree = ast.parse((ROOT / "scripts/rank_calc.py").read_text("utf-8"))
+        imported_names = {
+            alias.name
+            for node in ast.walk(rank_tree)
+            if isinstance(node, (ast.Import, ast.ImportFrom))
+            for alias in node.names
+        }
+        function_names = {
+            node.name for node in ast.walk(rank_tree) if isinstance(node, ast.FunctionDef)
+        }
+        self.assertNotIn("load_xibao", imported_names)
+        self.assertNotIn("estimate_rank", function_names)
+
+    def test_ast_boundary_folds_path_division(self):
+        cases = {
+            'legacy = Path("scripts") / "verify_province.py"\n': (
+                "scripts/verify_province.py"
+            ),
+            'legacy = PurePath("data") / "hubei" / "province.json"\n': (
+                "data/hubei/province.json"
+            ),
+        }
+        for source, expected in cases.items():
+            with self.subTest(source=source):
+                self.assertIn(expected, self._probe_runtime_references(source))
+
+    def test_ast_boundary_folds_standard_path_join(self):
+        for module in ("os.path", "posixpath", "ntpath"):
+            source = f'legacy = {module}.join("data", "hubei", "province.json")\n'
+            with self.subTest(module=module):
+                self.assertIn(
+                    "data/hubei/province.json",
+                    self._probe_runtime_references(source),
+                )
+
+    def test_ast_boundary_folds_split_dynamic_import(self):
+        calls = (
+            'importlib.import_module("scripts." + "estimate_rank")',
+            '__import__("scripts." + "estimate_rank")',
+        )
+        for call in calls:
+            with self.subTest(call=call):
+                self.assertIn(
+                    "scripts.estimate_rank",
+                    self._probe_runtime_references(f"module = {call}\n"),
+                )
+
+    def test_ast_boundary_static_evaluator_keeps_safe_controls(self):
+        source = '''"""Attribution: shengxue-system."""
+safe_report = Path("reports") / "synthetic.docx"
+safe_module = importlib.import_module("scripts.rank_calc")
+'''
+        self.assertEqual(self._probe_runtime_references(source), ())
+
+    def test_fixture_policy_covers_and_validates_every_fixture_directory(self):
+        fixtures = ROOT / "tests/fixtures/provinces"
+        self.assertEqual(_fixture_policy_issues(fixtures), ())
+
+    def test_fixture_policy_detects_an_unlisted_rogue_directory(self):
+        fixtures = ROOT / "tests/fixtures/provinces"
+        with tempfile.TemporaryDirectory() as temporary:
+            copied = Path(temporary) / "provinces"
+            shutil.copytree(fixtures, copied)
+            (copied / "rogue-real-snapshot").mkdir()
+            issues = _fixture_policy_issues(copied)
+
+        self.assertTrue(
+            any("目录全集" in issue for issue in issues),
+            issues,
+        )
+
+    def test_readme_describes_host_retrieval_and_only_tracked_public_clis(self):
+        readme = (ROOT / "README.md").read_text("utf-8")
+        self.assertNotIn("零网络", readme)
+        self.assertNotIn("零 LLM", readme)
+        self.assertIn("Agent 宿主", readme)
+        self.assertIn("本地确定性", readme)
+        self.assertNotRegex(readme, r"#\s*\d+\s*个用例")
+
+        command_scripts = set(re.findall(r"python (scripts/[A-Za-z0-9_.-]+)", readme))
+        required = {
+            "scripts/preflight.py",
+            "scripts/validate_data.py",
+            "scripts/validate_evidence.py",
+            "scripts/generate_report.py",
+            "scripts/docx_export.py",
+        }
+        self.assertEqual(command_scripts, required)
+        for script in sorted(command_scripts):
+            tracked = subprocess.run(
+                ["git", "ls-files", "--error-unmatch", "--", script],
+                cwd=ROOT,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(tracked.returncode, 0, f"untracked README CLI: {script}")
+
+    @staticmethod
+    def _probe_runtime_references(source: str) -> tuple[str, ...]:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "probe.py"
+            path.write_text(source, encoding="utf-8")
+            return _runtime_references(path)
+
     def test_ast_boundary_detects_package_imports_and_dynamic_legacy_paths(self):
         source = '''
 import scripts.verify_province

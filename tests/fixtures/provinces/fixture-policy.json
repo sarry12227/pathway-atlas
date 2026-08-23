@@ -1,0 +1,14 @@
+{
+  "schema_version": "1.0",
+  "fixtures": {
+    "demo-312": {
+      "classification": "synthetic"
+    },
+    "demo-33": {
+      "classification": "synthetic"
+    },
+    "duplicate-program": {
+      "classification": "synthetic"
+    }
+  }
+}

@@ -8,7 +8,7 @@
 
 - **数据边界明确**：院校名、分数、位次仅由通过校验的数据与确定性脚本计算，AI（Agent）不得凭记忆补全任何院校数据
 - **零第三方依赖**：核心功能仅需 Python 3.10+ 标准库；DOCX 导出为可选能力（python-docx）
-- **零网络/零 LLM 调用**：全部计算本地完成，隐私信息不出对话
+- **Agent 宿主检索、本地确定性计算**：宿主负责实时搜索与浏览公开来源；进入计算和报告的事实必须先形成证据包并通过本地校验，脚本本身不补造数据
 - **纯公益**：不含任何产品推介、价格、机构信息；方案经确定性合规扫描后才交付
 
 ## 安装
@@ -28,14 +28,16 @@
 ## 命令行用法（Agent 内部调用，用户无需记忆）
 
 ```bash
-python scripts/recommend.py --province 湖北 --subject-group 物理 --score 620
-python scripts/recommend_paths.py --province 湖北 --rank 15000 --grade 高三 --hkmo-willingness 考虑
-python scripts/generate_report.py --province 湖北 --subject-group 物理 --grade 高三 --score 620
+python scripts/preflight.py --host-capability search --host-capability browse
+python scripts/validate_data.py tests/fixtures/provinces/demo-312
+python scripts/validate_evidence.py tests/fixtures/evidence/three-source-consensus
+python scripts/generate_report.py --dataset tests/fixtures/provinces/demo-312 --profile tests/fixtures/profiles/demo.json --evidence tests/fixtures/evidence/three-source-consensus
+python scripts/docx_export.py --dataset tests/fixtures/provinces/demo-312 --profile tests/fixtures/profiles/demo.json --evidence tests/fixtures/evidence/three-source-consensus
 ```
 
 ## 公开包数据边界
 
-- 公开仓库只附带 `tests/fixtures/provinces/demo-312/` 与 `demo-33/` 两套纯虚构样例，不包含未经确认再分发权利的真实省份数据、学生报告或生成产物。
+- `tests/fixtures/provinces/fixture-policy.json` 必须枚举仓库内每套省份测试数据；v0.1 中所有条目均为纯虚构 synthetic fixture，不包含未经确认再分发权利的真实省份数据、学生报告或生成产物。
 - 运行时数据需要单独获取、形成来源记录并通过校验；确认来源与再分发权利的真实快照可以作为独立授权的可选数据包发布，不由代码的 MIT 许可证自动覆盖。
 - 本 Skill 不依赖同级私有仓库或机构内部系统。公开脚本可在独立仓库中运行，无法获得合格数据时必须明确降级，不得补造结果。
 
@@ -46,7 +48,7 @@ python scripts/generate_report.py --province 湖北 --subject-group 物理 --gra
 ## 测试
 
 ```bash
-python -m unittest discover -s tests   # 107 个用例，零依赖
+python -m unittest discover -s tests -v
 ```
 
 ## 贡献
