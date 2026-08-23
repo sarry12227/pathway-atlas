@@ -137,9 +137,13 @@ class DocxSemanticParityTest(unittest.TestCase):
                 ):
                     docx_export.export_docx(model(), output)
                 stderr = io.StringIO()
-                with mock.patch("sys.stderr", stderr):
-                    self.assertEqual(docx_export.main([]), 2)
+                stdout = io.StringIO()
+                with mock.patch("sys.stderr", stderr), mock.patch("sys.stdout", stdout):
+                    self.assertEqual(docx_export.main([]), 3)
                 self.assertIn("python-docx", stderr.getvalue())
+                self.assertIn("缺少能力", stderr.getvalue())
+                self.assertEqual(stdout.getvalue(), "")
+                self.assertFalse(output.exists())
 
     def test_cli_repeated_secondary_subject_reaches_docx(self):
         """Catches a parser that accepts repeated subjects but drops them downstream."""
@@ -305,6 +309,91 @@ class DocxStructureTest(unittest.TestCase):
         # URLs are therefore asserted against visible text in the semantic test.
         for forbidden in (str(ROOT), "C:\\Users\\hp", "张三", "13800138000"):
             self.assertNotIn(forbidden, xml)
+
+    def test_publish_race_never_deletes_a_competing_owner_file(self):
+        """Catches cleanup that unlinks a path this process never created."""
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "race.docx"
+            original_resolver = docx_export._output_path
+
+            def create_competitor(report, requested):
+                destination = original_resolver(report, requested)
+                destination.write_bytes(b"RIVAL-OWNER")
+                return destination
+
+            with mock.patch.object(
+                docx_export, "_output_path", side_effect=create_competitor
+            ):
+                with self.assertRaises(FileExistsError):
+                    docx_export.export_docx(model(), output)
+
+            self.assertEqual(output.read_bytes(), b"RIVAL-OWNER")
+
+    def test_final_path_appears_only_after_complete_archive_is_closed(self):
+        """Catches streaming a partial ZIP directly into the public final path."""
+        real_zip_file = docx_export.ZipFile
+        visibility_during_writes = []
+
+        class ObservingTargetZip:
+            def __init__(self, archive):
+                self.archive = archive
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc_info):
+                self.archive.close()
+
+            def writestr(self, info, data):
+                visibility_during_writes.append(output.exists())
+                return self.archive.writestr(info, data)
+
+        def zip_factory(file, mode="r", *args, **kwargs):
+            archive = real_zip_file(file, mode, *args, **kwargs)
+            return ObservingTargetZip(archive) if mode == "w" else archive
+
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "atomic.docx"
+            with mock.patch.object(docx_export, "ZipFile", side_effect=zip_factory):
+                result = docx_export.export_docx(model(), output)
+
+            self.assertTrue(visibility_during_writes)
+            self.assertFalse(any(visibility_during_writes))
+            self.assertEqual(result, output)
+            self.assertTrue(output.is_file())
+            self.assertIn("匿名升学规划报告", document_text(output))
+
+    def test_owned_partial_publish_is_removed_after_write_failure(self):
+        """Catches an exclusive publisher that leaves its own corrupt artifact."""
+        real_zip_file = docx_export.ZipFile
+        visibility_at_failure = []
+
+        class FailingTargetZip:
+            def __init__(self, archive):
+                self.archive = archive
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc_info):
+                self.archive.close()
+
+            def writestr(self, _info, _data):
+                visibility_at_failure.append(output.exists())
+                raise OSError("synthetic write failure")
+
+        def zip_factory(file, mode="r", *args, **kwargs):
+            archive = real_zip_file(file, mode, *args, **kwargs)
+            return FailingTargetZip(archive) if mode in {"w", "x"} else archive
+
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "partial.docx"
+            with mock.patch.object(docx_export, "ZipFile", side_effect=zip_factory):
+                with self.assertRaisesRegex(OSError, "synthetic write failure"):
+                    docx_export.export_docx(model(), output)
+            self.assertEqual(visibility_at_failure, [False])
+            self.assertFalse(output.exists())
+            self.assertEqual(list(Path(temporary).iterdir()), [])
 
 
 if __name__ == "__main__":

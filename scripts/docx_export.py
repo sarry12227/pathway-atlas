@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 from datetime import datetime
 import json
+import os
 from pathlib import Path
 import sys
 import tempfile
@@ -532,18 +533,36 @@ def _document_text(document):
 
 
 def _save(document, output):
-    with tempfile.NamedTemporaryFile(dir=output.parent, suffix=".docx", delete=False) as handle:
-        temporary = Path(handle.name)
+    with tempfile.NamedTemporaryFile(
+        dir=output.parent, suffix=".source.docx", delete=False
+    ) as handle:
+        source_path = Path(handle.name)
+    with tempfile.NamedTemporaryFile(
+        dir=output.parent, suffix=".ready.docx", delete=False
+    ) as handle:
+        ready_path = Path(handle.name)
     try:
-        document.save(temporary)
-        with ZipFile(temporary) as source, ZipFile(output, "x", ZIP_DEFLATED, compresslevel=9) as target:
+        document.save(source_path)
+        # Finish and close the deterministic ZIP under a private same-directory
+        # name. The public destination cannot expose partial bytes.
+        with ZipFile(source_path) as source, ZipFile(
+            ready_path, "w", ZIP_DEFLATED, compresslevel=9
+        ) as target:
             for name in sorted(source.namelist()):
                 info = ZipInfo(name, (2000, 1, 1, 0, 0, 0))
                 info.compress_type = ZIP_DEFLATED
                 info.create_system = 0
                 target.writestr(info, source.read(name))
+        # Windows requires a writable descriptor for ``fsync`` in this runtime.
+        with ready_path.open("r+b") as ready_file:
+            os.fsync(ready_file.fileno())
+        # A same-directory hard link publishes the already-complete inode in
+        # one exclusive operation on Windows and POSIX. Existing destinations
+        # raise FileExistsError and are never opened, replaced, or deleted.
+        os.link(ready_path, output)
     finally:
-        temporary.unlink(missing_ok=True)
+        source_path.unlink(missing_ok=True)
+        ready_path.unlink(missing_ok=True)
 
 
 def _output_path(model, output):
@@ -589,11 +608,7 @@ def export_docx(model: ReportModel, output=None) -> Path:
     hit = find_price_text(text)
     if hit is not None:
         raise DocumentComplianceError(f"DOCX compliance gate rejected: {hit}")
-    try:
-        _save(document, destination)
-    except Exception:
-        destination.unlink(missing_ok=True)
-        raise
+    _save(document, destination)
     return destination
 
 
@@ -672,7 +687,7 @@ def main(argv=None):
         _require_document_dependency()
     except DocumentDependencyError as error:
         print(f"缺少能力：{error}", file=sys.stderr)
-        return 2
+        return 3
     args = build_parser().parse_args(argv)
     try:
         model = _model_from_cli(args)
