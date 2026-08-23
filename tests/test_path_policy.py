@@ -34,7 +34,17 @@ def structural_schema_errors(schema, value, path="$"):
                 "object": isinstance(value, dict),
                 "array": isinstance(value, list),
                 "string": isinstance(value, str),
-                "integer": isinstance(value, int) and not isinstance(value, bool),
+                "integer": (
+                    not isinstance(value, bool)
+                    and (
+                        isinstance(value, int)
+                        or (
+                            isinstance(value, float)
+                            and math.isfinite(value)
+                            and value.is_integer()
+                        )
+                    )
+                ),
             }.get(kind, False)
 
         if not any(matches(kind) for kind in allowed_types):
@@ -117,10 +127,10 @@ def model(**changes):
         "model_id": "model-a",
         "province": "演示省",
         "subject_mode": "3+1+2",
-        "cohort_years": (2024, 2025),
+        "cohort_years": (2025, 2026),
         "source_ids": ("model-source-a", "model-source-b"),
         "evidence_status": EvidenceStatus.CORROBORATED,
-        "method": "两年同口径位次偏移",
+        "method": "documented_rank_delta",
         "pathway_types": ("strong_foundation",),
         "applicability_rank_min": 1,
         "applicability_rank_max": 50000,
@@ -200,6 +210,57 @@ class PathPolicySafetyTest(unittest.TestCase):
                     profile(), (policy(),), invalid_model
                 )
                 self.assertIsNone(result.target_rank)
+
+    def test_model_cohort_must_include_profile_current_year(self):
+        """Catches applying historical or future-only cohorts to the current year."""
+
+        for cohort_years in ((2000, 2001), (2027, 2028)):
+            with self.subTest(cohort_years=cohort_years):
+                result = path_recommend.evaluate_pathways(
+                    profile(), (policy(),), model(cohort_years=cohort_years)
+                )
+                self.assertIsNone(result.target_rank)
+                self.assertIsNone(result.transformation)
+                self.assertIn(
+                    "用户当前年份不在模型声明的队列年份中", result.warnings
+                )
+
+    def test_model_requires_at_least_one_formal_current_exact_policy(self):
+        """Catches generating a global target before policy admission finishes."""
+
+        invalid_policies = (
+            policy(evidence_status=EvidenceStatus.CONFLICT),
+            policy(valid_year=2025),
+            policy(service_employment_obligations=None),
+            policy(eligibility_requirements=("未回答的资格条件",)),
+        )
+        for record in invalid_policies:
+            with self.subTest(record=record):
+                result = path_recommend.evaluate_pathways(
+                    profile(), (record,), model()
+                )
+                self.assertIsNone(result.target_rank)
+                self.assertIsNone(result.transformation)
+                self.assertEqual(result.formal_shortlist, ())
+                self.assertIn(
+                    "无满足正式候选条件的政策，位次模型未执行", result.warnings
+                )
+
+    def test_model_applies_to_formal_items_but_not_mixed_pending_items(self):
+        """Catches one pending policy poisoning or receiving a formal target."""
+
+        formal = policy("formal")
+        pending = policy("pending", service_employment_obligations=None)
+        result = path_recommend.evaluate_pathways(
+            profile(), (pending, formal), model()
+        )
+        by_id = {item.policy_id: item for item in result.items}
+
+        self.assertEqual(result.target_rank, 1)
+        self.assertEqual(result.formal_shortlist, ("formal",))
+        self.assertEqual(by_id["formal"].target_rank, 1)
+        self.assertIsNone(by_id["pending"].target_rank)
+        self.assertEqual(by_id["pending"].status, "pending_verification")
 
 
 class PathwayPolicyEvaluationTest(unittest.TestCase):
@@ -468,6 +529,109 @@ class PathwayContractTest(unittest.TestCase):
                 with self.assertRaises((TypeError, ValueError)):
                     replace(item, **changes)
 
+    def test_direct_formal_item_requires_exact_sufficient_evidence(self):
+        """Catches bypassing policy evidence gates through direct result objects."""
+
+        item = path_recommend.evaluate_pathways(profile(), (policy(),)).items[0]
+        invalid_evidence = (
+            {"evidence_status": EvidenceStatus.CONFLICT},
+            {"evidence_status": EvidenceStatus.MASKED},
+            {"evidence_status": EvidenceStatus.PARTIAL},
+            {"evidence_status": EvidenceStatus.MISSING},
+            {"evidence_status": EvidenceStatus.INFERRED},
+            {
+                "evidence_status": EvidenceStatus.CORROBORATED,
+                "policy_source_ids": ("only-one",),
+            },
+            {
+                "evidence_status": EvidenceStatus.REFERENCE,
+                "policy_source_ids": ("source-a", "source-b"),
+            },
+        )
+        for changes in invalid_evidence:
+            with self.subTest(changes=changes):
+                with self.assertRaises(ValueError):
+                    replace(item, **changes)
+
+    def test_promise_gate_covers_normalized_chinese_and_english_variants(self):
+        """Catches promise language hidden by case, punctuation, or whitespace."""
+
+        unsafe_texts = (
+            "保 录", "保证-录取", "包/录", "确保·录取", "录取 概率",
+            "成功-率", "百分比承诺", "预计收 益", "承诺回-报", "80 %",
+            "百分之八十", "R.O.I", "Return-On Investment",
+            "ADMISSION_GUARANTEE", "success-rate", "proba bility",
+        )
+        for unsafe in unsafe_texts:
+            with self.subTest(unsafe=unsafe):
+                with self.assertRaisesRegex(
+                    ValueError, "output text contains unsupported promise language"
+                ):
+                    policy(title=unsafe)
+                with self.assertRaisesRegex(
+                    ValueError, "output text contains unsupported promise language"
+                ):
+                    policy(service_employment_obligations=unsafe)
+
+    def test_promise_gate_covers_model_item_and_result_output_text(self):
+        """Catches bypassing the policy gate through another output contract."""
+
+        with self.assertRaisesRegex(ValueError, "unsupported model method"):
+            model(method="free-form method")
+
+        item = path_recommend.evaluate_pathways(profile(), (policy(),)).items[0]
+        for changes in (
+            {"title": "保证.录取"},
+            {"calculation_basis": "success rate 90%"},
+        ):
+            with self.subTest(item_changes=changes):
+                with self.assertRaisesRegex(
+                    ValueError, "output text contains unsupported promise language"
+                ):
+                    replace(item, **changes)
+
+        with self.assertRaisesRegex(
+            ValueError, "output text contains unsupported promise language"
+        ):
+            path_recommend.PathwayResult(warnings=("admission guarantee",))
+
+        with_target = replace(item, target_rank=1)
+        with self.assertRaisesRegex(
+            ValueError, "output text contains unsupported promise language"
+        ):
+            path_recommend.PathwayResult(
+                items=(with_target,), formal_shortlist=(with_target.policy_id,),
+                target_rank=1, transformation="预计收益 20%", warnings=(),
+            )
+
+    def test_result_target_requires_at_least_one_matching_formal_item(self):
+        """Catches a global target with empty or all-pending output."""
+
+        pending = path_recommend.evaluate_pathways(
+            profile(), (policy(service_employment_obligations=None),)
+        ).items[0]
+        for items in ((), (pending,)):
+            with self.subTest(items=items):
+                with self.assertRaises(ValueError):
+                    path_recommend.PathwayResult(
+                        items=items,
+                        formal_shortlist=(),
+                        target_rank=1,
+                        transformation="documented transformation",
+                        warnings=(),
+                    )
+
+        formal = path_recommend.evaluate_pathways(profile(), (policy(),)).items[0]
+        with_target = replace(formal, target_rank=1)
+        result = path_recommend.PathwayResult(
+            items=(with_target,),
+            formal_shortlist=(with_target.policy_id,),
+            target_rank=1,
+            transformation="documented transformation",
+            warnings=(),
+        )
+        self.assertEqual(result.target_rank, 1)
+
 
 class PathwayPolicySchemaTest(unittest.TestCase):
     @classmethod
@@ -540,6 +704,7 @@ class PathwayPolicySchemaTest(unittest.TestCase):
             {
                 "source_threshold_by_status", "current_year_validity",
                 "critical_constraint_completeness", "profile_policy_match",
+                "promise_language_gate",
             },
         )
 
@@ -563,6 +728,28 @@ print("package-locators-ok")
         )
         self.assertEqual(process.returncode, 0, process.stderr)
         self.assertEqual(process.stdout.strip(), "package-locators-ok")
+
+    def test_json_schema_integer_semantics_normalize_finite_integral_float(self):
+        """Catches confusing Python int representation with JSON Schema integer."""
+
+        valid = policy().to_dict()
+        integral_float = dict(valid, valid_year=2026.0)
+
+        self.assertEqual(
+            structural_schema_errors(self.schema, integral_float), []
+        )
+        record = policy(valid_year=2026.0)
+        self.assertEqual(record.valid_year, 2026)
+        self.assertIs(type(record.valid_year), int)
+        self.assertEqual(record.to_dict()["valid_year"], 2026)
+        self.assertIs(type(record.to_dict()["valid_year"]), int)
+
+        for invalid_year in (2026.5, math.nan, math.inf, -math.inf, True, "2026"):
+            with self.subTest(invalid_year=invalid_year):
+                payload = dict(valid, valid_year=invalid_year)
+                self.assertTrue(structural_schema_errors(self.schema, payload))
+                with self.assertRaises((TypeError, ValueError)):
+                    policy(valid_year=invalid_year)
 
 
 if __name__ == "__main__":

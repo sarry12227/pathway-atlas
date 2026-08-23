@@ -10,7 +10,8 @@
       "source_threshold_by_status",
       "current_year_validity",
       "critical_constraint_completeness",
-      "profile_policy_match"
+      "profile_policy_match",
+      "promise_language_gate"
     ]
   },
   "type": "object",

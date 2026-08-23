@@ -22,7 +22,9 @@ services/path_recommend.py 原样移植，规则逻辑一字未改，仅做三�
   "考虑/可了解"才推；
 - 年级语义：高一/高二 → 规划建议；高三 → 当年申报（meta.grade_note）。
 """
+import math
 import re
+import unicodedata
 from dataclasses import dataclass, fields, is_dataclass
 from enum import Enum
 from typing import Any, Optional
@@ -87,7 +89,28 @@ _EXACT_EVIDENCE_MINIMUMS = {
     EvidenceStatus.CORROBORATED: 2,
     EvidenceStatus.REFERENCE: 3,
 }
-_FORBIDDEN_PROMISES = ("录取概率", "保录", "收益率", "admission probability")
+_MODEL_METHODS = frozenset({"documented_rank_delta"})
+_PROMISE_TOKENS = frozenset(
+    {
+        "保录",
+        "保证录取",
+        "包录",
+        "确保录取",
+        "录取概率",
+        "成功率",
+        "百分比承诺",
+        "收益",
+        "回报",
+        "roi",
+        "returnoninvestment",
+        "admissionguarantee",
+        "successrate",
+        "probability",
+        "percentage",
+        "percent",
+    }
+)
+_PROMISE_ERROR = "output text contains unsupported promise language"
 
 
 def _json_safe(value: Any) -> Any:
@@ -128,6 +151,18 @@ def _strict_int(value: Any, name: str) -> int:
     return value
 
 
+def _schema_integer(value: Any, name: str) -> int:
+    """Normalize a Draft 2020-12 mathematical integer to Python ``int``."""
+
+    if isinstance(value, bool):
+        raise TypeError(f"{name} must be a JSON Schema integer")
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and math.isfinite(value) and value.is_integer():
+        return int(value)
+    raise TypeError(f"{name} must be a JSON Schema integer")
+
+
 def _text(value: Any, name: str, *, optional: bool = False) -> str | None:
     if value is None and optional:
         return None
@@ -138,6 +173,24 @@ def _text(value: Any, name: str, *, optional: bool = False) -> str | None:
         raise ValueError(f"{name} must not be blank")
     if normalized != value:
         raise ValueError(f"{name} must not have surrounding whitespace")
+    return normalized
+
+
+def _validate_output_text(value: str) -> None:
+    normalized = unicodedata.normalize("NFKC", value).casefold()
+    compact = "".join(character for character in normalized if character.isalnum())
+    if (
+        any(token in compact for token in _PROMISE_TOKENS)
+        or "百分之" in compact
+        or re.search(r"\d+(?:\.\d+)?\s*%", normalized) is not None
+    ):
+        raise ValueError(_PROMISE_ERROR)
+
+
+def _output_text(value: Any, name: str, *, optional: bool = False) -> str | None:
+    normalized = _text(value, name, optional=optional)
+    if normalized is not None:
+        _validate_output_text(normalized)
     return normalized
 
 
@@ -174,6 +227,15 @@ def _string_tuple(
     if sort:
         normalized.sort()
     return tuple(normalized)
+
+
+def _output_string_tuple(
+    value: Any, name: str, *, allow_empty: bool = True
+) -> tuple[str, ...]:
+    normalized = _string_tuple(value, name, allow_empty=allow_empty)
+    for item in normalized:
+        _validate_output_text(item)
+    return normalized
 
 
 def _status(value: Any, name: str = "evidence_status") -> EvidenceStatus:
@@ -252,27 +314,34 @@ class PathwayPolicy(_Serializable):
             raise ValueError("policy_id must use the public safe-ID syntax")
         object.__setattr__(self, "policy_id", policy_id)
         object.__setattr__(self, "pathway_type", _pathway_type(self.pathway_type))
-        for name in ("title", "institution", "province", "subject_mode"):
-            object.__setattr__(self, name, _text(getattr(self, name), name))
+        for name in ("title", "institution", "province"):
+            object.__setattr__(self, name, _output_text(getattr(self, name), name))
+        object.__setattr__(self, "subject_mode", _text(self.subject_mode, "subject_mode"))
         if self.subject_mode not in _SUBJECT_MODES:
             raise ValueError("subject_mode must be 3+1+2 or 3+3")
         if self.valid_year is not None:
-            valid_year = _strict_positive_int(
-                self.valid_year, "valid_year", minimum=2000
-            )
+            valid_year = _schema_integer(self.valid_year, "valid_year")
+            if valid_year < 2000:
+                raise ValueError("valid_year must be at least 2000")
             if valid_year > 2100:
                 raise ValueError("valid_year must not exceed 2100")
             object.__setattr__(self, "valid_year", valid_year)
         for name in ("eligibility_requirements", "disqualifying_facts"):
             object.__setattr__(
-                self, name, _string_tuple(getattr(self, name), name, sort=True)
+                self,
+                name,
+                tuple(sorted(_output_string_tuple(getattr(self, name), name))),
             )
         for name in (
             "service_employment_obligations",
             "penalty_exit_rules",
             "fees_and_subsidies",
         ):
-            object.__setattr__(self, name, _text(getattr(self, name), name, optional=True))
+            object.__setattr__(
+                self,
+                name,
+                _output_text(getattr(self, name), name, optional=True),
+            )
         object.__setattr__(
             self,
             "policy_source_ids",
@@ -285,10 +354,8 @@ class PathwayPolicy(_Serializable):
             ),
         )
         object.__setattr__(self, "evidence_status", _status(self.evidence_status))
-        basis = _text(self.calculation_basis, "calculation_basis")
+        basis = _output_text(self.calculation_basis, "calculation_basis")
         assert basis is not None
-        if any(term.casefold() in basis.casefold() for term in _FORBIDDEN_PROMISES):
-            raise ValueError("calculation_basis contains an unsupported promise")
         object.__setattr__(self, "calculation_basis", basis)
 
 
@@ -316,8 +383,12 @@ class RankAdjustmentModel(_Serializable):
         if _SAFE_ID.fullmatch(model_id) is None:
             raise ValueError("model_id must use the public safe-ID syntax")
         object.__setattr__(self, "model_id", model_id)
-        for name in ("province", "subject_mode", "method"):
-            object.__setattr__(self, name, _text(getattr(self, name), name))
+        object.__setattr__(self, "province", _output_text(self.province, "province"))
+        object.__setattr__(self, "subject_mode", _text(self.subject_mode, "subject_mode"))
+        method = _text(self.method, "method")
+        if method not in _MODEL_METHODS:
+            raise ValueError("unsupported model method")
+        object.__setattr__(self, "method", method)
         if self.subject_mode not in _SUBJECT_MODES:
             raise ValueError("subject_mode must be 3+1+2 or 3+3")
         if isinstance(self.cohort_years, (str, bytes, bytearray)):
@@ -391,7 +462,7 @@ class PathwayItem(_Serializable):
         object.__setattr__(self, "policy_id", policy_id)
         object.__setattr__(self, "pathway_type", _pathway_type(self.pathway_type))
         for name in ("title", "institution", "calculation_basis"):
-            object.__setattr__(self, name, _text(getattr(self, name), name))
+            object.__setattr__(self, name, _output_text(getattr(self, name), name))
         allowed_pairs = {
             "formal": "eligible",
             "pending_verification": "pending_verification",
@@ -401,7 +472,7 @@ class PathwayItem(_Serializable):
             raise ValueError("status is not supported")
         if self.eligibility != allowed_pairs[self.status]:
             raise ValueError("eligibility is inconsistent with status")
-        constraints = _string_tuple(
+        constraints = _output_string_tuple(
             self.missing_constraints, "missing_constraints"
         )
         if self.status == "formal" and constraints:
@@ -421,6 +492,12 @@ class PathwayItem(_Serializable):
             ),
         )
         object.__setattr__(self, "evidence_status", _status(self.evidence_status))
+        if self.status == "formal":
+            evidence_problem = _exact_evidence_problem(
+                self.evidence_status, self.policy_source_ids, "政策"
+            )
+            if evidence_problem is not None:
+                raise ValueError("formal items require accepted exact evidence")
         if self.target_rank is not None:
             object.__setattr__(
                 self,
@@ -476,15 +553,17 @@ class PathwayResult(_Serializable):
         else:
             target_rank = _strict_positive_int(self.target_rank, "target_rank")
             object.__setattr__(self, "target_rank", target_rank)
-            transformation = _text(self.transformation, "transformation")
+            transformation = _output_text(self.transformation, "transformation")
             object.__setattr__(self, "transformation", transformation)
+            if not any(item.status == "formal" for item in items):
+                raise ValueError("target_rank requires at least one formal item")
             if any(
                 item.status == "formal" and item.target_rank != target_rank
                 for item in items
             ):
                 raise ValueError("formal item target ranks must match the result")
         object.__setattr__(
-            self, "warnings", _string_tuple(self.warnings, "warnings")
+            self, "warnings", _output_string_tuple(self.warnings, "warnings")
         )
 
 
@@ -511,13 +590,23 @@ def evaluate_pathways(
     if model is not None and not isinstance(model, RankAdjustmentModel):
         raise TypeError("model must be a RankAdjustmentModel or None")
 
+    items = tuple(
+        _evaluate_policy(profile, record, None, None)
+        for record in records
+    )
+    formal_policy_ids = {
+        item.policy_id for item in items if item.status == "formal"
+    }
+    formal_policies = tuple(
+        record for record in records if record.policy_id in formal_policy_ids
+    )
     warnings: list[str] = []
     target_rank: int | None = None
     transformation: str | None = None
     if model is None:
         warnings.append("未提供有依据的位次模型")
     else:
-        model_problem = _model_problem(profile, records, model)
+        model_problem = _model_problem(profile, formal_policies, model)
         if model_problem is not None:
             warnings.append(model_problem)
         else:
@@ -536,11 +625,10 @@ def evaluate_pathways(
             )
             if target_rank != raw_target:
                 warnings.append("模型原始结果超出声明的一分一段位次域，已按边界钳制")
-
-    items = tuple(
-        _evaluate_policy(profile, record, target_rank, transformation)
-        for record in records
-    )
+            items = tuple(
+                _evaluate_policy(profile, record, target_rank, transformation)
+                for record in records
+            )
     return PathwayResult(
         items=items,
         formal_shortlist=tuple(
@@ -577,10 +665,12 @@ def _model_problem(
         return "位次模型省份与用户画像不匹配"
     if model.subject_mode != profile.subject_mode:
         return "位次模型选科模式与用户画像不匹配"
+    if profile.current_year not in model.cohort_years:
+        return "用户当前年份不在模型声明的队列年份中"
     if not (model.applicability_rank_min <= profile.rank <= model.applicability_rank_max):
         return "用户位次超出模型声明的适用范围"
     if not policies:
-        return "没有政策记录可用于核对位次模型适用范围"
+        return "无满足正式候选条件的政策，位次模型未执行"
     for record in policies:
         if record.province != model.province or record.subject_mode != model.subject_mode:
             return "政策记录与位次模型的省份或选科模式不匹配"
