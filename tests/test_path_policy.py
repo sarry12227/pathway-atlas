@@ -617,6 +617,25 @@ class PathwayContractTest(unittest.TestCase):
             "success rate 80%",
             "investment return 20%",
             "ROI 20%",
+            "录取百分之八十",
+            "预计录取百分之八十",
+            "八成录取把握",
+            "录取٨٠٪",
+            "历史录取率80%",
+            "historical admission rate 20%",
+            "录取比例",
+            "录取概率",
+            "录取几率",
+            "录取可能性",
+            "录取把握",
+            "admission rate",
+            "rate admission",
+            "admission probability",
+            "probability of admission",
+            "admission chance",
+            "chance of admission",
+            "admission likelihood",
+            "likelihood of admission",
         )
         for claim in unsafe_claims:
             with self.subTest(claim=claim):
@@ -634,6 +653,9 @@ class PathwayContractTest(unittest.TestCase):
             "学费补助20%",
             "tuition subsidy 20%",
             "service penalty is 20% of subsidy",
+            "收益补助已明确",
+            "回报材料已提交",
+            "毕业后回报家乡",
         )
         base_item = path_recommend.evaluate_pathways(profile(), (policy(),)).items[0]
         for fact in legitimate_facts:
@@ -648,40 +670,95 @@ class PathwayContractTest(unittest.TestCase):
     def test_context_gate_applies_to_every_output_contract(self):
         """Catches bypassing the shared gate outside policy calculation basis."""
 
-        claim = "admission is guaranteed"
         item = path_recommend.evaluate_pathways(profile(), (policy(),)).items[0]
-        constructors = (
-            lambda: policy(title=claim),
-            lambda: model(province=claim),
-            lambda: replace(item, title=claim),
-            lambda: path_recommend.PathwayResult(warnings=(claim,)),
-        )
-        for constructor in constructors:
-            with self.subTest(constructor=constructor):
-                with self.assertRaisesRegex(
-                    ValueError, "output text contains unsupported promise language"
-                ):
-                    constructor()
+        for claim in (
+            "admission is guaranteed",
+            "历史录取率80%",
+            "likelihood of admission",
+        ):
+            constructors = (
+                lambda: policy(title=claim),
+                lambda: model(province=claim),
+                lambda: replace(item, title=claim),
+                lambda: path_recommend.PathwayResult(warnings=(claim,)),
+            )
+            for constructor in constructors:
+                with self.subTest(claim=claim, constructor=constructor):
+                    with self.assertRaisesRegex(
+                        ValueError, "output text contains unsupported promise language"
+                    ):
+                        constructor()
 
     def test_marketing_source_ids_are_rejected_and_model_sources_stay_structured(self):
         """Catches marketing slugs and source IDs leaking into prose output."""
 
         unsafe_source_ids = (
+            "admission-is-guaranteed",
+            "guarantee-admission",
             "admission-guarantee",
             "guaranteed-admission",
+            "return-on-investment",
             "success-rate",
+            "probability-80",
             "roi",
+            "admissionguarantee",
+            "successrate",
+            "returnoninvestment",
         )
+        base_item = path_recommend.evaluate_pathways(
+            profile(), (policy(),), model()
+        ).items[0]
         for source_id in unsafe_source_ids:
             with self.subTest(source_id=source_id):
-                with self.assertRaisesRegex(
-                    ValueError, "source ID contains unsupported claim language"
-                ):
-                    policy(policy_source_ids=(source_id,))
-                with self.assertRaisesRegex(
-                    ValueError, "source ID contains unsupported claim language"
-                ):
-                    model(source_ids=(source_id, "safe-source"))
+                constructors = (
+                    lambda: policy(policy_source_ids=(source_id,)),
+                    lambda: model(source_ids=(source_id, "safe-source")),
+                    lambda: replace(base_item, policy_source_ids=(source_id,)),
+                    lambda: path_recommend.PathwayResult(
+                        items=(base_item,),
+                        formal_shortlist=(base_item.policy_id,),
+                        target_rank=base_item.target_rank,
+                        transformation="documented transformation",
+                        model_source_ids=(source_id,),
+                    ),
+                )
+                for constructor in constructors:
+                    with self.subTest(constructor=constructor):
+                        with self.assertRaisesRegex(
+                            ValueError,
+                            "source ID contains unsupported claim language",
+                        ):
+                            constructor()
+
+        accepted_source_ids = (
+            "android-policy", "heroic-source", "detroit-official", "src-2026"
+        )
+        for source_id in accepted_source_ids:
+            with self.subTest(source_id=source_id):
+                self.assertEqual(
+                    policy(policy_source_ids=(source_id,)).policy_source_ids,
+                    (source_id,),
+                )
+                self.assertEqual(
+                    model(source_ids=(source_id,)).source_ids,
+                    (source_id,),
+                )
+                self.assertEqual(
+                    replace(
+                        base_item, policy_source_ids=(source_id,)
+                    ).policy_source_ids,
+                    (source_id,),
+                )
+                self.assertEqual(
+                    path_recommend.PathwayResult(
+                        items=(base_item,),
+                        formal_shortlist=(base_item.policy_id,),
+                        target_rank=base_item.target_rank,
+                        transformation="documented transformation",
+                        model_source_ids=(source_id,),
+                    ).model_source_ids,
+                    (source_id,),
+                )
 
         documented_model = model()
         result = path_recommend.evaluate_pathways(

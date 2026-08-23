@@ -121,19 +121,64 @@ _PROMISE_COMPACT_TOKENS = frozenset(
 )
 _PROMISE_ERROR = "output text contains unsupported promise language"
 _SOURCE_ID_PROMISE_ERROR = "source ID contains unsupported claim language"
-_SOURCE_ID_CLAIM_TOKENS = frozenset(
+_SOURCE_ID_CLAIM_SEGMENTS = frozenset(
     {
         "admissionguarantee",
         "guaranteedadmission",
+        "guaranteeadmission",
+        "admissionisguaranteed",
         "successrate",
+        "returnoninvestment",
+        "probability",
         "roi",
     }
 )
-_PERCENT_TRANSLATION = str.maketrans(
+_SOURCE_ID_CLAIM_PHRASES = frozenset(
     {
-        "\u066a": "%",  # Arabic percent sign
-        "\ufe6a": "%",  # small percent sign
-        "\uff05": "%",  # full-width percent sign (also handled by NFKC)
+        ("admission", "is", "guaranteed"),
+        ("admission", "guarantee"),
+        ("guarantee", "admission"),
+        ("guaranteed", "admission"),
+        ("return", "on", "investment"),
+        ("success", "rate"),
+    }
+)
+_UNICODE_PERCENT_SIGNS = frozenset({"%", "\u066a", "\ufe6a", "\uff05"})
+_CHINESE_NUMBER = r"[0-9零〇一二三四五六七八九十百千万两]+(?:\.[0-9]+)?"
+_RATE_FORM_PATTERNS = (
+    re.compile(rf"百分之{_CHINESE_NUMBER}"),
+    re.compile(r"[0-9]+(?:\.[0-9]+)?%"),
+    re.compile(rf"{_CHINESE_NUMBER}成"),
+)
+_CHINESE_ADMISSION_RATE_TERMS = (
+    "录取率",
+    "录取比例",
+    "录取概率",
+    "录取几率",
+    "录取可能性",
+    "录取把握",
+)
+_CHINESE_REVERSE_ADMISSION_RATE_TERMS = (
+    "比例录取",
+    "概率录取",
+    "几率录取",
+    "可能性录取",
+    "把握录取",
+)
+_ENGLISH_ADMISSION_RATE_TERMS = frozenset(
+    {
+        "admissionrate",
+        "rateadmission",
+        "rateofadmission",
+        "admissionprobability",
+        "probabilityadmission",
+        "probabilityofadmission",
+        "admissionchance",
+        "chanceadmission",
+        "chanceofadmission",
+        "admissionlikelihood",
+        "likelihoodadmission",
+        "likelihoodofadmission",
     }
 )
 
@@ -201,44 +246,84 @@ def _text(value: Any, name: str, *, optional: bool = False) -> str | None:
     return normalized
 
 
-def _claim_normal_forms(value: str) -> tuple[str, str, str]:
-    """Return punctuation-insensitive and percent-aware claim text forms."""
+def _normalize_claim_text(value: str) -> str:
+    """Canonicalize claim text without merging distinct semantic tokens."""
 
-    normalized = (
-        unicodedata.normalize("NFKC", value)
-        .casefold()
-        .translate(_PERCENT_TRANSLATION)
-    )
-    compact = "".join(character for character in normalized if character.isalnum())
-    claim_stream = "".join(
+    characters: list[str] = []
+    for character in unicodedata.normalize("NFKC", value).casefold():
+        try:
+            characters.append(str(unicodedata.decimal(character)))
+            continue
+        except (TypeError, ValueError):
+            pass
+        if character in _UNICODE_PERCENT_SIGNS:
+            characters.append("%")
+        elif character.isalnum():
+            characters.append(character)
+        else:
+            characters.append(" ")
+    return " ".join("".join(characters).split())
+
+
+def _compact_claim_text(normalized: str) -> str:
+    return "".join(
         character for character in normalized
         if character.isalnum() or character == "%"
     )
-    return normalized, compact, claim_stream
+
+
+def _spans_are_near(left: tuple[int, int], right: tuple[int, int]) -> bool:
+    if left[1] <= right[0]:
+        return right[0] - left[1] <= 8
+    if right[1] <= left[0]:
+        return left[0] - right[1] <= 8
+    return True
+
+
+def _contains_admission_rate_claim(compact: str) -> bool:
+    if any(term in compact for term in _CHINESE_ADMISSION_RATE_TERMS):
+        return True
+    if any(term in compact for term in _CHINESE_REVERSE_ADMISSION_RATE_TERMS):
+        return True
+    if any(term in compact for term in _ENGLISH_ADMISSION_RATE_TERMS):
+        return True
+
+    admissions = tuple(re.finditer("录取", compact))
+    rate_forms = tuple(
+        match
+        for pattern in _RATE_FORM_PATTERNS
+        for match in pattern.finditer(compact)
+    )
+    return any(
+        _spans_are_near(admission.span(), rate_form.span())
+        for admission in admissions
+        for rate_form in rate_forms
+    )
 
 
 def _validate_output_text(value: str) -> None:
-    normalized, compact, claim_stream = _claim_normal_forms(value)
-    chinese_admission_rate = re.search(
-        r"(?:预计)?录取(?:百分之)?[0-9零一二三四五六七八九十百两.]+(?:%|成)",
-        claim_stream,
-    )
-    english_roi = re.search(
-        r"(?<![a-z0-9])r[\W_]*o[\W_]*i(?![a-z0-9])",
-        normalized,
-    )
+    normalized = _normalize_claim_text(value)
+    compact = _compact_claim_text(normalized)
+    english_roi = re.search(r"(?:^|\s)r\s*o\s*i(?:$|\s)", normalized)
     if (
         any(token in compact for token in _PROMISE_COMPACT_TOKENS)
-        or chinese_admission_rate is not None
+        or _contains_admission_rate_claim(compact)
         or english_roi is not None
     ):
         raise ValueError(_PROMISE_ERROR)
 
 
 def _validate_source_id_claim(value: str) -> None:
-    _, compact, _ = _claim_normal_forms(value)
-    if any(token in compact for token in _SOURCE_ID_CLAIM_TOKENS):
+    segments = tuple(segment.casefold() for segment in re.split(r"[-._:]", value))
+    if any(segment in _SOURCE_ID_CLAIM_SEGMENTS for segment in segments):
         raise ValueError(_SOURCE_ID_PROMISE_ERROR)
+    for phrase in _SOURCE_ID_CLAIM_PHRASES:
+        width = len(phrase)
+        if any(
+            segments[index:index + width] == phrase
+            for index in range(len(segments) - width + 1)
+        ):
+            raise ValueError(_SOURCE_ID_PROMISE_ERROR)
 
 
 def _output_text(value: Any, name: str, *, optional: bool = False) -> str | None:
