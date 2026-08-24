@@ -37,6 +37,29 @@ from scripts.live_smoke import (
 )
 
 
+def _contract_findings(source: str) -> list[str]:
+    """Return the live-smoke contract mutations present in *source*."""
+    tree = ast.parse(source)
+    findings = []
+    forbidden = {"evidencestore", "validator", "engine", "report"}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and (any(part in (node.module or "").casefold() for part in forbidden) or any(part in alias.name.casefold() for alias in node.names for part in forbidden)):
+            findings.append("forbidden-import")
+        if isinstance(node, ast.Import) and any(part in alias.name.casefold() for alias in node.names for part in forbidden):
+            findings.append("forbidden-import")
+    if "allowlisted.add(chain[-1])" in source:
+        findings.append("redirect-auto-allow")
+    if '"raw_url"' in source or '"query"' in source:
+        findings.append("raw-url-output")
+    if "MAX_RESPONSE_BYTES = 1_048_576" not in source:
+        findings.append("byte-cap")
+    if source.count("downloader(requested_url") != 1:
+        findings.append("downloader-seam")
+    if 'if output.status == "unavailable":\n            return 2' in source:
+        findings.append("unavailable-exit")
+    return findings
+
+
 class LiveSmokeContractTest(unittest.TestCase):
     def setUp(self) -> None:
         self.clock = lambda: datetime(2026, 8, 24, tzinfo=timezone.utc)
@@ -307,11 +330,11 @@ class LiveSmokeContractTest(unittest.TestCase):
         code = """import socket
 from unittest.mock import patch
 blocked=lambda *a,**k: (_ for _ in ()).throw(AssertionError('armed'))
-patches=[patch.object(socket,'getaddrinfo',blocked),patch.object(socket,'gethostbyname',blocked),patch.object(socket,'gethostbyaddr',blocked),patch.object(socket,'create_connection',blocked),patch.object(socket.socket,'connect',blocked),patch.object(socket.socket,'connect_ex',blocked),patch.object(socket.socket,'sendto',blocked)]
+patches=[patch.object(socket,'getaddrinfo',blocked),patch.object(socket,'gethostbyname',blocked),patch.object(socket,'gethostbyname_ex',blocked),patch.object(socket,'gethostbyaddr',blocked),patch.object(socket,'getfqdn',blocked),patch.object(socket,'create_connection',blocked),patch.object(socket.socket,'connect',blocked),patch.object(socket.socket,'connect_ex',blocked),patch.object(socket.socket,'send',blocked),patch.object(socket.socket,'sendall',blocked),patch.object(socket.socket,'sendto',blocked)]
 [p.start() for p in patches]
 import scripts.live_smoke as target
 assert target.main(['--help']) == 0
-for action in (lambda:socket.getaddrinfo('example.com',443),lambda:socket.gethostbyaddr('127.0.0.1'),lambda:socket.create_connection(('example.com',443)),lambda:socket.socket(socket.AF_INET,socket.SOCK_DGRAM).sendto(b'x',('8.8.8.8',53))):
+for action in (lambda:socket.getaddrinfo('example.com',443),lambda:socket.gethostbyname('example.com'),lambda:socket.gethostbyname_ex('example.com'),lambda:socket.gethostbyaddr('127.0.0.1'),lambda:socket.getfqdn('example.com'),lambda:socket.create_connection(('example.com',443)),lambda:socket.socket().connect(('example.com',443)),lambda:socket.socket().connect_ex(('example.com',443)),lambda:socket.socket().send(b'x'),lambda:socket.socket().sendall(b'x'),lambda:socket.socket(socket.AF_INET,socket.SOCK_DGRAM).sendto(b'x',('8.8.8.8',53))):
     try: action()
     except AssertionError: pass
     else: raise AssertionError('canary not armed')
@@ -319,6 +342,21 @@ print('sentinel-ok')"""
         completed = subprocess.run([sys.executable, "-c", code], text=True, capture_output=True, check=False)
         self.assertEqual(0, completed.returncode, completed.stderr)
         self.assertIn("sentinel-ok", completed.stdout)
+
+    def test_source_mutation_oracle_rejects_all_six_contract_breaks(self) -> None:
+        source = Path("scripts/live_smoke.py").read_text(encoding="utf-8")
+        self.assertEqual([], _contract_findings(source))
+        mutations = {
+            "redirect-auto-allow": source.replace("        status =", "        allowlisted.add(chain[-1])\n        status ="),
+            "forbidden-import": "from scripts.evidence import EvidenceStore\n" + source,
+            "unavailable-exit": source.replace("        sys.stdout.write", "        if output.status == \"unavailable\":\n            return 2\n        sys.stdout.write"),
+            "raw-url-output": source.replace('"status": self.status,', '"raw_url": "https://x.example.com/?token=secret",\n            "status": self.status,'),
+            "byte-cap": source.replace("MAX_RESPONSE_BYTES = 1_048_576", "MAX_RESPONSE_BYTES = 2_000_000"),
+            "downloader-seam": source.replace("downloader(requested_url", "bypassed(requested_url"),
+        }
+        for expected, mutated in mutations.items():
+            with self.subTest(expected=expected): self.assertIn(expected, _contract_findings(mutated))
+        self.assertEqual([], _contract_findings(source + "\n# harmless prose control\n"))
 
 
 if __name__ == "__main__":
