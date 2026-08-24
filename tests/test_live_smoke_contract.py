@@ -37,6 +37,27 @@ from scripts.live_smoke import (
 )
 
 
+IANA_NON_WEB_HOSTS = (
+    "service.alt",
+    "1.0.0.127.in-addr.arpa",
+    "address.ip6.arpa",
+    "number.e164.arpa",
+    "probe.ipv4only.arpa",
+    "dns.resolver.arpa",
+    "identifier.uri.arpa",
+    "identifier.urn.arpa",
+    "node.6tisch.arpa",
+    "auth.eap.arpa",
+    "sink.as112.arpa",
+    "servers.in-addr-servers.arpa",
+    "servers.ip6-servers.arpa",
+    "registry.iris.arpa",
+    "authority.ns.arpa",
+    "discovery.service.arpa",
+    "future.arpa",
+)
+
+
 def _contract_findings(source: str) -> list[str]:
     """Return the live-smoke contract mutations present in *source*."""
     tree = ast.parse(source)
@@ -325,6 +346,78 @@ class LiveSmokeContractTest(unittest.TestCase):
                 self.assertEqual(("unavailable", "security_rejection"), (result.status, result.reason_code))
         valid = LiveSmokeResult("黑龙江", "healthy", "www.hljea.org.cn", "hljea.org.cn", ("www.hljea.org.cn", "hljea.org.cn"), "2026-08-24T00:00:00Z", "text/html", 0, None)
         with self.assertRaises(ValueError): replace(valid, checked_at="2026-99-99T29:66:99Z")
+
+    def test_iana_non_web_provenance_is_rejected_in_results_and_redirect_chains(self) -> None:
+        for host in IANA_NON_WEB_HOSTS:
+            with self.subTest(host=host, boundary="result"), self.assertRaises(ValueError):
+                LiveSmokeResult(
+                    "黑龙江", "healthy", host, host, (host,),
+                    "2026-08-24T00:00:00Z", "text/html", 0, None,
+                )
+            with self.subTest(host=host, boundary="redirect"):
+                result = check_official_root(
+                    "黑龙江", self.roots,
+                    downloader=lambda _url, workspace, host=host, **kwargs: self._result(
+                        workspace, "https://www.hljea.org.cn/", f"https://{host}/document"
+                    ),
+                    clock=self.clock,
+                )
+                self.assertEqual(
+                    ("unavailable", "security_rejection"),
+                    (result.status, result.reason_code),
+                )
+
+    def test_iana_non_web_catalog_roots_fail_before_health_or_network_calls(self) -> None:
+        import socket
+
+        blocked = lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("network"))
+        for host in IANA_NON_WEB_HOSTS:
+            catalog_payload = {
+                "schema_version": "1.0",
+                "verified_at": "2026-08-24",
+                "coverage_note": "synthetic catalog",
+                "mode_authority_urls": ["https://www.moe.gov.cn/source"],
+                "provinces": [{
+                    "province": "甲",
+                    "aliases": ["甲"],
+                    "mode": "3+3",
+                    "authority_name": "甲院",
+                    "official_roots": [f"https://{host}/discovery"],
+                    "mode_source_url": "https://www.moe.gov.cn/source",
+                    "verified_at": "2026-08-24",
+                    "notes": "synthetic catalog",
+                }],
+            }
+            with self.subTest(host=host), tempfile.TemporaryDirectory() as temporary:
+                catalog = Path(temporary) / "catalog.json"
+                catalog.write_text(json.dumps(catalog_payload, ensure_ascii=False), encoding="utf-8")
+                with (
+                    patch("scripts.live_smoke._CATALOG_PATH", catalog),
+                    patch("scripts.live_smoke.check_official_root") as check,
+                    patch.object(socket, "getaddrinfo", blocked),
+                    patch.object(socket, "create_connection", blocked),
+                    patch.object(socket.socket, "connect", blocked),
+                    patch.object(socket.socket, "connect_ex", blocked),
+                    patch.object(socket.socket, "send", blocked),
+                    patch.object(socket.socket, "sendall", blocked),
+                    patch.object(socket.socket, "sendto", blocked),
+                    contextlib.redirect_stdout(io.StringIO()),
+                    contextlib.redirect_stderr(io.StringIO()),
+                ):
+                    self.assertEqual(2, main(["--province", "甲"]))
+                check.assert_not_called()
+
+    def test_public_numeric_dns_names_remain_valid_provenance(self) -> None:
+        roots = ("https://exam2026.gov.cn/discovery",)
+        result = check_official_root(
+            "甲", roots,
+            downloader=lambda _url, workspace, **kwargs: self._result(
+                workspace, "https://exam2026.gov.cn/discovery", "http://exam2026.gov.cn/document"
+            ),
+            clock=self.clock,
+        )
+        self.assertEqual("healthy", result.status)
+        self.assertEqual(("exam2026.gov.cn",), result.redirect_domains)
 
     def test_fresh_child_arms_network_sentinel_before_target_import(self) -> None:
         code = """import socket

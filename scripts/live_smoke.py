@@ -44,6 +44,20 @@ _REASONS = frozenset({"timeout", "dns_or_network", "http_error", "redirect_error
 _MEDIA_TYPE = re.compile(r"^[A-Za-z0-9!#$&^_.+-]+/[A-Za-z0-9!#$&^_.+-]+$")
 _UTC = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
 _CATALOG_PATH = Path(__file__).resolve().parents[1] / "references" / "provinces" / "index.json"
+# IANA reserves ``alt`` for special use and ``arpa`` exclusively for Internet
+# infrastructure.  Blocking the complete namespaces also covers future ARPA
+# delegations without treating ordinary digit-bearing public DNS names as local.
+_NON_WEB_DNS_SUFFIXES = (
+    "alt",
+    "arpa",
+    "example",
+    "internal",
+    "invalid",
+    "local",
+    "localhost",
+    "onion",
+    "test",
+)
 
 
 def _domain(url: str) -> str:
@@ -58,8 +72,7 @@ def _domain(url: str) -> str:
     if part.scheme.casefold() not in {"http", "https"} or not part.hostname or part.username is not None or part.password is not None:
         return ""
     host = part.hostname.rstrip(".").casefold()
-    blocked_suffixes = (".invalid", ".test", ".example", ".localhost", ".local", ".internal", ".home.arpa", ".onion")
-    if not host or host in {"localhost", "home.arpa"} or host.endswith(blocked_suffixes):
+    if not host or any(host == suffix or host.endswith(f".{suffix}") for suffix in _NON_WEB_DNS_SUFFIXES):
         return ""
     try:
         ipaddress.ip_address(host)
