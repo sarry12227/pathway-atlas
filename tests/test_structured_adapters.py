@@ -660,6 +660,25 @@ class HtmlAdapterTest(unittest.TestCase):
                     with self.assertRaises(HtmlStructureError):
                         extract_html_table(path, table_index=1, expected_caption="x", mapping={"name": "名称"})
 
+    def test_self_closing_colgroup_is_not_synthesized_as_a_balanced_group(self):
+        cases = {
+            "empty-self-closing-group.html": (
+                "<table><caption>x</caption><colgroup/>"
+                "<tr><th>名称</th></tr><tr><td>合成甲</td></tr></table>"
+            ),
+            "spanned-self-closing-group.html": (
+                "<table><caption>x</caption><colgroup span='2'/>"
+                "<tr><th>名称</th></tr><tr><td>合成甲</td></tr></table>"
+            ),
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            for name, source in cases.items():
+                with self.subTest(name=name):
+                    path = self._write_html(directory, source, name)
+                    with self.assertRaises(HtmlStructureError):
+                        extract_html_table(path, table_index=1, expected_caption="x", mapping={"name": "名称"})
+
 
 class FileBoundaryTest(unittest.TestCase):
     def test_html_requires_absolute_exact_suffix_regular_bounded_non_url_file(self):

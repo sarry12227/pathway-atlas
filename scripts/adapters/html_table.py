@@ -144,7 +144,12 @@ class _TableParser(HTMLParser):
 
     def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         self.handle_starttag(tag, attrs)
-        if tag.casefold() not in _VOID_TAGS:
+        normalized = tag.casefold()
+        if normalized == "colgroup":
+            if self._table is not None:
+                self._table.malformed = True
+            return
+        if normalized not in _VOID_TAGS:
             self.handle_endtag(tag)
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
