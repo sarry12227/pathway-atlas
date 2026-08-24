@@ -1,0 +1,603 @@
+# -*- coding: utf-8 -*-
+"""Privacy-safe, deterministic release gate for the public repository."""
+from __future__ import annotations
+
+import argparse
+import ast
+import json
+import os
+import re
+import stat
+import subprocess
+import sys
+import unicodedata
+from dataclasses import dataclass
+from pathlib import Path, PurePosixPath
+from typing import Callable, Sequence
+from urllib.parse import unquote, urlsplit
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - exercised by the Python 3.10 gate
+    import tomli as tomllib
+
+try:
+    from .compliance_scan import PolicyError, ReleasePolicy, load_policy, scan_text, scan_tracked
+except ImportError:  # pragma: no cover - direct script execution
+    from compliance_scan import PolicyError, ReleasePolicy, load_policy, scan_text, scan_tracked
+
+
+_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
+_DRIVE_RE = re.compile(r"^[A-Za-z]:")
+_MARKDOWN_LINK_RE = re.compile(r"!?\[[^\]\n]*\]\(([^)\n]+)\)")
+_SENSITIVE_SUFFIXES = frozenset({".env", ".key", ".pem", ".p12", ".pfx", ".crt", ".sqlite", ".sqlite3", ".docx"})
+_SENSITIVE_BASENAMES = frozenset(
+    {
+        ".env",
+        "credentials",
+        "credentials.json",
+        "id_rsa",
+        "id_ed25519",
+        "secrets.json",
+    }
+)
+_SENSITIVE_PREFIXES = ("private/", "reports/", "output/", "data/", "work/", "evidence/raw-downloads/")
+_REQUIRED_COMMUNITY = (
+    "LICENSE",
+    "CONTRIBUTING.md",
+    "DATA_SOURCES.md",
+    "SECURITY.md",
+    "CODE_OF_CONDUCT.md",
+    "CHANGELOG.md",
+    "ROADMAP.md",
+)
+
+
+def _safe_relative(value: str) -> str:
+    normalized = value.replace("\\", "/")
+    sensitive_kinds = {"secret", "student_pii", "phone", "identity_number", "absolute_local_path"}
+    if (
+        _CONTROL_RE.search(normalized)
+        or len(normalized) > 180
+        or any(finding.kind in sensitive_kinds for finding in scan_text(normalized))
+    ):
+        return "redacted-sensitive-path"
+    return normalized
+
+
+@dataclass(frozen=True)
+class CheckResult:
+    name: str
+    ok: bool
+    details: tuple[str, ...] = ()
+    count: int = 0
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "name": self.name,
+            "ok": self.ok,
+            "count": self.count,
+            "details": list(self.details),
+        }
+
+
+@dataclass(frozen=True)
+class ReleaseContext:
+    root: Path
+    expected_version: str
+    tag: str | None = None
+    ci: bool = False
+    run_tests: bool = True
+    python_executable: str = sys.executable
+
+
+@dataclass(frozen=True)
+class ReleaseReport:
+    results: tuple[CheckResult, ...]
+
+    @property
+    def ok(self) -> bool:
+        return all(result.ok for result in self.results)
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "ok": self.ok,
+            "check_count": len(self.results),
+            "failed_check_count": sum(not result.ok for result in self.results),
+            "results": [result.to_dict() for result in self.results],
+        }
+
+
+def _canonical_repo_path(value: str) -> str | None:
+    if not value or any(ord(character) < 32 or ord(character) == 127 for character in value):
+        return None
+    normalized = value.replace("\\", "/")
+    if unicodedata.normalize("NFKC", normalized) != normalized:
+        return None
+    pure = PurePosixPath(normalized)
+    if (
+        pure.is_absolute()
+        or _DRIVE_RE.match(normalized)
+        or ".." in pure.parts
+        or pure.as_posix() != normalized
+        or normalized.startswith("./")
+    ):
+        return None
+    return normalized
+
+
+def _path_identity(value: str) -> str:
+    return unicodedata.normalize("NFKC", value).casefold()
+
+
+def check_tracked_paths(
+    paths: Sequence[str],
+    forbidden_directories: Sequence[str] = (),
+) -> CheckResult:
+    """Reject forbidden or ambiguous Git path identities without absolute output."""
+
+    details: list[str] = []
+    identities: set[str] = set()
+    forbidden = tuple(item.strip("/").casefold() for item in forbidden_directories)
+    for raw in paths:
+        canonical = _canonical_repo_path(raw)
+        if canonical is None:
+            details.append("noncanonical-tracked-path")
+            continue
+        identity = _path_identity(canonical)
+        if identity in identities:
+            details.append("duplicate-path-identity")
+            continue
+        identities.add(identity)
+        for prefix in forbidden:
+            if identity == prefix or identity.startswith(prefix + "/"):
+                details.append(f"forbidden-tracked-directory:{_safe_relative(canonical)}")
+                break
+    return CheckResult("tracked_paths", not details, tuple(details), len(details))
+
+
+def check_path_identities(root: Path, paths: Sequence[str]) -> CheckResult:
+    """Reject symlink/reparse escapes and duplicate filesystem identities."""
+
+    repo = root.resolve()
+    details: list[str] = []
+    physical: set[tuple[int, int]] = set()
+    for relative in paths:
+        canonical = _canonical_repo_path(relative)
+        if canonical is None:
+            continue
+        candidate = repo.joinpath(*PurePosixPath(canonical).parts)
+        try:
+            metadata = candidate.lstat()
+        except OSError:
+            details.append(f"missing-tracked-path:{_safe_relative(canonical)}")
+            continue
+        attributes = getattr(metadata, "st_file_attributes", 0)
+        reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+        if stat.S_ISLNK(metadata.st_mode) or bool(attributes & reparse_flag):
+            details.append(f"tracked-link-or-reparse:{_safe_relative(canonical)}")
+            continue
+        try:
+            candidate.resolve(strict=True).relative_to(repo)
+        except (OSError, ValueError):
+            details.append(f"tracked-path-outside-root:{_safe_relative(canonical)}")
+            continue
+        identity = (metadata.st_dev, metadata.st_ino)
+        if identity in physical:
+            details.append("duplicate-filesystem-identity")
+        physical.add(identity)
+    return CheckResult("path_identities", not details, tuple(details), len(details))
+
+
+def check_project_version(root: Path, expected_version: str, tag: str | None) -> CheckResult:
+    details: list[str] = []
+    if re.fullmatch(r"(?:0|[1-9]\d*)(?:\.(?:0|[1-9]\d*)){2}", expected_version) is None:
+        return CheckResult("project_version", False, ("invalid-expected-version",), 1)
+    try:
+        payload = tomllib.loads((root / "pyproject.toml").read_text("utf-8"))
+        project = payload["project"]
+        version = project["version"]
+        name = project["name"]
+    except (OSError, UnicodeError, KeyError, TypeError, ValueError):
+        return CheckResult("project_version", False, ("invalid-pyproject",), 1)
+    if name != "shengxue-skill":
+        details.append("project-name-mismatch")
+    if version != expected_version:
+        details.append("expected-version-mismatch")
+    if tag is not None and (tag != f"v{version}" or tag != f"v{expected_version}"):
+        details.append("tag-version-mismatch")
+    return CheckResult("project_version", not details, tuple(details), len(details))
+
+
+def check_markdown_links(root: Path, markdown_paths: Sequence[str]) -> CheckResult:
+    repo = root.resolve()
+    details: list[str] = []
+    for relative in sorted(markdown_paths):
+        canonical = _canonical_repo_path(relative)
+        if canonical is None:
+            continue
+        document = repo.joinpath(*PurePosixPath(canonical).parts)
+        try:
+            text = document.read_text("utf-8")
+        except (OSError, UnicodeError):
+            details.append(f"unreadable-markdown:{_safe_relative(canonical)}")
+            continue
+        for match in _MARKDOWN_LINK_RE.finditer(text):
+            raw_target = match.group(1).strip()
+            if raw_target.startswith("<") and raw_target.endswith(">"):
+                raw_target = raw_target[1:-1]
+            raw_target = raw_target.split(maxsplit=1)[0]
+            split = urlsplit(raw_target)
+            if split.scheme or split.netloc or raw_target.startswith(("#", "mailto:")):
+                continue
+            decoded = unquote(split.path)
+            if not decoded:
+                continue
+            line = text.count("\n", 0, match.start()) + 1
+            candidate = (document.parent / decoded).resolve(strict=False)
+            try:
+                candidate.relative_to(repo)
+            except ValueError:
+                details.append(f"outside-relative-link:{_safe_relative(canonical)}:{line}")
+                continue
+            if not candidate.exists():
+                details.append(f"missing-relative-link:{_safe_relative(canonical)}:{line}")
+    return CheckResult("markdown_links", not details, tuple(details), len(details))
+
+
+def check_untracked_sensitive_paths(paths: Sequence[str]) -> CheckResult:
+    details: list[str] = []
+    for raw in paths:
+        canonical = _canonical_repo_path(raw)
+        if canonical is None:
+            details.append("untracked-noncanonical-path")
+            continue
+        folded = canonical.casefold()
+        basename = PurePosixPath(folded).name
+        suffix = PurePosixPath(folded).suffix
+        sensitive = (
+            basename in _SENSITIVE_BASENAMES
+            or basename.startswith(".env.")
+            or suffix in _SENSITIVE_SUFFIXES
+            or any(folded.startswith(prefix) for prefix in _SENSITIVE_PREFIXES)
+        )
+        if sensitive:
+            details.append(f"untracked-sensitive:{_safe_relative(canonical)}")
+    return CheckResult("untracked_sensitive", not details, tuple(details), len(details))
+
+
+def _strict_json(path: Path) -> object:
+    raw = path.read_bytes()
+    if len(raw) > 8 * 1024 * 1024:
+        raise ValueError("oversized JSON")
+    text = raw.decode("utf-8", errors="strict")
+
+    def reject_duplicates(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        result: dict[str, object] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate JSON key")
+            result[key] = value
+        return result
+
+    def reject_nonfinite(token: str) -> object:
+        raise ValueError(f"non-finite JSON number: {token}")
+
+    return json.loads(text, object_pairs_hook=reject_duplicates, parse_constant=reject_nonfinite)
+
+
+def _validate_schema(instance: object, schema: object, depth: int = 0) -> None:
+    if depth > 32 or not isinstance(schema, dict):
+        raise ValueError("unsupported schema depth or shape")
+    if "const" in schema and instance != schema["const"]:
+        raise ValueError("const mismatch")
+    if "enum" in schema and instance not in schema["enum"]:
+        raise ValueError("enum mismatch")
+    expected_type = schema.get("type")
+    type_map: dict[str, Callable[[object], bool]] = {
+        "object": lambda value: isinstance(value, dict),
+        "array": lambda value: isinstance(value, list),
+        "string": lambda value: isinstance(value, str),
+        "integer": lambda value: isinstance(value, int) and not isinstance(value, bool),
+        "number": lambda value: isinstance(value, (int, float)) and not isinstance(value, bool),
+        "boolean": lambda value: isinstance(value, bool),
+        "null": lambda value: value is None,
+    }
+    if isinstance(expected_type, str) and (
+        expected_type not in type_map or not type_map[expected_type](instance)
+    ):
+        raise ValueError("type mismatch")
+    if isinstance(instance, dict):
+        required = schema.get("required", [])
+        properties = schema.get("properties", {})
+        if not isinstance(required, list) or not isinstance(properties, dict):
+            raise ValueError("invalid object schema")
+        if any(key not in instance for key in required):
+            raise ValueError("missing required property")
+        if schema.get("additionalProperties") is False and any(key not in properties for key in instance):
+            raise ValueError("additional property")
+        for key, value in instance.items():
+            if key in properties:
+                _validate_schema(value, properties[key], depth + 1)
+    if isinstance(instance, list):
+        minimum = schema.get("minItems")
+        maximum = schema.get("maxItems")
+        if isinstance(minimum, int) and len(instance) < minimum:
+            raise ValueError("too few items")
+        if isinstance(maximum, int) and len(instance) > maximum:
+            raise ValueError("too many items")
+        if schema.get("uniqueItems") is True:
+            fingerprints = [json.dumps(item, ensure_ascii=False, sort_keys=True) for item in instance]
+            if len(fingerprints) != len(set(fingerprints)):
+                raise ValueError("duplicate array item")
+        item_schema = schema.get("items")
+        if isinstance(item_schema, dict):
+            for item in instance:
+                _validate_schema(item, item_schema, depth + 1)
+    if isinstance(instance, str):
+        pattern = schema.get("pattern")
+        if isinstance(pattern, str) and re.fullmatch(pattern, instance) is None:
+            raise ValueError("pattern mismatch")
+        minimum = schema.get("minLength")
+        if isinstance(minimum, int) and len(instance) < minimum:
+            raise ValueError("string too short")
+
+
+def check_province_catalog(root: Path) -> CheckResult:
+    try:
+        schema = _strict_json(root / "schemas" / "province-catalog.schema.json")
+        catalog = _strict_json(root / "references" / "provinces" / "index.json")
+        if not isinstance(schema, dict):
+            raise ValueError("schema is not an object")
+        if schema.get("$schema") != "https://json-schema.org/draft/2020-12/schema":
+            raise ValueError("wrong schema dialect")
+        _validate_schema(catalog, schema)
+    except (OSError, UnicodeError, TypeError, ValueError):
+        return CheckResult("province_catalog", False, ("province-catalog-schema-failed",), 1)
+    return CheckResult("province_catalog", True)
+
+
+def _git_inventory(root: Path, arguments: Sequence[str]) -> tuple[str, ...]:
+    completed = subprocess.run(["git", *arguments], cwd=root, check=False, capture_output=True)
+    if completed.returncode != 0:
+        raise RuntimeError("git inventory failed")
+    try:
+        return tuple(
+            item.decode("utf-8", errors="strict")
+            for item in completed.stdout.split(b"\x00")
+            if item
+        )
+    except UnicodeError as error:
+        raise RuntimeError("git inventory encoding failed") from error
+
+
+def _check_repo_scope(root: Path) -> CheckResult:
+    try:
+        metadata = root.lstat()
+    except OSError:
+        return CheckResult("repository_scope", False, ("repository-root-unreadable",), 1)
+    attributes = getattr(metadata, "st_file_attributes", 0)
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    if stat.S_ISLNK(metadata.st_mode) or bool(attributes & reparse_flag):
+        return CheckResult("repository_scope", False, ("repository-root-link-or-reparse",), 1)
+    completed = subprocess.run(
+        ["git", "rev-parse", "--show-toplevel"],
+        cwd=root,
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="strict",
+    )
+    if completed.returncode != 0:
+        return CheckResult("repository_scope", False, ("not-a-git-repository",), 1)
+    try:
+        top = Path(completed.stdout.strip()).resolve(strict=True)
+    except OSError:
+        return CheckResult("repository_scope", False, ("invalid-git-top-level",), 1)
+    if top != root.resolve():
+        return CheckResult("repository_scope", False, ("root-is-not-git-top-level",), 1)
+    for required in ("pyproject.toml", "SKILL.md", "scripts", "tests"):
+        if not (root / required).exists():
+            return CheckResult("repository_scope", False, (f"missing-top-level:{required}",), 1)
+    return CheckResult("repository_scope", True)
+
+
+def _check_license_and_data_docs(root: Path) -> CheckResult:
+    details: list[str] = []
+    for relative in _REQUIRED_COMMUNITY:
+        if not (root / relative).is_file():
+            details.append(f"missing:{relative}")
+    try:
+        license_text = (root / "LICENSE").read_text("utf-8")
+        data_text = (root / "DATA_SOURCES.md").read_text("utf-8")
+    except (OSError, UnicodeError):
+        return CheckResult("license_and_data_docs", False, tuple(details + ["unreadable-license-or-data-doc"]), len(details) + 1)
+    if "MIT License" not in license_text or "Copyright (c) 2026 sarry12227" not in license_text:
+        details.append("mit-license-identity-missing")
+    if "MIT 不自动授予第三方数据的再分发权" not in data_text or "删除请求" not in data_text:
+        details.append("data-rights-boundary-missing")
+    return CheckResult("license_and_data_docs", not details, tuple(details), len(details))
+
+
+def _check_clean_worktree(root: Path, ci: bool) -> CheckResult:
+    if ci:
+        return CheckResult("clean_worktree", True)
+    try:
+        entries = _git_inventory(root, ("status", "--porcelain=v1", "-z", "--untracked-files=all"))
+    except RuntimeError:
+        return CheckResult("clean_worktree", False, ("git-status-failed",), 1)
+    if entries:
+        return CheckResult("clean_worktree", False, ("worktree-has-changes",), len(entries))
+    return CheckResult("clean_worktree", True)
+
+
+def _check_deterministic_boundaries(root: Path, policy: ReleasePolicy) -> CheckResult:
+    details: list[str] = []
+    for module in policy.deterministic_test_modules:
+        relative = module.replace(".", "/") + ".py"
+        path = root / relative
+        try:
+            source = path.read_text("utf-8")
+            tree = ast.parse(source, filename=relative)
+        except (OSError, UnicodeError, SyntaxError):
+            details.append(f"invalid-deterministic-test:{relative}")
+            continue
+        imported_socket = any(
+            isinstance(node, ast.Import) and any(alias.name == "socket" for alias in node.names)
+            for node in ast.walk(tree)
+        )
+        isolated_socket_sentinel = any(
+            isinstance(node, ast.Constant)
+            and isinstance(node.value, str)
+            and "socket" in node.value
+            and "socket.create_connection" in node.value
+            and "socket.getaddrinfo" in node.value
+            for node in ast.walk(tree)
+        )
+        named_boundary = any(
+            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and ("network" in node.name or "sentinel" in node.name)
+            for node in ast.walk(tree)
+        )
+        if (not imported_socket and not isolated_socket_sentinel) or not named_boundary:
+            details.append(f"network-sentinel-missing:{relative}")
+    if not (root / "scripts" / "live_smoke.py").is_file():
+        details.append("live-network-boundary-missing")
+    return CheckResult("deterministic_boundaries", not details, tuple(details), len(details))
+
+
+def _check_future_paths(root: Path, policy: ReleasePolicy) -> CheckResult:
+    details = tuple(f"missing:{path}" for path in policy.future_release_paths if not (root / path).is_file())
+    return CheckResult("future_release_artifacts", not details, details, len(details))
+
+
+def _check_full_tests(context: ReleaseContext) -> CheckResult:
+    if not context.run_tests:
+        return CheckResult("full_tests", False, ("tests-not-run",), 1)
+    environment = dict(os.environ)
+    for name in tuple(environment):
+        if name.upper().startswith("PYTHON"):
+            del environment[name]
+    try:
+        completed = subprocess.run(
+            [context.python_executable, "-m", "unittest", "discover", "-s", "tests", "-v"],
+            cwd=context.root,
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=environment,
+            timeout=600,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return CheckResult("full_tests", False, ("test-runner-failed",), 1)
+    output = completed.stdout + "\n" + completed.stderr
+    count_matches = re.findall(r"Ran (\d+) tests?", output)
+    test_count = int(count_matches[-1]) if count_matches else 0
+    docx_skips = sum(
+        "docx" in line.casefold() and ("skipped" in line.casefold() or " ... skip" in line.casefold())
+        for line in output.splitlines()
+    )
+    details: list[str] = []
+    if completed.returncode != 0:
+        details.append("test-suite-failed")
+    if test_count == 0:
+        details.append("test-count-unavailable")
+    if docx_skips:
+        details.append(f"docx-tests-skipped:{docx_skips}")
+    return CheckResult("full_tests", not details, tuple(details), test_count)
+
+
+def _safe_run(name: str, function: Callable[[], CheckResult]) -> CheckResult:
+    try:
+        return function()
+    except Exception:  # The JSON gate fails closed without serializing exception data.
+        return CheckResult(name, False, ("internal-check-error",), 1)
+
+
+def evaluate_release(context: ReleaseContext) -> ReleaseReport:
+    """Evaluate every gate and return a bounded JSON-serializable report."""
+
+    root = context.root.absolute()
+    try:
+        policy = load_policy(root / "release-policy.json")
+    except PolicyError:
+        return ReleaseReport((CheckResult("release_policy", False, ("invalid-release-policy",), 1),))
+    try:
+        tracked = _git_inventory(root, ("ls-files", "-z", "--"))
+    except RuntimeError:
+        tracked = ()
+    try:
+        untracked = _git_inventory(root, ("ls-files", "--others", "--exclude-standard", "-z", "--"))
+    except RuntimeError:
+        untracked = ()
+
+    scan_result = _safe_run("compliance_scan", lambda: _compliance_result(root, policy))
+    markdown = tuple(path for path in tracked if path.casefold().endswith(".md"))
+    results = (
+        _safe_run("repository_scope", lambda: _check_repo_scope(root)),
+        CheckResult("release_policy", True),
+        check_tracked_paths(tracked, policy.forbidden_tracked_directories),
+        _safe_run("path_identities", lambda: check_path_identities(root, tracked)),
+        scan_result,
+        check_project_version(root, context.expected_version, context.tag),
+        _safe_run("license_and_data_docs", lambda: _check_license_and_data_docs(root)),
+        _safe_run("clean_worktree", lambda: _check_clean_worktree(root, context.ci)),
+        check_untracked_sensitive_paths(untracked),
+        _safe_run("province_catalog", lambda: check_province_catalog(root)),
+        _safe_run("markdown_links", lambda: check_markdown_links(root, markdown)),
+        _safe_run("deterministic_boundaries", lambda: _check_deterministic_boundaries(root, policy)),
+        _safe_run("future_release_artifacts", lambda: _check_future_paths(root, policy)),
+        _safe_run("full_tests", lambda: _check_full_tests(context)),
+    )
+    return ReleaseReport(results)
+
+
+def _compliance_result(root: Path, policy: ReleasePolicy) -> CheckResult:
+    summary = scan_tracked(root, policy)
+    details = tuple(
+        f"{finding.kind}:{_safe_relative(finding.path or 'unknown')}:{finding.line}"
+        for finding in summary.findings[:200]
+    )
+    if len(summary.findings) > 200:
+        return CheckResult("compliance_scan", False, details + ("finding-output-truncated",), len(summary.findings))
+    return CheckResult("compliance_scan", summary.ok, details, len(summary.findings))
+
+
+def _configure_stdio() -> None:
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8")
+        except (AttributeError, ValueError):
+            pass
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    _configure_stdio()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[1])
+    parser.add_argument("--expected-version", required=True)
+    parser.add_argument("--tag", default=None)
+    parser.add_argument("--ci", action="store_true")
+    parser.add_argument("--internal-skip-tests", action="store_true", help=argparse.SUPPRESS)
+    try:
+        parsed = parser.parse_args(list(sys.argv[1:] if argv is None else argv))
+    except SystemExit as error:
+        return int(error.code)
+    testing_bypass = parsed.internal_skip_tests and os.environ.get("SHENGXUE_RELEASE_CHECK_TESTING") == "1"
+    context = ReleaseContext(
+        root=parsed.root,
+        expected_version=parsed.expected_version,
+        tag=parsed.tag,
+        ci=parsed.ci,
+        run_tests=not testing_bypass,
+    )
+    report = evaluate_release(context)
+    print(json.dumps(report.to_dict(), ensure_ascii=False, sort_keys=True))
+    return 0 if report.ok else 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
