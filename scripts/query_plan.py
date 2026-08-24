@@ -828,7 +828,8 @@ def _load_province(path: Any) -> ProvinceConfig:
     payload = _strict_json_file(path)
     if not isinstance(payload, dict):
         raise ValueError("province input must be an object")
-    return _parse_config(payload, Path(path).parent)
+    absolute_path = Path(os.path.abspath(os.fspath(path)))
+    return _parse_config(payload, absolute_path.parent)
 
 
 def _parser() -> argparse.ArgumentParser:

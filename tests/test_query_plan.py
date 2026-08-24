@@ -644,6 +644,25 @@ class QueryPlanCliTest(unittest.TestCase):
         self.assertEqual(validate_query_plan_payload(payload).to_dict(), payload)
         self.assertNotIn("张三", first.stdout.decode("utf-8"))
 
+    def test_brief_relative_cli_paths_are_twice_byte_identical_and_valid(self):
+        arguments = (
+            "--profile",
+            "tests/fixtures/profiles/demo.json",
+            "--province",
+            "tests/fixtures/provinces/demo-312/province.json",
+            "--exam-year",
+            "2026",
+        )
+        first = self.run_cli(*arguments)
+        second = self.run_cli(*arguments)
+        self.assertEqual(first.returncode, 0, first.stderr.decode("utf-8", "replace"))
+        self.assertEqual(second.returncode, 0, second.stderr.decode("utf-8", "replace"))
+        self.assertEqual(first.stderr, b"")
+        self.assertEqual(second.stderr, b"")
+        self.assertEqual(first.stdout, second.stdout)
+        payload = json.loads(first.stdout.decode("utf-8"))
+        self.assertEqual(validate_query_plan_payload(payload).to_dict(), payload)
+
     def test_cli_invalid_inputs_exit_two_without_path_or_private_input_leakage(self):
         cases = (
             b'{"duplicate": 1, "duplicate": 2}',
