@@ -72,7 +72,7 @@ def _domain(url: str) -> str:
     if part.scheme.casefold() not in {"http", "https"} or not part.hostname or part.username is not None or part.password is not None:
         return ""
     host = part.hostname.rstrip(".").casefold()
-    if not host or any(host == suffix or host.endswith(f".{suffix}") for suffix in _NON_WEB_DNS_SUFFIXES):
+    if not host:
         return ""
     try:
         ipaddress.ip_address(host)
@@ -82,6 +82,8 @@ def _domain(url: str) -> str:
     try:
         host = host.encode("idna").decode("ascii")
     except UnicodeError:
+        return ""
+    if any(host == suffix or host.endswith(f".{suffix}") for suffix in _NON_WEB_DNS_SUFFIXES):
         return ""
     labels = host.split(".")
     if len(labels) < 2 or len(host) > 253 or any(not label or len(label) > 63 or label.startswith("-") or label.endswith("-") or not all(char.isascii() and (char.isalnum() or char == "-") for char in label) for label in labels):

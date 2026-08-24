@@ -56,6 +56,7 @@ IANA_NON_WEB_HOSTS = (
     "discovery.service.arpa",
     "future.arpa",
 )
+UNICODE_DNS_SEPARATOR_NON_WEB_HOST = "service。alt"
 
 
 def _contract_findings(source: str) -> list[str]:
@@ -348,7 +349,7 @@ class LiveSmokeContractTest(unittest.TestCase):
         with self.assertRaises(ValueError): replace(valid, checked_at="2026-99-99T29:66:99Z")
 
     def test_iana_non_web_provenance_is_rejected_in_results_and_redirect_chains(self) -> None:
-        for host in IANA_NON_WEB_HOSTS:
+        for host in (*IANA_NON_WEB_HOSTS, UNICODE_DNS_SEPARATOR_NON_WEB_HOST):
             with self.subTest(host=host, boundary="result"), self.assertRaises(ValueError):
                 LiveSmokeResult(
                     "黑龙江", "healthy", host, host, (host,),
@@ -367,11 +368,11 @@ class LiveSmokeContractTest(unittest.TestCase):
                     (result.status, result.reason_code),
                 )
 
-    def test_iana_non_web_catalog_roots_fail_before_health_or_network_calls(self) -> None:
+    def test_non_web_catalog_roots_fail_before_health_or_network_calls(self) -> None:
         import socket
 
         blocked = lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("network"))
-        for host in IANA_NON_WEB_HOSTS:
+        for host in (*IANA_NON_WEB_HOSTS, UNICODE_DNS_SEPARATOR_NON_WEB_HOST):
             catalog_payload = {
                 "schema_version": "1.0",
                 "verified_at": "2026-08-24",
@@ -406,6 +407,22 @@ class LiveSmokeContractTest(unittest.TestCase):
                 ):
                     self.assertEqual(2, main(["--province", "甲"]))
                 check.assert_not_called()
+
+    def test_unicode_dns_separator_non_web_root_fails_before_downloader(self) -> None:
+        calls: list[str] = []
+
+        def downloader(url: str, _workspace: Path, **_kwargs: object) -> DownloadResult:
+            calls.append(url)
+            raise DownloadSecurityError("unexpected downloader call")
+
+        with self.assertRaises(ValueError):
+            check_official_root(
+                "甲",
+                (f"https://{UNICODE_DNS_SEPARATOR_NON_WEB_HOST}/",),
+                downloader=downloader,
+                clock=self.clock,
+            )
+        self.assertEqual([], calls)
 
     def test_public_numeric_dns_names_remain_valid_provenance(self) -> None:
         roots = ("https://exam2026.gov.cn/discovery",)
