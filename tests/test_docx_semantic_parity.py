@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 import hashlib
 import io
+import json
 import subprocess
 import sys
 import tempfile
@@ -225,6 +226,55 @@ class DocxSemanticParityTest(unittest.TestCase):
 
         self.assertIn("化学、生物", text)
         self.assertNotIn("张三", text)
+
+    def test_public_cli_defaults_to_exclusive_canonical_output_in_cwd(self):
+        command = [
+            sys.executable,
+            str(ROOT / "scripts" / "docx_export.py"),
+            "--dataset",
+            str(ROOT / "tests" / "fixtures" / "provinces" / "demo-312"),
+            "--profile",
+            str(ROOT / "tests" / "fixtures" / "profiles" / "demo.json"),
+            "--evidence",
+            str(ROOT / "tests" / "fixtures" / "evidence" / "three-source-consensus"),
+        ]
+        with tempfile.TemporaryDirectory() as temporary:
+            sandbox = Path(temporary)
+            success_dir = sandbox / "success"
+            competing_dir = sandbox / "competing"
+            success_dir.mkdir()
+            competing_dir.mkdir()
+
+            completed = subprocess.run(
+                command,
+                cwd=success_dir,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+            output = success_dir / "anonymous-admission-report.docx"
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertEqual(
+                json.loads(completed.stdout)["filename"],
+                "anonymous-admission-report.docx",
+            )
+            self.assertTrue(output.is_file())
+
+            competitor = competing_dir / "anonymous-admission-report.docx"
+            competitor.write_bytes(b"competitor-owned")
+            refused = subprocess.run(
+                command,
+                cwd=competing_dir,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+            self.assertEqual(refused.returncode, 2)
+            self.assertEqual(refused.stdout, "")
+            self.assertEqual(
+                refused.stderr, "错误[DOCX_002]：DOCX 生成或发布失败\n"
+            )
+            self.assertEqual(competitor.read_bytes(), b"competitor-owned")
 
     def test_public_cli_rejects_pii_output_name_with_path_neutral_error(self):
         with tempfile.TemporaryDirectory() as temporary:

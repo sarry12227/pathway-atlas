@@ -724,14 +724,18 @@ def main(argv=None):
         return 3
     args = build_parser().parse_args(argv)
     try:
+        output = (
+            Path.cwd() / PUBLIC_DOCX_BASENAME
+            if args.output is None
+            else args.output
+        )
         if (
-            args.output is None
-            or args.output.name != PUBLIC_DOCX_BASENAME
-            or not args.output.parent.is_dir()
+            output.name != PUBLIC_DOCX_BASENAME
+            or not output.parent.is_dir()
         ):
             raise ValueError("invalid public DOCX output")
         model = _model_from_cli(args)
-        destination = export_docx(model, args.output)
+        destination = export_docx(model, output)
     except (OSError, TypeError, ValueError):
         print("错误[DOCX_002]：DOCX 生成或发布失败", file=sys.stderr)
         return 2
