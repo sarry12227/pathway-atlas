@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import ast
+import base64
 from dataclasses import dataclass
 import hashlib
 import json
@@ -16,6 +18,37 @@ import unittest
 from unittest import mock
 from uuid import UUID
 
+
+_SENTINEL_MARKER = "REPLAY-NETWORK-BLOCKED"
+
+
+def _blocked_network(*_args: object, **_kwargs: object) -> object:
+    raise AssertionError(_SENTINEL_MARKER)
+
+
+class _BlockedSocket:
+    connect = _blocked_network
+    connect_ex = _blocked_network
+    send = _blocked_network
+    sendall = _blocked_network
+    sendto = _blocked_network
+
+    def __init__(self, *_args: object, **_kwargs: object) -> None:
+        pass
+
+
+def _install_network_sentinel() -> None:
+    socket.getaddrinfo = _blocked_network  # type: ignore[assignment]
+    socket.gethostbyname = _blocked_network  # type: ignore[assignment]
+    socket.gethostbyaddr = _blocked_network  # type: ignore[assignment]
+    socket.getfqdn = _blocked_network  # type: ignore[assignment]
+    socket.create_connection = _blocked_network  # type: ignore[assignment]
+    socket.socket = _BlockedSocket  # type: ignore[assignment]
+
+
+if os.environ.get("REPLAY_CHILD_SENTINEL") == "1":
+    _install_network_sentinel()
+
 from scripts.contracts import (
     CapabilityReport,
     CapabilityTier,
@@ -29,8 +62,9 @@ from scripts.contracts import (
 )
 from scripts.evidence import EvidenceStore
 from scripts.report_model import StudentProfile, build_report_model, render_markdown
+from scripts.adapters import CellStatus, ColumnMapping, ExtractedCoverage, ExtractedRow, ExtractedTable
+from scripts.adapters.ocr_rows import normalize_ocr_rows
 from scripts.source_policy import deduplicate_candidates, evaluate_claims
-from scripts.source_policy import _deduplicate_with_representatives
 from scripts.validate_evidence import validate_bundle_snapshot
 
 
@@ -130,12 +164,47 @@ class ReplayResult:
         }, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
-def replay_scenario(scenario_id: str, output_root: Path) -> ReplayResult:
+def _extraction_claims(scenario_id: str, extraction: dict[str, object], candidates: tuple[SourceCandidate, ...], output_root: Path) -> tuple[tuple[FactClaim, ...], dict[str, object]]:
+    """Build claims and logical provenance from actual adapter result contracts."""
+    kind = extraction["kind"]
+    artifact = extraction["artifact"]
+    if not isinstance(artifact, dict):
+        raise ReplayFixtureError("extraction artifact must be an object")
+    if scenario_id == "heilongjiang-qr":
+        if kind != "xlsx-worksheet" or set(artifact) != {"qr", "worksheet"}:
+            raise ReplayFixtureError("QR worksheet artifact is invalid")
+        worksheet = artifact["worksheet"]
+        if not isinstance(worksheet, dict) or set(worksheet) != {"sheet", "values", "cell_status", "locator", "coverage"}:
+            raise ReplayFixtureError("worksheet result is invalid")
+        row = ExtractedRow(worksheet["values"], worksheet["cell_status"], worksheet["locator"], 1.0)
+        table = ExtractedTable("sheet:" + str(worksheet["sheet"]), None, worksheet["sheet"], (row,), ExtractedCoverage(**worksheet["coverage"]), (), "xlsx-worksheet")
+        if table.extraction_method != kind or row.cell_status.get("score") is not CellStatus.EXACT:
+            raise ReplayFixtureError("worksheet artifact is not an exact XLSX result")
+        return tuple(FactClaim("synthetic_admission_score", row.values["score"], "synthetic-points", item.source_id, table.extraction_method) for item in candidates), {"method": table.extraction_method, "locator": row.location, "value": row.values["score"], "coverage": table.coverage.to_dict()}
+    if scenario_id == "shanghai-masked-ocr":
+        if kind != "host-ocr-rows" or set(artifact) != {"document", "mapping", "score_scale", "min_exact_confidence", "target_field"}:
+            raise ReplayFixtureError("OCR artifact is invalid")
+        source = output_root / "ocr-artifact.json"
+        source.write_text(json.dumps(artifact["document"], ensure_ascii=False, separators=(",", ":")), encoding="utf-8", newline="\n")
+        table = normalize_ocr_rows(source.resolve(), ColumnMapping(artifact["mapping"], roles={artifact["target_field"]: "score"}, score_scale=artifact["score_scale"]), score_scale=artifact["score_scale"], min_exact_confidence=artifact["min_exact_confidence"])
+        masked = [row for row in table.rows if row.cell_status.get(artifact["target_field"]) is CellStatus.MASKED]
+        if len(masked) != 1:
+            raise ReplayFixtureError("OCR artifact must preserve exactly one masked field")
+        row = masked[0]
+        return (), {"method": table.extraction_method, "locator": row.cell_locations[artifact["target_field"]], "value": row.values[artifact["target_field"]], "coverage": table.coverage.to_dict()}
+    if scenario_id == "joy-report-crosscheck":
+        if kind != "manual-structured" or set(artifact) != {"field", "value", "unit", "locator"}:
+            raise ReplayFixtureError("crosscheck artifact is invalid")
+        return tuple(FactClaim(artifact["field"], artifact["value"], artifact["unit"], item.source_id, kind) for item in candidates if item.source_id in {"j01", "j06"}), {"method": kind, "locator": artifact["locator"], "value": artifact["value"], "coverage": extraction["coverage"]}
+    raise ReplayFixtureError("unknown extraction scenario")
+
+
+def replay_scenario(scenario_id: str, output_root: Path, *, fixture_path: Path | None = None) -> ReplayResult:
     """Replay immutable JSON through public policy, evidence, validation and report seams."""
 
     if scenario_id not in SCENARIOS:
         raise ReplayFixtureError("unknown replay scenario")
-    fixture = _strict_json(FIXTURES / scenario_id / "scenario.json")
+    fixture = _strict_json(fixture_path or FIXTURES / scenario_id / "scenario.json")
     _require_keys(fixture, _ROOT_KEYS, "scenario")
     if fixture["schema_version"] != 1 or fixture["scenario_id"] != scenario_id:
         raise ReplayFixtureError("scenario identity is invalid")
@@ -149,7 +218,8 @@ def replay_scenario(scenario_id: str, output_root: Path) -> ReplayResult:
     if not isinstance(fixture["candidates"], list) or not isinstance(fixture["claims"], list):
         raise ReplayFixtureError("candidate and claim collections are required")
     candidates = tuple(_candidate(item) for item in fixture["candidates"])
-    claims = tuple(_claim(item) for item in fixture["claims"])
+    output_root.mkdir(parents=True, exist_ok=True)
+    claims, derived = _extraction_claims(scenario_id, extraction, candidates, output_root)
     if len({item.source_id for item in candidates}) != len(candidates):
         raise ReplayFixtureError("candidate identifiers must be unique")
     if any(claim.source_id not in {item.source_id for item in candidates} for claim in claims):
@@ -160,13 +230,13 @@ def replay_scenario(scenario_id: str, output_root: Path) -> ReplayResult:
         raise ReplayFixtureError("candidate count does not match fixture expectation")
 
     kept, public_reasons = deduplicate_candidates(candidates)
-    retained, rejected_reasons, representatives = _deduplicate_with_representatives(candidates)
-    if tuple(item.source_id for item in kept) != tuple(item.source_id for item in retained) or public_reasons != rejected_reasons:
-        raise ReplayFixtureError("public and detailed dedupe contracts disagree")
-    rejections = tuple((source_id, representatives[source_id], reason) for source_id, reason in rejected_reasons.items())
-    expected_rejections = tuple(tuple(item) for item in expected["rejections"])
-    if rejections != expected_rejections:
-        raise ReplayFixtureError("dedupe result does not match fixture expectation")
+    retained = tuple(kept)
+    by_id = {item.source_id: item for item in candidates}
+    rejections = tuple(tuple(item) for item in expected["rejections"])
+    for source_id, retained_id, reason in rejections:
+        pair, pair_reasons = deduplicate_candidates((by_id[source_id], by_id[retained_id]))
+        if tuple(item.source_id for item in pair) != (retained_id,) or public_reasons.get(source_id) != reason:
+            raise ReplayFixtureError("public dedupe contract does not prove the fixture mapping")
     if len(retained) != expected["independent_source_count"]:
         raise ReplayFixtureError("independent source count does not match fixture expectation")
     policy_fact = evaluate_claims(str(expected["field"]), claims, candidates)
@@ -179,12 +249,15 @@ def replay_scenario(scenario_id: str, output_root: Path) -> ReplayResult:
             unit=expected["unit"], status=status, source_ids=tuple(item.source_id for item in retained),
             method=str(expected["method"]), notes=str(expected["notes"]),
         )
+    if derived["method"] != expected["extraction_method"] or derived["locator"] != expected["locator"]:
+        raise ReplayFixtureError("extraction provenance does not match the adapter result")
+    if status is EvidenceStatus.MASKED and (derived["value"] is not None or any(character.isdigit() for character in str(expected["unit"]) + str(expected["notes"]))):
+        raise ReplayFixtureError("masked artifact cannot carry an exact boundary")
     if (fact.status.value, fact.value, fact.unit, fact.method) != (expected["status"], expected["value"], expected["unit"], expected["method"]):
         raise ReplayFixtureError("policy result does not match fixture expectation")
     if fact.fact_id != expected["fact_id"]:
         fact = EvidenceFact(str(expected["fact_id"]), fact.field, fact.value, fact.unit, fact.status, fact.source_ids, fact.method, str(expected["notes"]))
 
-    output_root.mkdir(parents=True, exist_ok=True)
     report = CapabilityReport(
         tier=CapabilityTier(capability_value["tier"]), degradations=tuple(capability_value["degradations"]),
         missing_capabilities=("browse", "search", "vision", "docx", "openpyxl", "pdfplumber"), python_version="3.10.0",
@@ -226,6 +299,18 @@ def _fixture_hashes() -> dict[str, str]:
 
 
 class ReplayScenarioTest(unittest.TestCase):
+    def test_replay_helper_uses_no_private_source_policy_api(self):
+        module = ast.parse(Path(__file__).read_text("utf-8"))
+        imports = [name.name for item in ast.walk(module) if isinstance(item, ast.ImportFrom) and item.module == "scripts.source_policy" for name in item.names]
+        self.assertTrue(all(not name.startswith("_") for name in imports))
+
+    def test_extraction_artifacts_are_structured_and_masked_mutation_fails_closed(self):
+        for scenario_id in ("heilongjiang-qr", "shanghai-masked-ocr"):
+            fixture = _strict_json(FIXTURES / scenario_id / "scenario.json")
+            self.assertIsInstance(fixture["extraction"]["artifact"], dict)
+        fixture = _strict_json(FIXTURES / "shanghai-masked-ocr" / "scenario.json")
+        self.assertIn("document", fixture["extraction"]["artifact"])
+
     def test_committed_scenarios_exist_with_exact_ids(self):
         self.assertTrue(all((FIXTURES / scenario_id).is_dir() for scenario_id in SCENARIOS))
         for scenario_id in SCENARIOS:
@@ -266,6 +351,17 @@ class ReplayScenarioTest(unittest.TestCase):
         self.assertIn("屏蔽", result.report)
         self.assertNotIn("N以上=", result.report)
 
+    def test_exact_masked_boundary_mutation_fails_closed_without_path_echo(self):
+        fixture = _strict_json(FIXTURES / "shanghai-masked-ocr" / "scenario.json")
+        fixture["extraction"]["artifact"]["document"]["rows"][1]["cells"][1]["raw_text"] = "N以上=999"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = root / "mutated.json"
+            path.write_text(json.dumps(fixture, ensure_ascii=False), encoding="utf-8", newline="\n")
+            with self.assertRaises(ReplayFixtureError) as raised:
+                replay_scenario("shanghai-masked-ocr", root / "output", fixture_path=path)
+            self.assertNotIn(str(root), str(raised.exception))
+
     def test_ten_reposts_collapse_to_two_then_remain_missing(self):
         with tempfile.TemporaryDirectory() as temporary:
             result = replay_scenario("joy-report-crosscheck", Path(temporary))
@@ -305,10 +401,14 @@ class ReplayScenarioTest(unittest.TestCase):
             first = replay_scenario("heilongjiang-qr", root / "one")
             second = replay_scenario("heilongjiang-qr", root / "two")
         self.assertEqual(first.semantic_json(), second.semantic_json())
+        child_outputs = []
         for seed in ("1", "8675309"):
-            environment = dict(os.environ, PYTHONHASHSEED=seed)
-            completed = subprocess.run([sys.executable, "-m", "unittest", "tests.test_replay_scenarios.ReplayScenarioTest.test_qr_spreadsheet_reference_preserves_worksheet_provenance"], cwd=Path(__file__).parents[1], env=environment, capture_output=True, text=True, timeout=60)
-            self.assertEqual(completed.returncode, 0, completed.stderr)
+            environment = dict(os.environ, PYTHONHASHSEED=seed, PYTHONIOENCODING="utf-8", REPLAY_CHILD_SENTINEL="1")
+            completed = subprocess.run([sys.executable, "-m", "tests.test_replay_scenarios", "--replay-child"], cwd=Path(__file__).parents[1], env=environment, capture_output=True, timeout=60)
+            self.assertEqual(completed.returncode, 0, completed.stderr.decode("utf-8", "replace"))
+            self.assertIn(_SENTINEL_MARKER.encode("ascii"), completed.stdout)
+            child_outputs.append(completed.stdout)
+        self.assertEqual(child_outputs[0], child_outputs[1])
 
     def test_test_helper_result_is_frozen_and_json_safe(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -330,4 +430,22 @@ class ReplayScenarioTest(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    unittest.main()
+    if sys.argv[1:] == ["--replay-child"]:
+        with tempfile.TemporaryDirectory() as temporary:
+            result = replay_scenario("heilongjiang-qr", Path(temporary))
+        for call in (socket.getaddrinfo, socket.gethostbyname, socket.gethostbyaddr, socket.getfqdn, socket.create_connection):
+            try:
+                call("example.test")
+            except AssertionError as error:
+                if str(error) != _SENTINEL_MARKER:
+                    raise
+        blocked = _BlockedSocket()
+        for method in (blocked.connect, blocked.connect_ex, blocked.send, blocked.sendall, blocked.sendto):
+            try:
+                method(b"x")
+            except AssertionError as error:
+                if str(error) != _SENTINEL_MARKER:
+                    raise
+        print(json.dumps({"marker": _SENTINEL_MARKER, "semantic": result.semantic_json(), "markdown_b64": base64.b64encode(result.report.encode("utf-8")).decode("ascii")}, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+    else:
+        unittest.main()
