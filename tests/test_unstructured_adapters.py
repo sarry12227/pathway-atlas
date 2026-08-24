@@ -868,6 +868,44 @@ class QrPayloadAdapterTest(unittest.TestCase):
                 timeout=1,
             )
 
+    @mock.patch("scripts.adapters.qr.download_public_file")
+    @mock.patch("scripts.adapters.qr.validate_public_url")
+    def test_non_path_download_result_fails_before_file_or_resolution_construction(
+        self, validate_url, download
+    ):
+        from scripts.adapters.qr import QrResolution, QrResolutionError, resolve_qr_payload
+        from scripts.downloader import DownloadResult
+
+        download.return_value = DownloadResult(
+            "not-a-path",
+            self.original_url,
+            "application/pdf",
+            4,
+        )
+        path_calls = []
+        original_resolve = Path.resolve
+
+        def tracking_resolve(path, *args, **kwargs):
+            path_calls.append(path)
+            return original_resolve(path, *args, **kwargs)
+
+        with mock.patch.object(Path, "resolve", tracking_resolve), mock.patch.object(
+            QrResolution,
+            "_from_download",
+            side_effect=AssertionError("resolution construction is forbidden"),
+        ) as construct:
+            with self.assertRaises(QrResolutionError) as raised:
+                resolve_qr_payload(
+                    self.original_url,
+                    self.workspace,
+                    qr_image_source_id="qr-page-1",
+                    max_bytes=100,
+                    timeout=1,
+                )
+        self.assertIsNone(raised.exception.__cause__)
+        self.assertEqual(path_calls, [])
+        construct.assert_not_called()
+
 
 class UnstructuredImportBoundaryTest(unittest.TestCase):
     def test_package_and_flat_imports_perform_no_file_or_network_io(self):

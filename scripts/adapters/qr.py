@@ -179,6 +179,8 @@ def _decoded_url(payload: object, source_id: object) -> tuple[str, str]:
 def _validate_result(result: DownloadResult, workspace: str | Path) -> Path:
     if not isinstance(result, DownloadResult):
         raise QrResolutionError("secure downloader returned an invalid result")
+    if not isinstance(result.path, Path):
+        raise QrResolutionError("downloaded file path must be a pathlib Path")
     try:
         workspace_path = Path(workspace)
         resolved_workspace = workspace_path.resolve(strict=True)
