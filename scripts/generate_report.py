@@ -252,6 +252,23 @@ _ADMISSION_VALUE_FIELDS = {
 }
 
 
+def _admission_fixed_projection(record):
+    return (
+        record.get("year"),
+        record.get("province"),
+        record.get("subject_group"),
+        record.get("school_code"),
+        record.get("program_group") or record.get("major_group_name"),
+        record.get("remarks") or "",
+        record.get("min_score"),
+        record.get("min_rank"),
+    )
+
+
+def _admission_fact_key(record):
+    return _admission_fixed_projection(record)[:6]
+
+
 def _strict_admission_fact(record):
     if not isinstance(record, dict):
         return None
@@ -306,14 +323,7 @@ def _strict_admission_fact(record):
         for source_id in source_ids
     ):
         return None
-    key = (
-        value["year"],
-        value["province"],
-        value["subject_group"],
-        value["school_code"],
-        value["program_group"],
-        value["remarks"],
-    )
+    key = _admission_fact_key(value)
     return key, value, status, tuple(sorted(source_ids))
 
 
@@ -381,14 +391,7 @@ def _public_recommendations(
         bounded_rows = []
         for original in rows:
             row = dict(original)
-            key = (
-                row.get("year"),
-                row.get("province"),
-                row.get("subject_group"),
-                row.get("school_code"),
-                row.get("program_group") or row.get("major_group_name"),
-                row.get("remarks") or "",
-            )
+            key = _admission_fact_key(row)
             accepted = evidence_by_row.get(key)
             if accepted is None:
                 row.update(
@@ -406,6 +409,8 @@ def _public_recommendations(
                 if (
                     expected_row_hash is None
                     or value["row_hash"] != expected_row_hash
+                    or _admission_fixed_projection(value)
+                    != _admission_fixed_projection(row)
                 ):
                     row.update(
                         {

@@ -887,6 +887,68 @@ class EvidenceReportCliTest(unittest.TestCase):
         self.assertIn("cli-s1、cli-s2、cli-s3", result.stdout)
         self.assertIn("数据覆盖：部分覆盖", result.stdout)
 
+    def test_cli_rejects_hash_bound_fact_with_contradictory_fixed_row_fields(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            validation = validate_dataset_snapshot(
+                ROOT / "tests" / "fixtures" / "provinces" / "demo-312"
+            )
+            self.assertEqual(validation.issues, ())
+            assert validation.snapshot is not None
+            row_hash = admission_row_hash(validation.snapshot.admission_rows[0])
+            store = EvidenceStore.create(Path(temporary).resolve(), capability())
+            for index in range(1, 4):
+                store.add_candidate(
+                    SourceCandidate(
+                        source_id=f"mismatch-s{index}",
+                        url=f"https://mismatch-{index}.example.test/article",
+                        publisher=f"Mismatch Publisher {index}",
+                        tier=SourceTier.C,
+                        published_at=None,
+                        retrieved_at="2026-08-24T00:00:00Z",
+                        content_hash=f"sha256:mismatch-{index}",
+                        citation_root=f"https://mismatch-{index}.example.test/original",
+                        summary="Contradictory admission record",
+                    )
+                )
+            store.add_fact(
+                EvidenceFact(
+                    fact_id="contradictory-admission",
+                    field="admission_record:contradictory",
+                    value={
+                        "year": 2026,
+                        "province": "演示甲省",
+                        "subject_group": "物理",
+                        "school_code": "SYN312A",
+                        "program_group": "第01组",
+                        "remarks": "",
+                        "min_score": 999,
+                        "min_rank": 9999,
+                        "coverage_min_rank": 1,
+                        "coverage_max_rank": 10000,
+                        "coverage_status": "partial",
+                        "row_hash": row_hash,
+                    },
+                    unit=None,
+                    status=EvidenceStatus.REFERENCE,
+                    source_ids=("mismatch-s1", "mismatch-s2", "mismatch-s3"),
+                    method="three-source-consensus",
+                    notes="",
+                )
+            )
+            store.finalize()
+
+            result = subprocess.run(
+                self.command("--evidence", str(store.session_path)),
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("虚构甲大学 | 645 | 1100", result.stdout)
+        self.assertNotIn("mismatch-s1", result.stdout)
+        self.assertIn("数据覆盖：冲突", result.stdout)
+
     def test_whole_row_hash_rejects_every_non_numeric_row_mutation(self):
         validation = validate_dataset_snapshot(
             ROOT / "tests" / "fixtures" / "provinces" / "demo-312"
