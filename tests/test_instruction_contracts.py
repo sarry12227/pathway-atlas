@@ -277,11 +277,20 @@ class InstructionContractTest(unittest.TestCase):
     def test_host_guide_mutation_canaries_reject_unsafe_workflow_drift(self):
         for path in HOST_GUIDES:
             _source, text = read_utf8(path)
+            file_output_guard = "do not claim an evidence bundle or report was written"
+            self.assertEqual(text.count(file_output_guard), 1)
+            file_output_mutation = text.replace(
+                file_output_guard,
+                "claim an evidence bundle or report was written",
+                1,
+            )
+            self.assertIn("do not claim page verification", file_output_mutation)
+            self.assertNotIn(file_output_guard, file_output_mutation)
             mutations = (
                 text.replace("local/host-native", "silent external upload", 1),
                 text.replace("current/live facts unavailable", "current facts verified", 1),
                 text.replace("stop before deterministic calculation", "continue deterministic calculation", 1),
-                text.replace("do not claim", "claim", 1),
+                file_output_mutation,
                 text.replace(
                     "[--host-capability vision]",
                     "[--host-capability vision] [--host-capability local_exec]",
