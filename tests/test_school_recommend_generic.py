@@ -6,8 +6,10 @@ from __future__ import annotations
 import json
 import os
 import sys
+import tempfile
 import unittest
 from dataclasses import FrozenInstanceError
+from pathlib import Path
 
 
 SKILL_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -15,6 +17,7 @@ sys.path.insert(0, os.path.join(SKILL_ROOT, "scripts"))
 
 from contracts import (  # noqa: E402
     EvidenceStatus,
+    OrdinaryBatchPolicy,
     RecommendationProfile,
     RecommendationResult,
 )
@@ -22,8 +25,30 @@ from school_recommend import (  # noqa: E402
     SchoolRecommendError,
     is_in_province,
     parse_secondary_subjects,
-    recommend_schools,
+    recommend_schools as public_recommend_schools,
 )
+from province_registry import discover_provinces  # noqa: E402
+
+
+def ordinary_policy(**changes):
+    values = {
+        "schema_version": "1.0",
+        "policy_id": "synthetic-ordinary-batch-v1",
+        "basis_id": "synthetic-policy-basis-v1",
+        "search_delta_min": -8000,
+        "search_delta_max": 6000,
+        "challenge_delta_lt": -2000,
+        "stable_delta_le": 2000,
+        "tier_caps": {"冲": 3, "稳": 4, "保": 5},
+    }
+    values.update(changes)
+    return OrdinaryBatchPolicy(**values)
+
+
+def recommend_schools(rows, value, policy=None):
+    """Keep existing behavior cases terse while exercising the explicit API."""
+
+    return public_recommend_schools(rows, value, policy or ordinary_policy())
 
 
 def admission_row(**changes):
@@ -44,6 +69,7 @@ def admission_row(**changes):
         "city_location": "上海",
         "remarks": "",
         "evidence_status": "official",
+        "coverage_status": "official",
         "source_ids": ["source-2025-01"],
         "coverage_min_rank": 5000,
         "coverage_max_rank": 12000,
@@ -100,6 +126,117 @@ class ProvinceNormalizationTest(unittest.TestCase):
 
         self.assertTrue(is_in_province("演示甲省", "演示甲"))
         self.assertTrue(is_in_province("XX省", "XX"))
+
+
+class PolicyAndCityPreferenceTest(unittest.TestCase):
+    def test_explicit_policy_changes_classification_and_is_retained(self):
+        row = admission_row(min_rank=6500)
+        challenge_policy = ordinary_policy(challenge_delta_lt=-1000)
+        stable_policy = ordinary_policy(
+            policy_id="synthetic-ordinary-batch-v2",
+            basis_id="synthetic-policy-basis-v2",
+            challenge_delta_lt=-2000,
+        )
+
+        challenge = public_recommend_schools([row], profile(), challenge_policy)
+        stable = public_recommend_schools([row], profile(), stable_policy)
+
+        self.assertEqual(challenge.items[0].strategy, "冲")
+        self.assertEqual(stable.items[0].strategy, "稳")
+        self.assertEqual(challenge.ordinary_batch_policy, challenge_policy)
+        self.assertEqual(stable.ordinary_batch_policy.basis_id, "synthetic-policy-basis-v2")
+
+    def test_two_authenticated_province_configs_classify_the_same_delta_differently(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for province, policy in (
+                ("阈值甲省", ordinary_policy(challenge_delta_lt=-1000)),
+                (
+                    "阈值乙省",
+                    ordinary_policy(
+                        policy_id="synthetic-ordinary-batch-v2",
+                        basis_id="synthetic-policy-basis-v2",
+                        challenge_delta_lt=-2000,
+                    ),
+                ),
+            ):
+                directory = root / province
+                directory.mkdir()
+                (directory / "province.json").write_text(
+                    json.dumps(
+                        {
+                            "province": province,
+                            "mode": "3+1+2",
+                            "primary_subjects": ["物理", "历史"],
+                            "secondary_subjects": ["化学", "生物"],
+                            "score_scale": 750,
+                            "schema_version": "1.0",
+                            "ordinary_batch_policy": policy.to_dict(),
+                        },
+                        ensure_ascii=False,
+                    ),
+                    encoding="utf-8",
+                )
+            configs = discover_provinces(root)
+
+            first = public_recommend_schools(
+                [admission_row(min_rank=6500)], profile(), configs["阈值甲省"].ordinary_batch_policy
+            )
+            second = public_recommend_schools(
+                [admission_row(min_rank=6500)], profile(), configs["阈值乙省"].ordinary_batch_policy
+            )
+
+        self.assertEqual(first.items[0].strategy, "冲")
+        self.assertEqual(second.items[0].strategy, "稳")
+
+    def test_exact_target_city_orders_after_school_intent_and_marks_reason(self):
+        rows = [
+            admission_row(
+                school_name="甲意向大学",
+                school_code="D001",
+                city_location="外地市",
+                min_rank=8001,
+            ),
+            admission_row(
+                school_name="乙城市大学",
+                school_code="D002",
+                city_location="目标市",
+                min_rank=8002,
+            ),
+            admission_row(
+                school_name="丙普通大学",
+                school_code="D003",
+                city_location="目标市新区",
+                min_rank=8000,
+            ),
+        ]
+        selected = recommend_schools(
+            rows,
+            profile(target_schools=("甲意向大学",), target_cities=("目标市",)),
+        )
+
+        self.assertEqual(
+            tuple(item.school_name for item in selected.items),
+            ("甲意向大学", "乙城市大学", "丙普通大学"),
+        )
+        city_item = selected.items[1]
+        self.assertIn("用户意向城市", city_item.match_reason)
+        self.assertEqual(city_item.recommend_level, "★★★")
+        self.assertNotIn("用户意向城市", selected.items[2].match_reason)
+
+    def test_empty_target_cities_preserve_existing_deterministic_order(self):
+        rows = [
+            admission_row(
+                school_name="乙大学", school_code="D002", city_location="目标市", min_rank=8002
+            ),
+            admission_row(
+                school_name="甲大学", school_code="D001", city_location="外地市", min_rank=8001
+            ),
+        ]
+
+        result = recommend_schools(rows, profile(target_cities=()))
+
+        self.assertEqual(tuple(item.school_name for item in result.items), ("甲大学", "乙大学"))
 
 
 class SecondarySubjectParserTest(unittest.TestCase):
@@ -275,7 +412,8 @@ class EvidenceAndCoverageTest(unittest.TestCase):
                 admission_row(
                     school_name=f"状态大学-{status}",
                     school_code=f"D{index}",
-                    evidence_status=status,
+                    evidence_status=("official" if status == "partial" else status),
+                    coverage_status=status,
                 )
                 for index, status in enumerate(statuses)
             ]
@@ -286,7 +424,8 @@ class EvidenceAndCoverageTest(unittest.TestCase):
     def test_aggregate_status_keeps_every_distinct_risk_warning(self):
         partial = admission_row(
             school_name="部分大学",
-            evidence_status="partial",
+            evidence_status="official",
+            coverage_status="partial",
         )
         conflict = admission_row(
             school_name="冲突大学",
@@ -306,11 +445,13 @@ class EvidenceAndCoverageTest(unittest.TestCase):
         self.assertEqual(len(result.warnings), len(set(result.warnings)))
 
     def test_partial_exact_rows_are_used_only_inside_explicit_verified_coverage(self):
-        row = admission_row(evidence_status="partial")
+        row = admission_row(evidence_status="reference", coverage_status="partial")
         inside = recommend_schools([row], profile(rank=8000))
         outside = recommend_schools([row], profile(rank=13000))
         self.assertEqual(len(inside.items), 1)
         self.assertEqual(inside.coverage_status, EvidenceStatus.PARTIAL)
+        self.assertEqual(inside.items[0].evidence_status, EvidenceStatus.REFERENCE)
+        self.assertEqual(inside.items[0].source_ids, ("source-2025-01",))
         self.assertTrue(any("当前已验证覆盖范围内" in value
                             for value in inside.warnings))
         self.assertEqual(outside.items, ())

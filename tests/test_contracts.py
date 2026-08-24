@@ -20,6 +20,37 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 
 class ContractTest(unittest.TestCase):
+    def test_manifest_machine_identifiers_use_exact_public_grammars(self):
+        valid_session = "a13800138000bcdef123456789abcdef"
+        valid_hash = "sha256:" + valid_session * 2
+
+        manifest = EvidenceManifest(
+            session_id=valid_session,
+            manifest_hash=valid_hash,
+        )
+
+        self.assertEqual(manifest.session_id, valid_session)
+        self.assertEqual(manifest.manifest_hash, valid_hash)
+        for invalid_session in (
+            "session-123",
+            valid_session.upper(),
+            "a" * 31,
+            "g" * 32,
+        ):
+            with self.subTest(session_id=invalid_session), self.assertRaises(ValueError):
+                EvidenceManifest(session_id=invalid_session)
+        for invalid_hash in (
+            "sha256:manifest",
+            "sha256:" + "A" * 64,
+            "sha256:" + "0" * 63,
+            "md5:" + "0" * 64,
+            None,
+            False,
+            0,
+        ):
+            with self.subTest(manifest_hash=invalid_hash), self.assertRaises(ValueError):
+                EvidenceManifest(manifest_hash=invalid_hash)
+
     def test_fact_serializes_stable_enum_values(self):
         fact = EvidenceFact(
             fact_id="score-001",
@@ -86,12 +117,12 @@ class ContractTest(unittest.TestCase):
         )
         manifest = EvidenceManifest(
             schema_version="1.0",
-            session_id="session-123",
+            session_id="a" * 32,
             capability_tier=CapabilityTier.STANDARD,
             candidates_filename="candidates.jsonl",
             facts_filename="facts.jsonl",
             rejected_count=1,
-            manifest_hash="sha256:manifest",
+            manifest_hash="sha256:" + "b" * 64,
         )
 
         for item in (candidate, claim, report, manifest):
@@ -127,12 +158,12 @@ class ContractTest(unittest.TestCase):
         )
         manifest = EvidenceManifest(
             "1.0",
-            "session-123",
+            "a" * 32,
             CapabilityTier.STANDARD,
             "candidates.jsonl",
             "facts.jsonl",
             0,
-            "sha256:manifest",
+            "sha256:" + "b" * 64,
         )
         report = CapabilityReport(CapabilityTier.STANDARD)
 
@@ -152,6 +183,15 @@ class ContractTest(unittest.TestCase):
         }
         self.assertEqual(set(evidence_schema["required"]), set(bundle))
         self.assertNotIn("unexpected", evidence_schema["properties"])
+        manifest_schema = evidence_schema["$defs"]["manifest"]["properties"]
+        self.assertEqual(
+            manifest_schema.get("session_id", {}).get("pattern"),
+            "^[0-9a-f]{32}$",
+        )
+        self.assertEqual(
+            manifest_schema.get("manifest_hash", {}).get("pattern"),
+            "^sha256:[0-9a-f]{64}$",
+        )
 
     def test_manifest_defaults_include_version_and_random_session(self):
         first = EvidenceManifest()

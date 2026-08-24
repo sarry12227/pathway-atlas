@@ -16,6 +16,7 @@ from typing import Any, Optional
 if __package__:
     from .contracts import (
         EvidenceStatus,
+        OrdinaryBatchPolicy,
         RecommendationItem,
         RecommendationMajorGroup,
         RecommendationProfile,
@@ -24,6 +25,7 @@ if __package__:
 else:
     from contracts import (
         EvidenceStatus,
+        OrdinaryBatchPolicy,
         RecommendationItem,
         RecommendationMajorGroup,
         RecommendationProfile,
@@ -31,17 +33,12 @@ else:
     )
 
 
-CHONG_LT = -2000
-WEN_LE = 2000
-TIER_CAPS = {"冲": 3, "稳": 4, "保": 5}
-DELTA_LO, DELTA_HI = -8000, 6000
 LEVEL_ORDER = {"985": 0, "211": 1, "双一流": 2}
 
 _ACCEPTED_EXACT_STATUSES = {
     EvidenceStatus.OFFICIAL,
     EvidenceStatus.CORROBORATED,
     EvidenceStatus.REFERENCE,
-    EvidenceStatus.PARTIAL,
 }
 _ISSUE_PRECEDENCE = (
     EvidenceStatus.CONFLICT,
@@ -96,22 +93,10 @@ class SchoolRecommendError(Exception):
         self.message = message
 
 
-def _default_parameters() -> dict:
-    """Return fresh deterministic limits for the evidence-aware engine."""
-
-    return {
-        "chong_lt": CHONG_LT,
-        "wen_le": WEN_LE,
-        "delta_lo": DELTA_LO,
-        "delta_hi": DELTA_HI,
-        "tier_caps": dict(TIER_CAPS),
-    }
-
-
-def _tier(delta: int, chong_lt: int = CHONG_LT, wen_le: int = WEN_LE) -> str:
-    if delta < chong_lt:
+def _tier(delta: int, challenge_delta_lt: int, stable_delta_le: int) -> str:
+    if delta < challenge_delta_lt:
         return "冲"
-    return "稳" if delta <= wen_le else "保"
+    return "稳" if delta <= stable_delta_le else "保"
 
 
 def _canonical_province(value: object) -> str | None:
@@ -315,7 +300,7 @@ def _warning_for_status(status: EvidenceStatus) -> str | None:
 def _recommend_core(
     rows: Sequence[Mapping[str, Any]],
     profile: RecommendationProfile,
-    parameters: dict,
+    policy: OrdinaryBatchPolicy,
 ) -> RecommendationResult:
     rank = _strict_int(profile.rank)
     if rank is None or rank < 1:
@@ -357,6 +342,8 @@ def _recommend_core(
     for row in subject_rows:
         status = _status(row.get("evidence_status"))
         statuses.add(status or EvidenceStatus.MISSING)
+        coverage_status = _status(row.get("coverage_status"))
+        statuses.add(coverage_status or EvidenceStatus.MISSING)
 
         coverage_min = _strict_int(row.get("coverage_min_rank"))
         coverage_max = _strict_int(row.get("coverage_max_rank"))
@@ -396,6 +383,8 @@ def _recommend_core(
             continue
         if status not in _ACCEPTED_EXACT_STATUSES:
             continue
+        if coverage_status not in _ACCEPTED_EXACT_STATUSES | {EvidenceStatus.PARTIAL}:
+            continue
         if coverage_min is None or coverage_max is None or coverage_max < coverage_min:
             continue
         snapshot = dict(row)
@@ -430,8 +419,8 @@ def _recommend_core(
         empty_reason = "rank_outside_verified_coverage"
     elif usable:
         latest_year = max(row["year"] for row in usable)
-        lo = max(1, rank + parameters["delta_lo"])
-        hi = rank + parameters["delta_hi"]
+        lo = max(1, rank + policy.search_delta_min)
+        hi = rank + policy.search_delta_max
         candidate_rows = [
             row for row in usable
             if row["year"] == latest_year and lo <= row["min_rank"] <= hi
@@ -468,10 +457,14 @@ def _recommend_core(
                 extra_matches.extend(matches)
         matched = list(dict.fromkeys(representative_matches + extra_matches))
         intent = _is_intent(school_name, profile.target_schools)
+        city = str(representative.get("city_location") or "")
+        city_match = bool(city and city in profile.target_cities)
         delta = representative["min_rank"] - rank
         reasons: list[str] = []
         if intent:
             reasons.append("用户意向院校")
+        if city_match:
+            reasons.append("用户意向城市")
         if matched:
             reasons.append(f"专业倾向匹配：{'、'.join(matched)}")
         if not reasons:
@@ -501,7 +494,7 @@ def _recommend_core(
         item = RecommendationItem(
             school_name=school_name,
             school_level=str(representative.get("school_level") or ""),
-            city=str(representative.get("city_location") or ""),
+            city=city,
             school_province=school_province,
             province_match=province_match,
             subject_match=True,
@@ -512,14 +505,15 @@ def _recommend_core(
             remarks=str(representative.get("remarks") or ""),
             major_groups=major_groups,
             match_reason="；".join(reasons),
-            recommend_level="★★★" if (intent or matched) else "★★",
-            strategy=_tier(delta, parameters["chong_lt"], parameters["wen_le"]),
+            recommend_level="★★★" if (intent or city_match or matched) else "★★",
+            strategy=_tier(delta, policy.challenge_delta_lt, policy.stable_delta_le),
             data_year=representative["year"],
             source_ids=item_sources,
             evidence_status=item_status,
         )
         sort_key = (
             0 if intent else 1,
+            0 if city_match else 1,
             LEVEL_ORDER.get(item.school_level, 9),
             0 if province_match else 1,
             item.min_rank,
@@ -531,7 +525,7 @@ def _recommend_core(
     capped: list[RecommendationItem] = []
     for tier in ("冲", "稳", "保"):
         tier_items = [item for item in all_items if item.strategy == tier]
-        capped.extend(tier_items[:parameters["tier_caps"][tier]])
+        capped.extend(tier_items[:policy.tier_caps[tier]])
     items = tuple(capped)
     if verified_coverage is not None and verified_coverage[0] <= rank <= verified_coverage[1] and not items:
         empty_reason = (
@@ -552,6 +546,7 @@ def _recommend_core(
     if zero_score_excluded:
         warnings.append(f"0分占位已剔除：{zero_score_excluded} 行")
     result = RecommendationResult(
+        ordinary_batch_policy=policy,
         items=items,
         excluded_by_subject_count=excluded_by_subject,
         zero_score_excluded_count=zero_score_excluded,
@@ -568,10 +563,14 @@ def _recommend_core(
 def recommend_schools(
     rows: Sequence[Mapping[str, Any]],
     profile: RecommendationProfile | Mapping[str, Any],
+    policy: OrdinaryBatchPolicy,
 ) -> RecommendationResult:
-    """Return evidence-aware recommendations for normalized rows and profile."""
+    """Return recommendations using one explicit authenticated province policy."""
 
-    return _recommend_core(rows, _profile(profile), _default_parameters())
+    if not isinstance(policy, OrdinaryBatchPolicy):
+        raise SchoolRecommendError("REC_003", "普通批策略缺失或无效")
+    policy_snapshot = OrdinaryBatchPolicy(**policy.to_dict())
+    return _recommend_core(rows, _profile(profile), policy_snapshot)
 
 
 __all__ = [

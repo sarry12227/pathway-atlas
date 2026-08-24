@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -12,13 +13,13 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-try:
-    from scripts.data_loader import (
+if __package__:
+    from .data_loader import (
         DataError,
         _normalize_admission_row,
         _read_csv_records,
     )
-    from scripts.province_registry import (
+    from .province_registry import (
         ProvinceConfig,
         ProvinceConfigError,
         ProvincePathError,
@@ -26,9 +27,10 @@ try:
         _DirectoryIdentity,
         _parse_config,
         _read_metadata,
+        canonical_subject_selection_key,
         validate_subject_selection,
     )
-except ModuleNotFoundError:  # Direct ``python scripts/validate_data.py`` compatibility.
+else:  # Direct ``python scripts/validate_data.py`` compatibility.
     from data_loader import DataError, _normalize_admission_row, _read_csv_records  # type: ignore
     from province_registry import (  # type: ignore
         ProvinceConfig,
@@ -38,6 +40,7 @@ except ModuleNotFoundError:  # Direct ``python scripts/validate_data.py`` compat
         _DirectoryIdentity,
         _parse_config,
         _read_metadata,
+        canonical_subject_selection_key,
         validate_subject_selection,
     )
 
@@ -145,6 +148,21 @@ class ValidatedAdmissionRow:
         return dict(self._items)
 
 
+def admission_row_hash(row: ValidatedAdmissionRow) -> str:
+    """Bind every current and future normalized field in one canonical digest."""
+
+    if not isinstance(row, ValidatedAdmissionRow):
+        raise TypeError("row must be a ValidatedAdmissionRow")
+    canonical = json.dumps(
+        row.to_dict(),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    return "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 @dataclass(frozen=True)
 class ValidatedDatasetSnapshot:
     """Authenticated province metadata and data parsed during one validation pass."""
@@ -234,16 +252,15 @@ def _valid_subject_group(config: ProvinceConfig, raw: str) -> bool:
         return False
     subjects = tuple(part.strip() for part in _GROUP_SPLIT.split(raw))
     if config.mode == "3+1+2":
-        if len(subjects) == 1:
-            return raw in config.primary_subjects
-        return (
-            len(subjects) == 3
-            and len(set(subjects)) == 3
-            and subjects[0] in config.primary_subjects
-            and all(item in config.secondary_subjects for item in subjects[1:])
+        return len(subjects) == 1 and raw in config.primary_subjects
+    if len(subjects) != 3:
+        return False
+    try:
+        return raw == canonical_subject_selection_key(
+            config, subjects[0], list(subjects[1:])
         )
-    allowed = set(config.primary_subjects) | set(config.secondary_subjects)
-    return len(subjects) == 3 and len(set(subjects)) == 3 and all(item in allowed for item in subjects)
+    except ProvinceRegistryError:
+        return False
 
 
 def _integer(raw: str) -> int | None:

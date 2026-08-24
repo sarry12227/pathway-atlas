@@ -1,9 +1,12 @@
 import csv
+import importlib
 import json
 import math
 import os
 import re
 import tempfile
+import subprocess
+import sys
 import unittest
 from dataclasses import FrozenInstanceError
 from pathlib import Path
@@ -17,10 +20,12 @@ from scripts.province_registry import (
     ProvincePathError,
     SubjectSelectionError,
     UnknownProvinceError,
+    canonical_subject_selection_key,
     discover_provinces,
     resolve_province_dir,
     validate_subject_selection,
 )
+from scripts.contracts import OrdinaryBatchPolicy
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -42,6 +47,16 @@ def valid_metadata(province: str = "虚构省") -> dict:
         "secondary_subjects": ["化学", "生物", "思想政治", "地理"],
         "score_scale": 750,
         "schema_version": "1.0",
+        "ordinary_batch_policy": {
+            "schema_version": "1.0",
+            "policy_id": "synthetic-ordinary-batch-v1",
+            "basis_id": "synthetic-policy-basis-v1",
+            "search_delta_min": -8000,
+            "search_delta_max": 6000,
+            "challenge_delta_lt": -2000,
+            "stable_delta_le": 2000,
+            "tier_caps": {"冲": 3, "稳": 4, "保": 5},
+        },
     }
 
 
@@ -56,6 +71,10 @@ class ProvinceRegistryTest(unittest.TestCase):
         self.assertEqual(config.mode, "3+1+2")
         self.assertEqual(config.directory, (FIXTURES / "demo-312").resolve())
         self.assertEqual(json.loads(json.dumps(config.to_dict(), ensure_ascii=False))["score_scale"], 750)
+        self.assertIsInstance(config.ordinary_batch_policy, OrdinaryBatchPolicy)
+        self.assertEqual(config.ordinary_batch_policy.tier_caps["稳"], 4)
+        with self.assertRaises(TypeError):
+            config.ordinary_batch_policy.tier_caps["稳"] = 99
         with self.assertRaises(FrozenInstanceError):
             config.mode = "3+3"
 
@@ -185,6 +204,37 @@ class ProvinceMetadataValidationTest(unittest.TestCase):
         version["schema_version"] = "2.0"
         self.assert_invalid_payload(version)
 
+    def test_ordinary_batch_policy_is_required_strict_and_fail_closed(self):
+        missing = valid_metadata()
+        del missing["ordinary_batch_policy"]
+        self.assert_invalid_payload(missing)
+
+        invalid_policies = []
+        extra = valid_metadata()["ordinary_batch_policy"].copy()
+        extra["unknown"] = 1
+        invalid_policies.append(extra)
+        for field, value in (
+            ("policy_id", "unsafe/path"),
+            ("basis_id", "unsafe basis"),
+            ("search_delta_min", True),
+            ("challenge_delta_lt", -9000),
+        ):
+            policy = valid_metadata()["ordinary_batch_policy"].copy()
+            policy[field] = value
+            invalid_policies.append(policy)
+        bad_caps = valid_metadata()["ordinary_batch_policy"].copy()
+        bad_caps["tier_caps"] = {"冲": 3, "稳": 0, "保": 5}
+        invalid_policies.append(bad_caps)
+        bad_cap_keys = valid_metadata()["ordinary_batch_policy"].copy()
+        bad_cap_keys["tier_caps"] = {"冲": 3, "稳": 4, "保": 5, "未知": 1}
+        invalid_policies.append(bad_cap_keys)
+
+        for policy in invalid_policies:
+            with self.subTest(policy=policy):
+                payload = valid_metadata()
+                payload["ordinary_batch_policy"] = policy
+                self.assert_invalid_payload(payload)
+
     def test_non_finite_and_unreasonable_score_scales_are_rejected(self):
         for value in (math.nan, math.inf, 0, 99, 1001, True, "750"):
             with self.subTest(value=value):
@@ -296,6 +346,24 @@ class SubjectSelectionTest(unittest.TestCase):
             with self.subTest(primary=primary, secondary=secondary), self.assertRaises(ValueError):
                 validate_subject_selection(self.config_33, primary, secondary)
 
+    def test_mode_aware_canonical_subject_key_is_the_only_internal_key(self):
+        self.assertEqual(
+            canonical_subject_selection_key(
+                self.config_312, "物理", ("地理", "化学")
+            ),
+            "物理",
+        )
+        self.assertEqual(
+            canonical_subject_selection_key(
+                self.config_33, "地理", ("化学", "物理")
+            ),
+            "物理+化学+地理",
+        )
+        with self.assertRaises(SubjectSelectionError):
+            canonical_subject_selection_key(
+                self.config_33, "物理+化学+地理", ()
+            )
+
 
 class ProvinceSchemaContractTest(unittest.TestCase):
     def test_schema_and_synthetic_fixtures_share_the_runtime_contract(self):
@@ -304,6 +372,17 @@ class ProvinceSchemaContractTest(unittest.TestCase):
         self.assertFalse(schema["additionalProperties"])
         self.assertEqual(schema["properties"]["mode"]["enum"], ["3+1+2", "3+3"])
         self.assertEqual(schema["properties"]["schema_version"]["enum"], ["1.0"])
+        policy = schema["properties"]["ordinary_batch_policy"]
+        self.assertFalse(policy["additionalProperties"])
+        self.assertEqual(
+            set(policy["required"]),
+            {
+                "schema_version", "policy_id", "basis_id", "search_delta_min",
+                "search_delta_max", "challenge_delta_lt", "stable_delta_le", "tier_caps",
+            },
+        )
+        self.assertFalse(policy["properties"]["tier_caps"]["additionalProperties"])
+        self.assertEqual(set(policy["properties"]["tier_caps"]["required"]), {"冲", "稳", "保"})
         for field in ("primary_subjects", "secondary_subjects"):
             declaration = schema["properties"][field]
             self.assertTrue(declaration["uniqueItems"])
@@ -316,6 +395,48 @@ class ProvinceSchemaContractTest(unittest.TestCase):
             payload = json.loads(path.read_text(encoding="utf-8"))
             self.assertEqual(set(payload), required)
             self.assertIn(payload["mode"], schema["properties"]["mode"]["enum"])
+
+    def test_schema_semantic_policy_locator_executes_in_package_and_flat_modes(self):
+        schema = json.loads((ROOT / "schemas" / "province.schema.json").read_text(encoding="utf-8"))
+        semantic = schema["x-semantic-validator"]
+        self.assertEqual(
+            semantic,
+            {
+                "policy": "scripts.province_registry.validate_ordinary_batch_policy",
+                "checks": ["threshold_order"],
+            },
+        )
+        module_name, attribute = semantic["policy"].rsplit(".", 1)
+        validator = getattr(importlib.import_module(module_name), attribute)
+        self.assertIsInstance(
+            validator(valid_metadata()["ordinary_batch_policy"]),
+            OrdinaryBatchPolicy,
+        )
+        invalid = valid_metadata()["ordinary_batch_policy"].copy()
+        invalid["challenge_delta_lt"] = -9000
+        with self.assertRaises(ProvinceConfigError):
+            validator(invalid)
+
+        flat = subprocess.run(
+            [
+                sys.executable,
+                "-I",
+                "-c",
+                (
+                    "import json,sys;"
+                    f"sys.path.insert(0,{str((ROOT / 'scripts').resolve())!r});"
+                    "import province_registry as p;"
+                    f"v=json.loads({json.dumps(valid_metadata()['ordinary_batch_policy'])!r});"
+                    "assert p.validate_ordinary_batch_policy(v).policy_id == "
+                    "'synthetic-ordinary-batch-v1'"
+                ),
+            ],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        self.assertEqual(flat.returncode, 0, flat.stdout + flat.stderr)
 
 
 class DeprecatedProvinceBridgeTest(unittest.TestCase):

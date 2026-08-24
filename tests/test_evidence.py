@@ -153,6 +153,78 @@ class EvidenceStoreTest(unittest.TestCase):
                     store.add_fact(fact)
                 self.assertNotIn(value, str(raised.exception))
 
+    def test_pii_shaped_evidence_identifiers_are_rejected_at_ingestion(self):
+        pii_ids = (
+            "13800138000",
+            "138-0013-8000",
+            "138.0013.8000",
+            "11010519491231002X",
+        )
+        for identifier in pii_ids:
+            with self.subTest(kind="source_id", identifier=identifier):
+                store = EvidenceStore.create(self.root, self.report)
+                with self.assertRaises(EvidencePrivacyError):
+                    store.add_candidate(self.candidate(identifier))
+            with self.subTest(kind="fact_id", identifier=identifier):
+                store = EvidenceStore.create(self.root, self.report)
+                store.add_candidate(self.candidate("cli-s1"))
+                with self.assertRaises(EvidencePrivacyError):
+                    store.add_fact(self.fact(identifier, ("cli-s1",)))
+            with self.subTest(kind="rejection_id", identifier=identifier):
+                store = EvidenceStore.create(self.root, self.report)
+                with self.assertRaises(EvidencePrivacyError):
+                    store.reject_candidate(identifier, "synthetic rejection")
+            with self.subTest(kind="reference_id", identifier=identifier):
+                store = EvidenceStore.create(self.root, self.report)
+                store.add_candidate(self.candidate("cli-s1"))
+                try:
+                    store.add_fact(self.fact("school-policy-2026", (identifier,)))
+                except Exception as error:  # The assertion below identifies the boundary class.
+                    raised = error
+                else:
+                    raised = None
+                self.assertIsInstance(raised, EvidencePrivacyError)
+
+    def test_ordinary_semantic_evidence_identifiers_remain_valid(self):
+        store = EvidenceStore.create(self.root, self.report)
+        store.add_candidate(self.candidate("cli-s1"))
+        store.add_fact(self.fact("school-policy-2026", ("cli-s1",)))
+        store.reject_candidate("cli-rejected", "synthetic rejection")
+
+        manifest = store.finalize()
+
+        self.assertRegex(manifest.session_id, r"^[0-9a-f]{32}$")
+        self.assertRegex(manifest.manifest_hash, r"^sha256:[0-9a-f]{64}$")
+
+    def test_finalize_revalidates_every_persisted_identifier_field(self):
+        def populated_store():
+            store = EvidenceStore.create(self.root, self.report)
+            store.add_candidate(self.candidate("cli-s1"))
+            store.add_fact(self.fact("school-policy-2026", ("cli-s1",)))
+            store.reject_candidate("cli-rejected", "synthetic rejection")
+            return store
+
+        mutations = (
+            lambda store: store._candidates["cli-s1"].__setitem__(
+                "source_id", "13800138000"
+            ),
+            lambda store: store._facts["school-policy-2026"].__setitem__(
+                "fact_id", "11010519491231002X"
+            ),
+            lambda store: store._facts["school-policy-2026"].__setitem__(
+                "source_ids", ["138-0013-8000"]
+            ),
+            lambda store: store._rejections.__setitem__(
+                "138.0013.8000", store._rejections.pop("cli-rejected")
+            ),
+        )
+        for index, mutate in enumerate(mutations):
+            with self.subTest(index=index):
+                store = populated_store()
+                mutate(store)
+                with self.assertRaises(EvidencePrivacyError):
+                    store.finalize()
+
     def test_ingestion_snapshots_nested_fact_and_context_data(self):
         store = EvidenceStore.create(self.root, self.report)
         store.add_candidate(self.candidate("s1"))

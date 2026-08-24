@@ -911,6 +911,7 @@ class PublicPackageBoundaryTest(unittest.TestCase):
     def test_public_runtime_has_only_evidence_aware_recommendation_surfaces(self):
         from scripts.contracts import (
             EvidenceStatus,
+            OrdinaryBatchPolicy,
             RecommendationProfile,
             RecommendationResult,
         )
@@ -922,7 +923,7 @@ class PublicPackageBoundaryTest(unittest.TestCase):
         report_tree = ast.parse((ROOT / "scripts/generate_report.py").read_text("utf-8"))
 
         signature = inspect.signature(school_module.recommend_schools)
-        self.assertEqual(list(signature.parameters), ["rows", "profile"])
+        self.assertEqual(list(signature.parameters), ["rows", "profile", "policy"])
         for parameter in signature.parameters.values():
             self.assertIs(parameter.kind, inspect.Parameter.POSITIONAL_OR_KEYWORD)
             self.assertIs(parameter.default, inspect.Parameter.empty)
@@ -948,6 +949,16 @@ class PublicPackageBoundaryTest(unittest.TestCase):
                 rank=1100,
                 target_province="演示甲省",
                 subject_group="物理",
+            ),
+            OrdinaryBatchPolicy(
+                schema_version="1.0",
+                policy_id="synthetic-ordinary-batch-v1",
+                basis_id="synthetic-policy-basis-v1",
+                search_delta_min=-8000,
+                search_delta_max=6000,
+                challenge_delta_lt=-2000,
+                stable_delta_le=2000,
+                tier_caps={"冲": 3, "稳": 4, "保": 5},
             ),
         )
         self.assertIsInstance(result, RecommendationResult)

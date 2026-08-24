@@ -9,6 +9,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, fields, is_dataclass
 from enum import Enum
+import re
+from collections.abc import Mapping
+from types import MappingProxyType
 from typing import Any
 from uuid import uuid4
 
@@ -148,6 +151,17 @@ class EvidenceManifest(_Serializable):
     rejected_count: int = 0
     manifest_hash: str = ""
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.session_id, str) or re.fullmatch(
+            r"[0-9a-f]{32}", self.session_id
+        ) is None:
+            raise ValueError("session_id must be lower-case UUID hex")
+        if self.manifest_hash != "" and (
+            not isinstance(self.manifest_hash, str)
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", self.manifest_hash) is None
+        ):
+            raise ValueError("manifest_hash must be a lower-case SHA-256 identifier")
+
 
 @dataclass(frozen=True)
 class RecommendationProfile(_Serializable):
@@ -203,6 +217,68 @@ class RecommendationProfile(_Serializable):
         return tuple(normalized)
 
 
+_SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+
+
+@dataclass(frozen=True)
+class OrdinaryBatchPolicy(_Serializable):
+    """Immutable, versioned parameters for one province ordinary-batch run."""
+
+    schema_version: str
+    policy_id: str
+    basis_id: str
+    search_delta_min: int
+    search_delta_max: int
+    challenge_delta_lt: int
+    stable_delta_le: int
+    tier_caps: Mapping[str, int]
+
+    def __post_init__(self) -> None:
+        if self.schema_version != "1.0":
+            raise ValueError("ordinary batch policy schema_version must be 1.0")
+        for name in ("policy_id", "basis_id"):
+            value = getattr(self, name)
+            if not isinstance(value, str) or _SAFE_ID.fullmatch(value) is None:
+                raise ValueError(f"{name} must use the public safe-ID syntax")
+        for name in (
+            "search_delta_min",
+            "search_delta_max",
+            "challenge_delta_lt",
+            "stable_delta_le",
+        ):
+            value = getattr(self, name)
+            if not isinstance(value, int) or isinstance(value, bool):
+                raise TypeError(f"{name} must be an integer")
+        if not (
+            self.search_delta_min
+            <= self.challenge_delta_lt
+            <= self.stable_delta_le
+            <= self.search_delta_max
+        ):
+            raise ValueError("ordinary batch policy thresholds are out of order")
+        if not isinstance(self.tier_caps, Mapping) or set(self.tier_caps) != {"冲", "稳", "保"}:
+            raise ValueError("tier_caps must contain exactly 冲, 稳, 保")
+        caps: dict[str, int] = {}
+        for tier in ("冲", "稳", "保"):
+            cap = self.tier_caps[tier]
+            if not isinstance(cap, int) or isinstance(cap, bool) or cap <= 0:
+                raise ValueError("tier caps must be positive integers")
+            caps[tier] = cap
+        object.__setattr__(self, "tier_caps", MappingProxyType(caps))
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "policy_id": self.policy_id,
+            "basis_id": self.basis_id,
+            "search_delta_min": self.search_delta_min,
+            "search_delta_max": self.search_delta_max,
+            "challenge_delta_lt": self.challenge_delta_lt,
+            "stable_delta_le": self.stable_delta_le,
+            "tier_caps": dict(self.tier_caps),
+        }
+
+
 @dataclass(frozen=True)
 class RecommendationMajorGroup(_Serializable):
     major_group_name: str
@@ -240,6 +316,7 @@ class RecommendationItem(_Serializable):
 class RecommendationResult(_Serializable):
     """Immutable school-matching result with explicit evidence coverage."""
 
+    ordinary_batch_policy: OrdinaryBatchPolicy
     items: tuple[RecommendationItem, ...] = ()
     excluded_by_subject_count: int = 0
     zero_score_excluded_count: int = 0
@@ -250,6 +327,15 @@ class RecommendationResult(_Serializable):
     empty_reason: str | None = None
     warnings: tuple[str, ...] = ()
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.ordinary_batch_policy, OrdinaryBatchPolicy):
+            raise TypeError("ordinary_batch_policy must be an OrdinaryBatchPolicy")
+        object.__setattr__(
+            self,
+            "ordinary_batch_policy",
+            OrdinaryBatchPolicy(**self.ordinary_batch_policy.to_dict()),
+        )
+
 
 __all__ = [
     "CapabilityReport",
@@ -258,6 +344,7 @@ __all__ = [
     "EvidenceManifest",
     "EvidenceStatus",
     "FactClaim",
+    "OrdinaryBatchPolicy",
     "RecommendationItem",
     "RecommendationMajorGroup",
     "RecommendationProfile",

@@ -15,6 +15,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+if __package__:
+    from .contracts import OrdinaryBatchPolicy
+else:
+    from contracts import OrdinaryBatchPolicy
+
 
 class ProvinceRegistryError(ValueError):
     """Base class for controlled province-registry failures."""
@@ -51,6 +56,7 @@ _REQUIRED_FIELDS = frozenset(
         "secondary_subjects",
         "score_scale",
         "schema_version",
+        "ordinary_batch_policy",
     )
 )
 _MAX_METADATA_BYTES = 256 * 1024
@@ -66,6 +72,7 @@ class ProvinceConfig:
     secondary_subjects: tuple[str, ...]
     score_scale: int | float
     schema_version: str
+    ordinary_batch_policy: OrdinaryBatchPolicy
     directory: Path
 
     def to_dict(self) -> dict[str, Any]:
@@ -76,6 +83,7 @@ class ProvinceConfig:
             "secondary_subjects": list(self.secondary_subjects),
             "score_scale": self.score_scale,
             "schema_version": self.schema_version,
+            "ordinary_batch_policy": self.ordinary_batch_policy.to_dict(),
             "directory": str(self.directory),
         }
 
@@ -317,6 +325,17 @@ def _normalize_subjects(value: Any, field: str) -> tuple[str, ...]:
     return tuple(subjects)
 
 
+def validate_ordinary_batch_policy(payload: Any) -> OrdinaryBatchPolicy:
+    """Apply the runtime semantic layer declared by province.schema.json."""
+
+    if not isinstance(payload, dict):
+        raise ProvinceConfigError("ordinary_batch_policy 必须是严格对象")
+    try:
+        return OrdinaryBatchPolicy(**payload)
+    except (TypeError, ValueError) as error:
+        raise ProvinceConfigError("ordinary_batch_policy 不符合严格策略契约") from error
+
+
 def _parse_config(payload: dict[str, Any], directory: Path) -> ProvinceConfig:
     keys = frozenset(payload)
     if keys != _REQUIRED_FIELDS:
@@ -351,6 +370,9 @@ def _parse_config(payload: dict[str, Any], directory: Path) -> ProvinceConfig:
     schema_version = payload["schema_version"]
     if not isinstance(schema_version, str) or schema_version != _SCHEMA_VERSION:
         raise ProvinceConfigError("不支持的 province schema_version（当前仅支持 1.0）")
+    ordinary_batch_policy = validate_ordinary_batch_policy(
+        payload["ordinary_batch_policy"]
+    )
 
     return ProvinceConfig(
         province=province,
@@ -359,6 +381,7 @@ def _parse_config(payload: dict[str, Any], directory: Path) -> ProvinceConfig:
         secondary_subjects=secondary,
         score_scale=score_scale,
         schema_version=schema_version,
+        ordinary_batch_policy=ordinary_batch_policy,
         directory=directory,
     )
 
@@ -514,3 +537,24 @@ def validate_subject_selection(
     if unknown:
         choices = "、".join(sorted(allowed))
         raise SubjectSelectionError(f"3+3 选科包含未配置科目；可选：{choices}")
+
+
+def canonical_subject_selection_key(
+    config: ProvinceConfig,
+    primary: str,
+    secondary: tuple[str, ...] | list[str],
+) -> str:
+    """Return the one mode-aware dataset/evidence key after full validation."""
+
+    validate_subject_selection(config, primary, secondary)
+    primary_value = _normalize_selection(primary, "首选科目")
+    if config.mode == "3+1+2":
+        return primary_value
+    selected = {primary_value, *(_normalize_selection(item, "再选科目") for item in secondary)}
+    ordered: list[str] = []
+    for subject in (*config.primary_subjects, *config.secondary_subjects):
+        if subject in selected and subject not in ordered:
+            ordered.append(subject)
+    if len(ordered) != 3:
+        raise SubjectSelectionError("3+3 模式必须形成三个不同的已配置科目")
+    return "+".join(ordered)

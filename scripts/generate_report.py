@@ -2,8 +2,10 @@
 """Generate an evidence-aware deterministic Markdown admission report."""
 import argparse
 import json
+import os
 import re
 import sys
+import tempfile
 from pathlib import Path
 
 if __package__:
@@ -18,7 +20,12 @@ if __package__:
         validate_profile_text,
     )
     from .school_recommend import SchoolRecommendError, recommend_schools
-    from .validate_data import ValidatedAdmissionRow, validate_dataset_snapshot
+    from .validate_data import (
+        ValidatedAdmissionRow,
+        admission_row_hash,
+        canonical_subject_selection_key,
+        validate_dataset_snapshot,
+    )
     from .validate_evidence import validate_bundle_snapshot
 else:
     from compliance_scan import find_price_text
@@ -32,7 +39,12 @@ else:
         validate_profile_text,
     )
     from school_recommend import SchoolRecommendError, recommend_schools
-    from validate_data import ValidatedAdmissionRow, validate_dataset_snapshot
+    from validate_data import (
+        ValidatedAdmissionRow,
+        admission_row_hash,
+        canonical_subject_selection_key,
+        validate_dataset_snapshot,
+    )
     from validate_evidence import validate_bundle_snapshot
 
 
@@ -190,6 +202,39 @@ def _resolve_public_dataset(dataset: Path, profile: StudentProfile):
     return validation.snapshot
 
 
+def _profiles_with_canonical_subject_key(
+    dataset,
+    report_profile: StudentProfile,
+    recommendation_profile: RecommendationProfile,
+):
+    key = canonical_subject_selection_key(
+        dataset.config,
+        report_profile.subject_group,
+        list(report_profile.secondary_subjects),
+    )
+    return (
+        StudentProfile(
+            province=report_profile.province,
+            subject_mode=report_profile.subject_mode,
+            subject_group=report_profile.subject_group,
+            secondary_subjects=report_profile.secondary_subjects,
+            rank=report_profile.rank,
+            grade=report_profile.grade,
+            current_year=report_profile.current_year,
+            subject_selection_key=key,
+        ),
+        RecommendationProfile(
+            rank=recommendation_profile.rank,
+            target_province=recommendation_profile.target_province,
+            subject_group=key,
+            secondary_subjects=recommendation_profile.secondary_subjects,
+            target_major_categories=recommendation_profile.target_major_categories,
+            target_cities=recommendation_profile.target_cities,
+            target_schools=recommendation_profile.target_schools,
+        ),
+    )
+
+
 _ADMISSION_FACT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _ADMISSION_VALUE_FIELDS = {
     "year",
@@ -202,6 +247,8 @@ _ADMISSION_VALUE_FIELDS = {
     "min_rank",
     "coverage_min_rank",
     "coverage_max_rank",
+    "coverage_status",
+    "row_hash",
 }
 
 
@@ -232,6 +279,17 @@ def _strict_admission_fact(record):
     if value["coverage_min_rank"] > value["coverage_max_rank"]:
         return None
     if not value["coverage_min_rank"] <= value["min_rank"] <= value["coverage_max_rank"]:
+        return None
+    if value["coverage_status"] not in {
+        EvidenceStatus.OFFICIAL.value,
+        EvidenceStatus.CORROBORATED.value,
+        EvidenceStatus.REFERENCE.value,
+        EvidenceStatus.PARTIAL.value,
+    }:
+        return None
+    if not isinstance(value["row_hash"], str) or re.fullmatch(
+        r"sha256:[0-9a-f]{64}", value["row_hash"]
+    ) is None:
         return None
     for name in ("province", "subject_group", "school_code", "program_group", "remarks"):
         if not isinstance(value[name], str):
@@ -280,6 +338,7 @@ def _admission_fact_index(facts):
 def _public_recommendations(
     admission_rows: tuple[ValidatedAdmissionRow, ...],
     profile: RecommendationProfile,
+    policy,
     facts,
 ):
     """Run Task 3 without assigning unscoped facts to admission rows.
@@ -295,7 +354,10 @@ def _public_recommendations(
             isinstance(row, ValidatedAdmissionRow) for row in admission_rows
         ):
             raise TypeError("admission rows must come from validated snapshot")
-        rows = [row.to_dict() for row in admission_rows]
+        authenticated_rows = tuple(
+            (row.to_dict(), admission_row_hash(row)) for row in admission_rows
+        )
+        rows = [row for row, _row_hash in authenticated_rows]
         matching_years = [
             row["year"]
             for row in rows
@@ -309,6 +371,12 @@ def _public_recommendations(
             if row.get("subject_group") == profile.subject_group
             and row.get("year") == latest_year
         ]
+        row_hashes = {
+            tuple(sorted(row.items())): row_hash
+            for row, row_hash in authenticated_rows
+            if row.get("subject_group") == profile.subject_group
+            and row.get("year") == latest_year
+        }
         evidence_by_row = _admission_fact_index(facts)
         bounded_rows = []
         for original in rows:
@@ -329,17 +397,23 @@ def _public_recommendations(
                         "source_ids": (),
                         "coverage_min_rank": None,
                         "coverage_max_rank": None,
+                        "coverage_status": EvidenceStatus.MISSING.value,
                     }
                 )
             else:
                 value, status, source_ids = accepted
-                if row.get("min_score") != value["min_score"] or row.get("min_rank") != value["min_rank"]:
+                expected_row_hash = row_hashes.get(tuple(sorted(original.items())))
+                if (
+                    expected_row_hash is None
+                    or value["row_hash"] != expected_row_hash
+                ):
                     row.update(
                         {
                             "evidence_status": EvidenceStatus.CONFLICT.value,
                             "source_ids": (),
                             "coverage_min_rank": None,
                             "coverage_max_rank": None,
+                            "coverage_status": EvidenceStatus.CONFLICT.value,
                         }
                     )
                 else:
@@ -349,10 +423,11 @@ def _public_recommendations(
                             "source_ids": source_ids,
                             "coverage_min_rank": value["coverage_min_rank"],
                             "coverage_max_rank": value["coverage_max_rank"],
+                            "coverage_status": value["coverage_status"],
                         }
                     )
             bounded_rows.append(row)
-        return recommend_schools(bounded_rows, profile)
+        return recommend_schools(bounded_rows, profile, policy)
     except (DataError, SchoolRecommendError, TypeError, ValueError) as error:
         raise EvidenceReportInputError("普通批数据无法形成安全推荐结果") from error
 
@@ -368,6 +443,39 @@ def _build_evidence_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _publish_markdown(markdown: str, destination: Path) -> None:
+    """Write privately, durably, then publish one complete file exclusively."""
+
+    owned_path = None
+    primary_error = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            newline="\n",
+            dir=destination.parent,
+            suffix=".ready.md",
+            delete=False,
+        ) as handle:
+            owned_path = Path(handle.name)
+            handle.write(markdown)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.link(owned_path, destination)
+    except BaseException as error:
+        primary_error = error
+        raise
+    finally:
+        cleanup_error = None
+        if owned_path is not None:
+            try:
+                owned_path.unlink(missing_ok=True)
+            except OSError as error:
+                cleanup_error = error
+        if primary_error is None and cleanup_error is not None:
+            raise cleanup_error
+
+
 def _evidence_main(argv) -> int:
     if sys.version_info < (3, 10):
         print("缺少能力：需要 Python 3.10 或更高版本", file=sys.stderr)
@@ -378,11 +486,15 @@ def _evidence_main(argv) -> int:
             args.profile
         )
         dataset = _resolve_public_dataset(args.dataset, report_profile)
+        report_profile, recommendation_profile = _profiles_with_canonical_subject_key(
+            dataset, report_profile, recommendation_profile
+        )
         evidence = _validated_evidence_snapshot(args.evidence)
         facts = tuple(record.to_dict() for record in evidence.facts)
         recommendations = _public_recommendations(
             dataset.admission_rows,
             recommendation_profile,
+            dataset.config.ordinary_batch_policy,
             facts,
         )
         # The public replay fixture carries no policy records or versioned rank
@@ -408,13 +520,15 @@ def _evidence_main(argv) -> int:
                 or output.exists()
             ):
                 raise EvidenceReportInputError("输出路径必须位于现有目录且使用 .md 后缀")
-            with output.open("x", encoding="utf-8", newline="\n") as handle:
-                handle.write(markdown)
+            _publish_markdown(markdown, output)
     except EvidenceReportCapabilityError as error:
         print(f"缺少能力：{error}", file=sys.stderr)
         return 3
-    except (EvidenceReportInputError, OSError, TypeError, ValueError) as error:
+    except EvidenceReportInputError as error:
         print(f"错误[REPORT_002]：{error}", file=sys.stderr)
+        return 2
+    except (OSError, TypeError, ValueError):
+        print("错误[REPORT_002]：报告生成或发布失败", file=sys.stderr)
         return 2
     print(markdown, end="")
     return 0

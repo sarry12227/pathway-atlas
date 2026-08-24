@@ -41,6 +41,16 @@ def strict_metadata(province="测试省", mode="3+1+2", score_scale=750):
         "secondary_subjects": secondary,
         "score_scale": score_scale,
         "schema_version": "1.0",
+        "ordinary_batch_policy": {
+            "schema_version": "1.0",
+            "policy_id": "synthetic-ordinary-batch-v1",
+            "basis_id": "synthetic-policy-basis-v1",
+            "search_delta_min": -8000,
+            "search_delta_max": 6000,
+            "challenge_delta_lt": -2000,
+            "stable_delta_le": 2000,
+            "tier_caps": {"冲": 3, "稳": 4, "保": 5},
+        },
     }
 
 
@@ -177,7 +187,7 @@ class ValidationContractTest(unittest.TestCase):
                 [("score_out_of_range", 2, "score"), ("invalid_subject_group", 3, "subject_group")],
             )
 
-    def test_312_accepts_configured_primary_plus_two_secondary_subjects(self):
+    def test_dataset_subject_group_requires_the_mode_aware_canonical_key(self):
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary) / "dataset"
             directory.mkdir()
@@ -189,7 +199,11 @@ class ValidationContractTest(unittest.TestCase):
                 ("year", "score", "rank", "cumulative_count", "subject_group"),
                 ((2026, 600, 1, 1, "物理+化学+地理"),),
             )
-            self.assertEqual(validate_dataset(directory.resolve()), [])
+            issues = validate_dataset(directory.resolve())
+            self.assertEqual(
+                [(item.code, item.field) for item in issues],
+                [("invalid_subject_group", "subject_group")],
+            )
 
     def test_data_errors_are_returned_in_deterministic_order_without_values(self):
         with tempfile.TemporaryDirectory() as temporary:

@@ -27,6 +27,7 @@ from scripts.province_registry import (
     validate_subject_selection,
 )
 from scripts.school_recommend import parse_secondary_subjects
+from scripts.validate_data import admission_row_hash, validate_dataset_snapshot
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -115,6 +116,10 @@ Path(os.environ["SHENGXUE_SENTINEL_ACTIVE"]).write_text("active", encoding="utf-
             optional_modules=(),
         )
         store = EvidenceStore.create(cls.sandbox.resolve(), capability)
+        snapshot_312 = validate_dataset_snapshot(PROVINCES / "demo-312").snapshot
+        snapshot_33 = validate_dataset_snapshot(PROVINCES / "demo-33").snapshot
+        if snapshot_312 is None or snapshot_33 is None:
+            raise AssertionError("demo datasets must validate before smoke evidence setup")
         for index in range(1, 4):
             store.add_candidate(
                 SourceCandidate(
@@ -144,6 +149,33 @@ Path(os.environ["SHENGXUE_SENTINEL_ACTIVE"]).write_text("active", encoding="utf-
                     "min_rank": 1100,
                     "coverage_min_rank": 1,
                     "coverage_max_rank": 10000,
+                    "coverage_status": "partial",
+                    "row_hash": admission_row_hash(snapshot_312.admission_rows[0]),
+                },
+                unit=None,
+                status=EvidenceStatus.REFERENCE,
+                source_ids=("cli-s1", "cli-s2", "cli-s3"),
+                method="three-source-consensus",
+                notes="",
+            )
+        )
+        store.add_fact(
+            EvidenceFact(
+                fact_id="admission-33",
+                field="admission_record:demo-33",
+                value={
+                    "year": 2026,
+                    "province": "演示乙市",
+                    "subject_group": "物理+化学+地理",
+                    "school_code": "SYN33A",
+                    "program_group": "组合A",
+                    "remarks": "",
+                    "min_score": 615,
+                    "min_rank": 900,
+                    "coverage_min_rank": 1,
+                    "coverage_max_rank": 10000,
+                    "coverage_status": "partial",
+                    "row_hash": admission_row_hash(snapshot_33.admission_rows[0]),
                 },
                 unit=None,
                 status=EvidenceStatus.REFERENCE,
@@ -154,6 +186,27 @@ Path(os.environ["SHENGXUE_SENTINEL_ACTIVE"]).write_text("active", encoding="utf-
         )
         store.finalize()
         cls.replay_evidence = store.session_path
+        cls.profile_33 = cls.sandbox / "profile-33.json"
+        cls.profile_33.write_text(
+            json.dumps(
+                {
+                    "schema_version": "1.0",
+                    "province": "演示乙市",
+                    "subject_mode": "3+3",
+                    "subject_group": "地理",
+                    "secondary_subjects": ["化学", "物理"],
+                    "rank": 900,
+                    "grade": "高三",
+                    "current_year": 2026,
+                    "target_major_categories": [],
+                    "target_cities": [],
+                    "target_schools": [],
+                    "eligibility_facts": [],
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
 
     @classmethod
     def tearDownClass(cls):
@@ -395,8 +448,8 @@ Path(os.environ["SHENGXUE_SENTINEL_ACTIVE"]).write_text("active", encoding="utf-
         for literal in (
             "# 匿名升学规划报告（演示甲省）",
             "查询覆盖：",
-            "数据覆盖：多源参考",
-            "证据状态：缺失",
+            "数据覆盖：部分覆盖",
+            "证据状态：部分覆盖",
             "检索日期：2026-08-23",
             "清单哈希：sha256:",
             "屏蔽值、冲突、部分覆盖与缺失数据",
@@ -412,6 +465,45 @@ Path(os.environ["SHENGXUE_SENTINEL_ACTIVE"]).write_text("active", encoding="utf-
         self.assertGreaterEqual(first.stdout.count("AI 生成，仅供参考"), 3)
         for forbidden in ("张三", "13800138000", "http://", "https://", str(ROOT)):
             self.assertNotIn(forbidden, first.stdout)
+
+    def test_demo_33_real_markdown_and_docx_paths_use_canonical_combination(self):
+        markdown = self._script(
+            "generate_report.py",
+            "--dataset",
+            PROVINCES / "demo-33",
+            "--profile",
+            self.profile_33,
+            "--evidence",
+            self.replay_evidence,
+        )
+        self.assertEqual(markdown.returncode, 0, markdown.stdout + markdown.stderr)
+        for literal in (
+            "物理+化学+地理", "虚构乙大学", "615", "900",
+            "cli-s1、cli-s2、cli-s3", "AI 生成，仅供参考",
+        ):
+            self.assertIn(literal, markdown.stdout)
+
+        self._assert_document_runtime()
+        output = self.sandbox / "anonymous-admission-report.docx"
+        docx = self._script(
+            "docx_export.py",
+            "--dataset",
+            PROVINCES / "demo-33",
+            "--profile",
+            self.profile_33,
+            "--evidence",
+            self.replay_evidence,
+            "--output",
+            output,
+            python=self.documents_python,
+        )
+        self.assertEqual(docx.returncode, 0, docx.stdout + docx.stderr)
+        text = _docx_text(output)
+        for literal in (
+            "物理+化学+地理", "虚构乙大学", "615", "900", "cli-s1",
+            "cli-s2", "cli-s3", "AI 生成，仅供参考",
+        ):
+            self.assertIn(literal, text)
 
     def test_report_invalid_data_evidence_and_profile_fail_closed(self):
         """Catches invalid inputs that leak paths/PII or fall through with a traceback."""
@@ -472,9 +564,10 @@ Path(os.environ["SHENGXUE_SENTINEL_ACTIVE"]).write_text("active", encoding="utf-
     def test_docx_uses_the_same_snapshot_and_is_byte_deterministic(self):
         """Catches a second DOCX model, non-anonymous output, or unstable package bytes."""
         self._assert_document_runtime()
-        outputs = (self.sandbox / "first", self.sandbox / "second")
-        for output in outputs:
-            output.mkdir(exist_ok=True)
+        directories = (self.sandbox / "first", self.sandbox / "second")
+        for directory in directories:
+            directory.mkdir(exist_ok=True)
+            output = directory / "anonymous-admission-report.docx"
             result = self._script(
                 "docx_export.py",
                 "--dataset",
@@ -494,11 +587,12 @@ Path(os.environ["SHENGXUE_SENTINEL_ACTIVE"]).write_text("active", encoding="utf-
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             payload = json.loads(result.stdout)
             self.assertTrue(payload["anonymous"])
-            self.assertEqual(payload["filename"], "匿名升学规划报告-演示甲省-2026.docx")
+            self.assertEqual(payload["filename"], "anonymous-admission-report.docx")
+            self.assertNotIn("docx_path", payload)
             self.assertEqual(payload["secondary_subjects"], ["化学", "地理"])
 
-        first = outputs[0] / "匿名升学规划报告-演示甲省-2026.docx"
-        second = outputs[1] / "匿名升学规划报告-演示甲省-2026.docx"
+        first = directories[0] / "anonymous-admission-report.docx"
+        second = directories[1] / "anonymous-admission-report.docx"
         first_bytes = first.read_bytes()
         second_bytes = second.read_bytes()
         self.assertEqual(first_bytes, second_bytes)

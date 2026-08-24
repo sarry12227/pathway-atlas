@@ -19,6 +19,7 @@ if __package__:
         CapabilityTier,
         EvidenceManifest,
         EvidenceStatus,
+        OrdinaryBatchPolicy,
         RecommendationItem,
         RecommendationResult,
     )
@@ -35,6 +36,7 @@ else:  # pragma: no cover - direct scripts-path compatibility
         CapabilityTier,
         EvidenceManifest,
         EvidenceStatus,
+        OrdinaryBatchPolicy,
         RecommendationItem,
         RecommendationResult,
     )
@@ -44,6 +46,7 @@ else:  # pragma: no cover - direct scripts-path compatibility
 
 
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+_SESSION_ID = re.compile(r"^[0-9a-f]{32}$")
 _HASH = re.compile(r"^sha256:[0-9a-f]{64}$")
 _REASON = re.compile(r"^[a-z][a-z0-9_-]{0,127}$")
 _SUBJECT_MODES = frozenset({"3+1+2", "3+3"})
@@ -305,6 +308,7 @@ class StudentProfile(_Serializable):
     rank: int
     grade: str
     current_year: int
+    subject_selection_key: str = ""
 
     def __post_init__(self) -> None:
         for name in ("province", "subject_mode", "subject_group", "grade"):
@@ -317,6 +321,12 @@ class StudentProfile(_Serializable):
             raise ValueError("subject_mode must be 3+1+2 or 3+3")
         if self.grade not in _GRADES:
             raise ValueError("grade must be 高一, 高二, or 高三")
+        key = self.subject_selection_key or self.subject_group
+        object.__setattr__(
+            self,
+            "subject_selection_key",
+            _text(key, "subject_selection_key", profile_text=True),
+        )
         object.__setattr__(
             self,
             "secondary_subjects",
@@ -495,6 +505,7 @@ class ReportModel(_Serializable):
     python_version: str
     optional_modules: tuple[str, ...]
     recommendations: tuple[ReportRecommendation, ...]
+    ordinary_batch_policy: OrdinaryBatchPolicy
     recommendation_coverage_status: EvidenceStatus
     verified_rank_coverage: tuple[int, int] | None
     recommendation_empty_reason: str | None
@@ -571,6 +582,13 @@ class ReportModel(_Serializable):
             self.optional_modules,
         )
 
+        if not isinstance(self.ordinary_batch_policy, OrdinaryBatchPolicy):
+            raise TypeError("ordinary_batch_policy must be an OrdinaryBatchPolicy")
+        ordinary_batch_policy = OrdinaryBatchPolicy(
+            **self.ordinary_batch_policy.to_dict()
+        )
+        object.__setattr__(self, "ordinary_batch_policy", ordinary_batch_policy)
+
         if isinstance(self.recommendations, (str, bytes, bytearray)):
             raise TypeError("recommendations must be a collection")
         try:
@@ -631,6 +649,17 @@ class ReportModel(_Serializable):
                 expected_delta = item.min_rank - self.profile.rank
                 if item.delta != expected_delta:
                     raise ValueError("recommendation delta must derive from profile rank")
+                expected_strategy = (
+                    "冲"
+                    if item.delta < ordinary_batch_policy.challenge_delta_lt
+                    else (
+                        "稳"
+                        if item.delta <= ordinary_batch_policy.stable_delta_le
+                        else "保"
+                    )
+                )
+                if item.strategy != expected_strategy:
+                    raise ValueError("recommendation strategy contradicts ordinary batch policy")
                 expected_basis = _recommendation_basis(
                     item.data_year,
                     item.min_rank,
@@ -640,6 +669,9 @@ class ReportModel(_Serializable):
                     raise ValueError("recommendation calculation basis is not canonical")
                 if item.data_year not in self.usable_years:
                     raise ValueError("recommendation year must be usable")
+            for strategy, cap in ordinary_batch_policy.tier_caps.items():
+                if sum(item.strategy == strategy for item in recommendations) > cap:
+                    raise ValueError("recommendation tier exceeds ordinary batch policy cap")
         elif self.recommendation_empty_reason is None:
             raise ValueError("empty recommendations require an explicit stable reason")
         if coverage_status not in _ACCEPTED_EXACT and not self.recommendation_warnings:
@@ -754,14 +786,12 @@ class ReportModel(_Serializable):
         ):
             raise ValueError("unavailable pathways cannot carry pathway output")
 
-        session = _text(self.manifest_session_id, "manifest_session_id")
-        assert session is not None
-        if _SAFE_ID.fullmatch(session) is None:
-            raise ValueError("manifest session id is unsafe")
+        session = self.manifest_session_id
+        if not isinstance(session, str) or _SESSION_ID.fullmatch(session) is None:
+            raise ValueError("manifest session id is invalid")
         object.__setattr__(self, "manifest_session_id", session)
-        manifest_hash = _text(self.manifest_hash, "manifest_hash")
-        assert manifest_hash is not None
-        if _HASH.fullmatch(manifest_hash) is None:
+        manifest_hash = self.manifest_hash
+        if not isinstance(manifest_hash, str) or _HASH.fullmatch(manifest_hash) is None:
             raise ValueError("manifest hash is invalid")
         object.__setattr__(self, "manifest_hash", manifest_hash)
         retrieval_dates = _date_tuple(self.retrieval_dates, "retrieval_dates")
@@ -920,10 +950,14 @@ def _snapshot_manifest(manifest: EvidenceManifest, tier: CapabilityTier) -> tupl
     if manifest.candidates_filename != "candidates.jsonl" or manifest.facts_filename != "normalized/facts.jsonl":
         raise ValueError("manifest artifact names are not canonical")
     _nonnegative_int(manifest.rejected_count, "manifest rejected_count")
-    session = _text(manifest.session_id, "manifest session_id")
-    digest = _text(manifest.manifest_hash, "manifest hash")
-    assert session is not None and digest is not None
-    if _SAFE_ID.fullmatch(session) is None or _HASH.fullmatch(digest) is None:
+    session = manifest.session_id
+    digest = manifest.manifest_hash
+    if (
+        not isinstance(session, str)
+        or _SESSION_ID.fullmatch(session) is None
+        or not isinstance(digest, str)
+        or _HASH.fullmatch(digest) is None
+    ):
         raise ValueError("manifest public identity is invalid")
     return session, digest
 
@@ -1010,6 +1044,9 @@ def build_report_model(
     projected_recommendations = tuple(
         _project_recommendation(item, profile_snapshot.rank)
         for item in tuple(recommendations.items)
+    )
+    ordinary_batch_policy = OrdinaryBatchPolicy(
+        **recommendations.ordinary_batch_policy.to_dict()
     )
     recommendation_status = _status(recommendations.coverage_status, "recommendation coverage status")
     recommendation_warnings = _text_tuple(recommendations.warnings, "recommendation warnings")
@@ -1103,6 +1140,7 @@ def build_report_model(
         python_version=python_version,
         optional_modules=optional,
         recommendations=projected_recommendations,
+        ordinary_batch_policy=ordinary_batch_policy,
         recommendation_coverage_status=recommendation_status,
         verified_rank_coverage=recommendations.verified_rank_coverage,
         recommendation_empty_reason=recommendations.empty_reason,
@@ -1194,7 +1232,7 @@ def render_markdown(model: ReportModel) -> str:
         "## 一、输入与证据边界",
         "",
         f"- 年级：{_md(profile.grade)}",
-        f"- 选科模式：{_md(profile.subject_mode)}；科目组：{_md(profile.subject_group)}；再选科目：{_ids(profile.secondary_subjects)}",
+        f"- 选科模式：{_md(profile.subject_mode)}；科目组：{_md(profile.subject_selection_key)}；再选科目：{_ids(profile.secondary_subjects)}",
         f"- 用户提供省位次：{profile.rank}",
         f"- 能力档位：{_TIER_LABEL[model.capability_tier]}",
         f"- 查询覆盖：{_md(model.query_coverage)}",
@@ -1204,6 +1242,19 @@ def render_markdown(model: ReportModel) -> str:
         f"- 检索日期：{'、'.join(model.retrieval_dates)}",
         f"- 普通批输入年份：{'、'.join(str(year) for year in model.input_years) or '无'}",
         f"- 普通批可用年份：{'、'.join(str(year) for year in model.usable_years) or '无'}",
+        f"- 普通批策略：{_md(model.ordinary_batch_policy.policy_id)}",
+        f"- 普通批策略依据：{_md(model.ordinary_batch_policy.basis_id)}",
+        (
+            "- 普通批检索/分档参数："
+            f"检索Δ[{model.ordinary_batch_policy.search_delta_min},"
+            f"{model.ordinary_batch_policy.search_delta_max}]；"
+            f"冲< {model.ordinary_batch_policy.challenge_delta_lt}；"
+            f"稳≤ {model.ordinary_batch_policy.stable_delta_le}；"
+            "上限"
+            f"冲={model.ordinary_batch_policy.tier_caps['冲']}、"
+            f"稳={model.ordinary_batch_policy.tier_caps['稳']}、"
+            f"保={model.ordinary_batch_policy.tier_caps['保']}"
+        ),
         f"- 证据包标识：{_md(model.manifest_session_id)}",
         f"- 清单哈希：{_md(model.manifest_hash)}",
         f"- 来源编号：{_ids(model.source_ids)}",

@@ -25,6 +25,7 @@ from tests.test_generate_report_evidence import (
     evidence_snapshot,
     formal_pathway_result,
     pathway_result,
+    partial_task3_recommendations,
     rank_estimate,
     recommendations,
     student,
@@ -62,6 +63,52 @@ def xml_part(path: Path, name: str):
 
 
 class DocxSemanticParityTest(unittest.TestCase):
+    def test_task3_inside_coverage_partial_result_has_markdown_docx_parity(self):
+        report = model(recommendations=partial_task3_recommendations())
+        markdown = render_markdown(report)
+        with tempfile.TemporaryDirectory() as temporary:
+            output = docx_export.export_docx(report, Path(temporary) / "partial.docx")
+            text = document_text(output)
+        for literal in ("部分覆盖大学", "部分覆盖", "当前已验证覆盖范围内", "s2"):
+            self.assertIn(literal, markdown)
+            self.assertIn(literal, text)
+
+    def test_docx_accepts_strict_machine_ids_with_phone_shaped_digits(self):
+        from scripts.contracts import EvidenceManifest
+        from scripts.validate_evidence import ValidatedEvidenceSnapshot
+
+        snapshot = evidence_snapshot()
+        session_id = "a13800138000bcdef123456789abcdef"
+        manifest_hash = "sha256:" + session_id * 2
+        machine_snapshot = ValidatedEvidenceSnapshot._create(
+            EvidenceManifest(
+                schema_version=snapshot.manifest.schema_version,
+                session_id=session_id,
+                capability_tier=snapshot.manifest.capability_tier,
+                candidates_filename=snapshot.manifest.candidates_filename,
+                facts_filename=snapshot.manifest.facts_filename,
+                rejected_count=snapshot.manifest.rejected_count,
+                manifest_hash=manifest_hash,
+            ),
+            snapshot.capability,
+            snapshot.retrieval_dates,
+            snapshot.facts,
+            snapshot.rejections,
+        )
+        try:
+            report = model(evidence=machine_snapshot)
+        except ValueError as error:
+            self.fail(f"strict machine identifiers were treated as human text: {error}")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            output = docx_export.export_docx(
+                report, Path(temporary) / "machine-identifiers.docx"
+            )
+            text = document_text(output)
+
+        self.assertIn(session_id, text)
+        self.assertIn(manifest_hash, text)
+
     def test_export_projects_the_complete_report_model_semantics(self):
         """Catches a renderer that drops evidence, rank, pathway, or action fields."""
         report = model()
@@ -78,6 +125,9 @@ class DocxSemanticParityTest(unittest.TestCase):
             "检索日期",
             "2026-08-23",
             "仅覆盖 2026",
+            "synthetic-ordinary-batch-v1",
+            "synthetic-policy-basis-v1",
+            "冲=3、稳=4、保=5",
             "虚构甲大学",
             "4300",
             "school_rank_offset_median_observed_spread",
@@ -103,6 +153,7 @@ class DocxSemanticParityTest(unittest.TestCase):
     def test_optional_and_unusable_sections_degrade_without_proxy_values(self):
         """Catches DOCX-only fallbacks that invent rank or pathway values."""
         empty = RecommendationResult(
+            ordinary_batch_policy=recommendations().ordinary_batch_policy,
             items=(),
             excluded_by_subject_count=2,
             zero_score_excluded_count=1,
@@ -148,7 +199,7 @@ class DocxSemanticParityTest(unittest.TestCase):
     def test_cli_repeated_secondary_subject_reaches_docx(self):
         """Catches a parser that accepts repeated subjects but drops them downstream."""
         with tempfile.TemporaryDirectory() as temporary:
-            output = Path(temporary) / "cli.docx"
+            output = Path(temporary) / "anonymous-admission-report.docx"
             command = [
                 sys.executable,
                 str(ROOT / "scripts" / "docx_export.py"),
@@ -174,6 +225,28 @@ class DocxSemanticParityTest(unittest.TestCase):
 
         self.assertIn("化学、生物", text)
         self.assertNotIn("张三", text)
+
+    def test_public_cli_rejects_pii_output_name_with_path_neutral_error(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "张三-13800138000-secret.docx"
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "scripts" / "docx_export.py"),
+                    "--dataset", str(ROOT / "tests" / "fixtures" / "provinces" / "demo-312"),
+                    "--profile", str(ROOT / "tests" / "fixtures" / "profiles" / "demo.json"),
+                    "--evidence", str(ROOT / "tests" / "fixtures" / "evidence" / "three-source-consensus"),
+                    "--output", str(output),
+                ],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+        self.assertEqual(completed.returncode, 2)
+        self.assertEqual(completed.stdout, "")
+        self.assertEqual(completed.stderr, "错误[DOCX_002]：DOCX 生成或发布失败\n")
+        for forbidden in (str(output), output.name, "张三", "13800138000", "secret"):
+            self.assertNotIn(forbidden, completed.stderr)
 
     def test_pending_pathway_preserves_missing_constraints_and_real_details(self):
         """Catches a DOCX renderer that hides why a pathway is not formal."""

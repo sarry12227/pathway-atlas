@@ -32,10 +32,12 @@ from scripts.contracts import (  # noqa: E402
     SourceTier,
 )
 from scripts.evidence import (  # noqa: E402
+    EvidencePathError,
     EvidencePrivacyError,
     EvidenceStore,
     _PII_KEYS,
     _normalize_key,
+    _reject_pii_identifier,
     _reject_pii_keys,
 )
 from scripts.source_policy import (  # noqa: E402
@@ -138,9 +140,15 @@ def _is_reparse(info: os.stat_result) -> bool:
 
 
 class _BundleReader:
-    def __init__(self, bundle: Path):
+    def __init__(
+        self,
+        bundle: Path,
+        operation_hook: Callable[[str], None] | None = None,
+    ):
         self._requested = bundle
         self._total = 0
+        self._operation_hook = operation_hook
+        self._root_fd: int | None = None
         try:
             info = os.lstat(bundle)
             resolved = bundle.resolve(strict=True)
@@ -153,10 +161,100 @@ class _BundleReader:
         ):
             raise BundleArtifactError("bundle path must be a real directory")
         self.root = resolved
+        self._identity = (
+            info.st_dev,
+            info.st_ino,
+            getattr(info, "st_file_attributes", 0),
+        )
+        if os.name != "nt" and os.open in os.supports_dir_fd:
+            flags = (
+                os.O_RDONLY
+                | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_NOFOLLOW", 0)
+            )
+            descriptor = None
+            try:
+                descriptor = os.open(self.root, flags)
+                opened = os.fstat(descriptor)
+            except OSError as error:
+                if descriptor is not None:
+                    os.close(descriptor)
+                raise BundleArtifactError("bundle directory is unavailable") from error
+            if (
+                not stat.S_ISDIR(opened.st_mode)
+                or _is_reparse(opened)
+                or (opened.st_dev, opened.st_ino) != self._identity[:2]
+            ):
+                os.close(descriptor)
+                raise BundleArtifactError("bundle directory changed during validation")
+            self._root_fd = descriptor
+        self.verify_root()
+
+    def close(self) -> None:
+        if self._root_fd is not None:
+            os.close(self._root_fd)
+            self._root_fd = None
+
+    def run_hook(self, stage: str) -> None:
+        if self._operation_hook is not None:
+            self._operation_hook(stage)
+
+    def verify_root(self) -> None:
+        try:
+            info = os.lstat(self.root)
+            resolved = self.root.resolve(strict=True)
+        except OSError as error:
+            raise BundleArtifactError("bundle directory changed during validation") from error
+        identity = (
+            info.st_dev,
+            info.st_ino,
+            getattr(info, "st_file_attributes", 0),
+        )
+        if (
+            resolved != self.root
+            or not stat.S_ISDIR(info.st_mode)
+            or stat.S_ISLNK(info.st_mode)
+            or _is_reparse(info)
+            or identity != self._identity
+        ):
+            raise BundleArtifactError("bundle directory changed during validation")
+        if self._root_fd is not None:
+            try:
+                opened = os.fstat(self._root_fd)
+            except OSError as error:
+                raise BundleArtifactError("bundle directory changed during validation") from error
+            if (
+                not stat.S_ISDIR(opened.st_mode)
+                or _is_reparse(opened)
+                or (opened.st_dev, opened.st_ino) != self._identity[:2]
+            ):
+                raise BundleArtifactError("bundle directory changed during validation")
+
+    def _open_artifact(self, parts: list[str], flags: int) -> int:
+        if self._root_fd is None:
+            return os.open(self.root.joinpath(*parts), flags)
+        parent_fd = os.dup(self._root_fd)
+        try:
+            directory_flags = (
+                os.O_RDONLY
+                | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_NOFOLLOW", 0)
+            )
+            for component in parts[:-1]:
+                next_fd = os.open(component, directory_flags, dir_fd=parent_fd)
+                os.close(parent_fd)
+                parent_fd = next_fd
+                info = os.fstat(parent_fd)
+                if not stat.S_ISDIR(info.st_mode) or _is_reparse(info):
+                    raise BundleArtifactError("artifact directory is unsafe")
+            return os.open(parts[-1], flags, dir_fd=parent_fd)
+        finally:
+            os.close(parent_fd)
 
     def read(self, relative_name: str) -> str:
         if relative_name not in _EXPECTED_ARTIFACTS:
             raise BundleArtifactError("artifact name is not part of the finalized bundle")
+        self.verify_root()
         parts = relative_name.split("/")
         current = self.root
         for component in parts[:-1]:
@@ -194,7 +292,7 @@ class _BundleReader:
 
         flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
         try:
-            descriptor = os.open(path, flags)
+            descriptor = self._open_artifact(parts, flags)
             try:
                 opened = os.fstat(descriptor)
                 if (
@@ -227,6 +325,8 @@ class _BundleReader:
             raise
         except OSError as error:
             raise BundleArtifactError("artifact could not be read safely") from error
+        self.run_hook(f"after_read:{relative_name}")
+        self.verify_root()
         try:
             text = payload.decode("utf-8")
         except UnicodeDecodeError as error:
@@ -328,7 +428,8 @@ def _one_of(values: set[str]) -> Callable[[Any], bool]:
 
 _MANIFEST_FIELDS = {
     "schema_version": lambda value: value == "1.0",
-    "session_id": lambda value: isinstance(value, str) and bool(value),
+    "session_id": lambda value: isinstance(value, str)
+    and bool(re.fullmatch(r"[0-9a-f]{32}", value)),
     "capability_tier": _one_of({item.value for item in CapabilityTier}),
     "candidates_filename": _is_string,
     "facts_filename": _is_string,
@@ -473,6 +574,8 @@ def _validate_rejection_links(
 def _validate_privacy(values: list[tuple[str, Any]]) -> list[dict[str, str]]:
     errors: list[dict[str, str]] = []
     facts: list[Any] = []
+    candidates: list[Any] = []
+    rejections: list[Any] = []
     for location, value in values:
         try:
             _reject_pii_keys(value)
@@ -480,13 +583,51 @@ def _validate_privacy(values: list[tuple[str, Any]]) -> list[dict[str, str]]:
             errors.append(_error("privacy", "personal-data key is not allowed", location))
         if location == "normalized/facts.jsonl" and isinstance(value, list):
             facts = value
+        elif location == "candidates.jsonl" and isinstance(value, list):
+            candidates = value
+        elif location == "rejections.jsonl" and isinstance(value, list):
+            rejections = value
+    for index, candidate in enumerate(candidates, 1):
+        if isinstance(candidate, dict):
+            _append_identifier_privacy_issue(
+                candidate.get("source_id"), f"candidates.jsonl:{index}", errors
+            )
     for index, fact in enumerate(facts, 1):
-        if isinstance(fact, dict) and isinstance(fact.get("field"), str):
-            if _normalize_key(fact["field"]) in _PII_KEYS:
+        if isinstance(fact, dict):
+            if isinstance(fact.get("field"), str) and _normalize_key(fact["field"]) in _PII_KEYS:
                 errors.append(
                     _error("privacy", "personal-data fact field is not allowed", f"normalized/facts.jsonl:{index}")
                 )
+            _append_identifier_privacy_issue(
+                fact.get("fact_id"), f"normalized/facts.jsonl:{index}", errors
+            )
+            source_ids = fact.get("source_ids")
+            if isinstance(source_ids, list):
+                for source_id in source_ids:
+                    _append_identifier_privacy_issue(
+                        source_id, f"normalized/facts.jsonl:{index}", errors
+                    )
+    for index, rejection in enumerate(rejections, 1):
+        if isinstance(rejection, dict):
+            _append_identifier_privacy_issue(
+                rejection.get("source_id"), f"rejections.jsonl:{index}", errors
+            )
     return errors
+
+
+def _append_identifier_privacy_issue(
+    value: Any,
+    location: str,
+    errors: list[dict[str, str]],
+) -> None:
+    try:
+        _reject_pii_identifier(value)
+    except EvidencePrivacyError:
+        errors.append(
+            _error("privacy", "personal-data-shaped evidence identifier is not allowed", location)
+        )
+    except EvidencePathError:
+        return
 
 
 def _expected_manifest_hash(
@@ -639,7 +780,9 @@ def _validate_policy(
 
 def _validate_bundle_with_payload(
     bundle: Path,
-) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    *,
+    _operation_hook: Callable[[str], None] | None = None,
+) -> tuple[dict[str, Any], dict[str, Any] | None, _BundleReader | None]:
     summary: dict[str, Any] = {
         "valid": False,
         "candidate_count": 0,
@@ -647,12 +790,15 @@ def _validate_bundle_with_payload(
         "independent_source_count": 0,
         "errors": [],
     }
+    reader: _BundleReader | None = None
     try:
-        reader = _BundleReader(bundle)
+        reader = _BundleReader(bundle, _operation_hook)
         texts = {name: reader.read(name) for name in _EXPECTED_ARTIFACTS}
     except BundleArtifactError as error:
+        if reader is not None:
+            reader.close()
         summary["errors"].append(_error("artifact", str(error)))
-        return summary, None
+        return summary, None, None
 
     try:
         manifest = _parse_json(texts["manifest.json"], "manifest.json")
@@ -663,7 +809,7 @@ def _validate_bundle_with_payload(
         rejections = _parse_jsonl(texts["rejections.jsonl"], "rejections.jsonl")
     except JsonDataError as error:
         summary["errors"].append(_error("schema", str(error)))
-        return summary, None
+        return summary, None, reader
 
     summary["candidate_count"] = len(candidates)
     summary["fact_count"] = len(facts)
@@ -708,20 +854,30 @@ def _validate_bundle_with_payload(
         "facts": facts,
         "rejections": rejections,
     }
-    return summary, payload
+    return summary, payload, reader
 
 
 def validate_bundle(bundle: Path) -> dict[str, Any]:
     """Return the historical machine-readable validation summary."""
 
-    summary, _payload = _validate_bundle_with_payload(bundle)
-    return summary
+    summary, _payload, reader = _validate_bundle_with_payload(bundle)
+    try:
+        return summary
+    finally:
+        if reader is not None:
+            reader.close()
 
 
-def validate_bundle_snapshot(bundle: Path) -> EvidenceValidationResult:
+def validate_bundle_snapshot(
+    bundle: Path,
+    *,
+    _operation_hook: Callable[[str], None] | None = None,
+) -> EvidenceValidationResult:
     """Return a factory-only snapshot only when the exact read bundle is valid."""
 
-    summary, payload = _validate_bundle_with_payload(bundle)
+    summary, payload, reader = _validate_bundle_with_payload(
+        bundle, _operation_hook=_operation_hook
+    )
     if not summary["valid"] or payload is None:
         issues = tuple(
             (
@@ -733,6 +889,8 @@ def validate_bundle_snapshot(bundle: Path) -> EvidenceValidationResult:
         )
         if not issues:
             issues = (("invalid", "bundle validation failed", "bundle"),)
+        if reader is not None:
+            reader.close()
         return EvidenceValidationResult(None, issues)
     try:
         manifest_value = payload["manifest"]
@@ -763,6 +921,10 @@ def validate_bundle_snapshot(bundle: Path) -> EvidenceValidationResult:
         )
         if not retrieval_dates or any(item is None for item in retrieval_dates):
             raise ValueError("validated candidates lack retrieval dates")
+        if reader is None:
+            raise BundleArtifactError("bundle directory identity is unavailable")
+        reader.run_hook("before_snapshot")
+        reader.verify_root()
         snapshot = ValidatedEvidenceSnapshot._create(
             manifest,
             capability,
@@ -770,11 +932,19 @@ def validate_bundle_snapshot(bundle: Path) -> EvidenceValidationResult:
             tuple(FrozenJsonRecord._from_mapping(item) for item in facts),
             tuple(FrozenJsonRecord._from_mapping(item) for item in rejections),
         )
-    except (KeyError, TypeError, ValueError) as error:
+    except BundleArtifactError as error:
+        return EvidenceValidationResult(
+            None,
+            (("artifact", str(error), "bundle"),),
+        )
+    except (KeyError, TypeError, ValueError):
         return EvidenceValidationResult(
             None,
             (("snapshot", "validated bundle could not form a snapshot", "bundle"),),
         )
+    finally:
+        if reader is not None:
+            reader.close()
     return EvidenceValidationResult(snapshot, ())
 
 

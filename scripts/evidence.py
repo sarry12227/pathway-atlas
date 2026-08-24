@@ -40,6 +40,8 @@ class EvidenceStateError(EvidenceError):
 
 _SCHEMA_VERSION = "1.0"
 _SOURCE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
+_PHONE_IDENTIFIER = re.compile(r"1[3-9][0-9]{9}")
+_IDENTITY_IDENTIFIER = re.compile(r"[0-9]{17}[0-9Xx]")
 _REPARSE_POINT = 0x0400
 _PII_KEYS = frozenset(
     {
@@ -74,6 +76,20 @@ def _snapshot(value: Any) -> Any:
 
     _reject_pii_keys(value)
     return json.loads(_canonical_json(value))
+
+
+def _reject_pii_identifier(value: Any) -> None:
+    """Reject personal-number shapes in semantic evidence identifiers.
+
+    Session UUIDs and manifest hashes do not use this scanner; their exact
+    machine grammars are validated by their own contracts.
+    """
+
+    if not isinstance(value, str):
+        raise EvidencePathError("Evidence identifier is unsafe")
+    compact = re.sub(r"[._:-]+", "", value)
+    if _PHONE_IDENTIFIER.search(compact) or _IDENTITY_IDENTIFIER.search(compact):
+        raise EvidencePrivacyError("Personal-data-shaped evidence identifiers are not allowed")
 
 
 def _is_below(path: Path, parent: Path) -> bool:
@@ -273,6 +289,9 @@ class EvidenceStore:
         if _normalize_key(snapshot["field"]) in _PII_KEYS:
             raise EvidencePrivacyError("Personal-data keys are not allowed in evidence data")
         fact_id = snapshot["fact_id"]
+        _reject_pii_identifier(fact_id)
+        for source_id in snapshot["source_ids"]:
+            _reject_pii_identifier(source_id)
         if fact_id in self._facts:
             raise EvidenceStateError("Duplicate evidence fact id")
         if set(snapshot["source_ids"]).difference(self._candidates):
@@ -352,6 +371,7 @@ class EvidenceStore:
     def finalize(self) -> EvidenceManifest:
         if self._manifest is not None:
             return self._manifest
+        self._validate_persisted_identifiers()
         self._verify_layout()
         records = self._artifact_records()
         manifest = EvidenceManifest(
@@ -387,6 +407,17 @@ class EvidenceStore:
             "normalized/facts.jsonl": self._jsonl(facts),
             "rejections.jsonl": self._jsonl(rejections),
         }
+
+    def _validate_persisted_identifiers(self) -> None:
+        for candidate in self._candidates.values():
+            _reject_pii_identifier(candidate.get("source_id"))
+        for fact in self._facts.values():
+            _reject_pii_identifier(fact.get("fact_id"))
+            source_ids = fact.get("source_ids", ())
+            for source_id in source_ids:
+                _reject_pii_identifier(source_id)
+        for source_id in self._rejections:
+            _reject_pii_identifier(source_id)
 
     @staticmethod
     def _jsonl(records: list[dict[str, Any]]) -> str:
@@ -656,6 +687,7 @@ class EvidenceStore:
     def _validate_source_id(source_id: str) -> None:
         if not isinstance(source_id, str) or not _SOURCE_ID.fullmatch(source_id):
             raise EvidencePathError("Evidence source id is unsafe")
+        _reject_pii_identifier(source_id)
 
 
 __all__ = ["EvidenceError", "EvidencePathError", "EvidencePrivacyError", "EvidenceStateError", "EvidenceStore"]

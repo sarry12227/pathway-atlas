@@ -48,6 +48,7 @@ HEADING_DARK_BLUE = "1F4D78"
 INK_BLUE = "0B2545"
 MUTED = "666666"
 DISCLAIMER = "AI 生成，仅供参考；不构成录取承诺，最终以当年官方发布为准。"
+PUBLIC_DOCX_BASENAME = "anonymous-admission-report.docx"
 
 _STATUS_LABEL = {
     EvidenceStatus.OFFICIAL: "官方",
@@ -369,7 +370,7 @@ def _cover(document, model):
     subtitle.paragraph_format.space_after = Pt(28)
     _set_font(
         subtitle.add_run(
-            f"{model.profile.current_year} · {model.profile.subject_mode} · {model.profile.subject_group}"
+            f"{model.profile.current_year} · {model.profile.subject_mode} · {model.profile.subject_selection_key}"
         ),
         size=13,
         color=MUTED,
@@ -387,7 +388,7 @@ def _evidence_section(document, model, bullet_id):
     document.add_heading("一、输入与证据边界", level=1)
     rows = [
         ("年级", profile.grade),
-        ("选科", f"{profile.subject_mode}；{profile.subject_group}；再选科目：{_ids(profile.secondary_subjects)}"),
+        ("选科", f"{profile.subject_mode}；{profile.subject_selection_key}；再选科目：{_ids(profile.secondary_subjects)}"),
         ("用户提供省位次", profile.rank),
         ("能力档位", _TIER_LABEL[model.capability_tier]),
         ("查询覆盖", model.query_coverage),
@@ -396,6 +397,18 @@ def _evidence_section(document, model, bullet_id):
         ("检索日期", "、".join(model.retrieval_dates)),
         ("普通批输入年份", "、".join(map(str, model.input_years)) or "无"),
         ("普通批可用年份", "、".join(map(str, model.usable_years)) or "无"),
+        ("普通批策略", model.ordinary_batch_policy.policy_id),
+        ("普通批策略依据", model.ordinary_batch_policy.basis_id),
+        (
+            "普通批检索/分档参数",
+            f"检索Δ[{model.ordinary_batch_policy.search_delta_min},"
+            f"{model.ordinary_batch_policy.search_delta_max}]；"
+            f"冲< {model.ordinary_batch_policy.challenge_delta_lt}；"
+            f"稳≤ {model.ordinary_batch_policy.stable_delta_le}；"
+            f"上限冲={model.ordinary_batch_policy.tier_caps['冲']}、"
+            f"稳={model.ordinary_batch_policy.tier_caps['稳']}、"
+            f"保={model.ordinary_batch_policy.tier_caps['保']}",
+        ),
         ("证据包标识", model.manifest_session_id),
         ("清单哈希", model.manifest_hash),
         ("来源编号", _ids(model.source_ids)),
@@ -673,10 +686,16 @@ def _model_from_cli(args):
             target_schools=recommendation_profile.target_schools,
         )
     dataset = report_cli._resolve_public_dataset(args.dataset, report_profile)
+    report_profile, recommendation_profile = report_cli._profiles_with_canonical_subject_key(
+        dataset, report_profile, recommendation_profile
+    )
     evidence = report_cli._validated_evidence_snapshot(args.evidence)
     facts = tuple(record.to_dict() for record in evidence.facts)
     recommendations = report_cli._public_recommendations(
-        dataset.admission_rows, recommendation_profile, facts
+        dataset.admission_rows,
+        recommendation_profile,
+        dataset.config.ordinary_batch_policy,
+        facts,
     )
     pathways = evaluate_pathways(pathway_profile, (), model=None)
     return build_report_model(
@@ -705,15 +724,20 @@ def main(argv=None):
         return 3
     args = build_parser().parse_args(argv)
     try:
+        if (
+            args.output is None
+            or args.output.name != PUBLIC_DOCX_BASENAME
+            or not args.output.parent.is_dir()
+        ):
+            raise ValueError("invalid public DOCX output")
         model = _model_from_cli(args)
         destination = export_docx(model, args.output)
-    except (OSError, TypeError, ValueError) as error:
-        print(f"错误[DOCX_002]：{error}", file=sys.stderr)
+    except (OSError, TypeError, ValueError):
+        print("错误[DOCX_002]：DOCX 生成或发布失败", file=sys.stderr)
         return 2
     print(
         json.dumps(
             {
-                "docx_path": str(destination),
                 "filename": destination.name,
                 "anonymous": True,
                 "secondary_subjects": list(model.profile.secondary_subjects),

@@ -1,19 +1,23 @@
 from __future__ import annotations
 
 import json
+import io
 from dataclasses import replace
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 import shutil
 
 from scripts.contracts import (
     CapabilityReport,
     CapabilityTier,
     EvidenceFact,
+    EvidenceManifest,
     EvidenceStatus,
+    OrdinaryBatchPolicy,
     RecommendationItem,
     RecommendationProfile,
     RecommendationResult,
@@ -25,7 +29,14 @@ from scripts.path_recommend import PathwayItem, PathwayResult
 from scripts.rank_calc import RankEstimate
 from scripts.report_model import ReportModel, StudentProfile, build_report_model, render_markdown
 from scripts.validate_evidence import validate_bundle_snapshot
+from scripts.validate_evidence import ValidatedEvidenceSnapshot
 from scripts import generate_report as report_cli
+from scripts.school_recommend import recommend_schools
+from scripts.validate_data import (
+    ValidatedAdmissionRow,
+    admission_row_hash,
+    validate_dataset_snapshot,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -91,8 +102,24 @@ def school_item(**overrides) -> RecommendationItem:
     return RecommendationItem(**values)
 
 
+def ordinary_policy(**overrides) -> OrdinaryBatchPolicy:
+    values = {
+        "schema_version": "1.0",
+        "policy_id": "synthetic-ordinary-batch-v1",
+        "basis_id": "synthetic-policy-basis-v1",
+        "search_delta_min": -8000,
+        "search_delta_max": 6000,
+        "challenge_delta_lt": -2000,
+        "stable_delta_le": 2000,
+        "tier_caps": {"冲": 3, "稳": 4, "保": 5},
+    }
+    values.update(overrides)
+    return OrdinaryBatchPolicy(**values)
+
+
 def recommendations(**overrides) -> RecommendationResult:
     values = {
+        "ordinary_batch_policy": ordinary_policy(),
         "items": (school_item(),),
         "excluded_by_subject_count": 0,
         "zero_score_excluded_count": 0,
@@ -105,6 +132,38 @@ def recommendations(**overrides) -> RecommendationResult:
     }
     values.update(overrides)
     return RecommendationResult(**values)
+
+
+def partial_task3_recommendations() -> RecommendationResult:
+    return recommend_schools(
+        [
+            {
+                "year": 2026,
+                "province": "演示甲省",
+                "school_name": "部分覆盖大学",
+                "school_code": "PARTIAL1",
+                "subject_group": "物理",
+                "major_group_name": "部分覆盖专业组",
+                "major_group_code": "P01",
+                "min_score": 620,
+                "min_rank": 4300,
+                "school_province": "演示甲省",
+                "city_location": "演示市",
+                "evidence_status": "reference",
+                "coverage_status": "partial",
+                "source_ids": ("s2",),
+                "coverage_min_rank": 4000,
+                "coverage_max_rank": 5000,
+            }
+        ],
+        RecommendationProfile(
+            rank=4200,
+            target_province="演示甲省",
+            subject_group="物理",
+            secondary_subjects=frozenset(("化学", "地理")),
+        ),
+        ordinary_policy(),
+    )
 
 
 def rank_estimate() -> RankEstimate:
@@ -217,6 +276,75 @@ class EvidenceReportModelTest(unittest.TestCase):
         self.assertGreaterEqual(text.count("AI 生成，仅供参考"), 3)
         self.assertNotIn("http://", text)
         self.assertNotIn("https://", text)
+
+    def test_report_retains_and_renders_complete_ordinary_batch_policy(self):
+        policy = ordinary_policy(
+            policy_id="synthetic-ordinary-batch-v2",
+            basis_id="synthetic-policy-basis-v2",
+            search_delta_min=-7000,
+            search_delta_max=5000,
+            challenge_delta_lt=-1500,
+            stable_delta_le=2500,
+            tier_caps={"冲": 2, "稳": 3, "保": 4},
+        )
+
+        report = self.build(recommendations=recommendations(ordinary_batch_policy=policy))
+        text = render_markdown(report)
+
+        self.assertEqual(report.ordinary_batch_policy, policy)
+        for literal in (
+            "synthetic-ordinary-batch-v2",
+            "synthetic-policy-basis-v2",
+            "-7000",
+            "5000",
+            "-1500",
+            "2500",
+            "冲=2、稳=3、保=4",
+        ):
+            self.assertIn(literal, text)
+
+    def test_direct_task3_partial_result_is_accepted_with_exact_item_status(self):
+        result = partial_task3_recommendations()
+        self.assertEqual(result.coverage_status, EvidenceStatus.PARTIAL)
+        self.assertEqual(result.items[0].evidence_status, EvidenceStatus.REFERENCE)
+        report = self.build(recommendations=result)
+        text = render_markdown(report)
+        self.assertEqual(report.recommendation_coverage_status, EvidenceStatus.PARTIAL)
+        self.assertEqual(report.recommendations[0].evidence_status, EvidenceStatus.REFERENCE)
+        self.assertIn("部分覆盖大学", text)
+        self.assertIn("当前已验证覆盖范围内", text)
+
+    def test_machine_ids_with_phone_shaped_digits_bypass_human_text_scanning(self):
+        snapshot = evidence_snapshot()
+        session_id = "a13800138000bcdef123456789abcdef"
+        manifest_hash = "sha256:" + session_id * 2
+        manifest = EvidenceManifest(
+            schema_version=snapshot.manifest.schema_version,
+            session_id=session_id,
+            capability_tier=snapshot.manifest.capability_tier,
+            candidates_filename=snapshot.manifest.candidates_filename,
+            facts_filename=snapshot.manifest.facts_filename,
+            rejected_count=snapshot.manifest.rejected_count,
+            manifest_hash=manifest_hash,
+        )
+        machine_snapshot = ValidatedEvidenceSnapshot._create(
+            manifest,
+            snapshot.capability,
+            snapshot.retrieval_dates,
+            snapshot.facts,
+            snapshot.rejections,
+        )
+
+        try:
+            report = self.build(evidence=machine_snapshot)
+        except ValueError as error:
+            self.fail(f"strict machine identifiers were treated as human text: {error}")
+        text = render_markdown(report)
+
+        self.assertEqual(report.manifest_session_id, session_id)
+        self.assertEqual(report.manifest_hash, manifest_hash)
+        self.assertIn(session_id, text)
+        self.assertIn(manifest_hash, text)
 
     def test_rank_is_described_as_inference_with_interval_and_anchors(self):
         text = render_markdown(self.build())
@@ -526,6 +654,23 @@ class EvidenceReportModelTest(unittest.TestCase):
 
 
 class EvidenceReportCliTest(unittest.TestCase):
+    def test_markdown_cli_masks_publication_oserror_without_path_or_pii(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "student-13800138000.md"
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with mock.patch.object(
+                report_cli,
+                "_publish_markdown",
+                side_effect=OSError(f"failed {output} 张三 secret"),
+            ), mock.patch("sys.stdout", stdout), mock.patch("sys.stderr", stderr):
+                code = report_cli.main(self.command("--output", str(output))[2:])
+
+        self.assertEqual(code, 2)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertEqual(stderr.getvalue(), "错误[REPORT_002]：报告生成或发布失败\n")
+        for forbidden in (str(output), output.name, "13800138000", "张三", "secret"):
+            self.assertNotIn(forbidden, stderr.getvalue())
     def test_cli_profile_rejects_private_user_free_text_before_engine_use(self):
         payload = json.loads(
             (ROOT / "tests" / "fixtures" / "profiles" / "demo.json").read_text(
@@ -568,6 +713,7 @@ class EvidenceReportCliTest(unittest.TestCase):
             result = report_cli._public_recommendations(
                 validated.snapshot.admission_rows,
                 profile,
+                validated.snapshot.config.ordinary_batch_policy,
                 (),
             )
 
@@ -681,6 +827,12 @@ class EvidenceReportCliTest(unittest.TestCase):
 
     def test_row_scoped_accepted_fact_can_enter_ordinary_batch(self):
         with tempfile.TemporaryDirectory() as temporary:
+            validation = validate_dataset_snapshot(
+                ROOT / "tests" / "fixtures" / "provinces" / "demo-312"
+            )
+            self.assertEqual(validation.issues, ())
+            assert validation.snapshot is not None
+            row_hash = admission_row_hash(validation.snapshot.admission_rows[0])
             store = EvidenceStore.create(
                 Path(temporary).resolve(), capability()
             )
@@ -713,6 +865,8 @@ class EvidenceReportCliTest(unittest.TestCase):
                         "min_rank": 1100,
                         "coverage_min_rank": 1,
                         "coverage_max_rank": 10000,
+                        "coverage_status": "partial",
+                        "row_hash": row_hash,
                     },
                     unit=None,
                     status=EvidenceStatus.REFERENCE,
@@ -731,6 +885,124 @@ class EvidenceReportCliTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("虚构甲大学", result.stdout)
         self.assertIn("cli-s1、cli-s2、cli-s3", result.stdout)
+        self.assertIn("数据覆盖：部分覆盖", result.stdout)
+
+    def test_whole_row_hash_rejects_every_non_numeric_row_mutation(self):
+        validation = validate_dataset_snapshot(
+            ROOT / "tests" / "fixtures" / "provinces" / "demo-312"
+        )
+        self.assertEqual(validation.issues, ())
+        assert validation.snapshot is not None
+        original = validation.snapshot.admission_rows[0]
+        fact = EvidenceFact(
+            fact_id="admission-row-binding",
+            field="admission_record:binding",
+            value={
+                "year": 2026,
+                "province": "演示甲省",
+                "subject_group": "物理",
+                "school_code": "SYN312A",
+                "program_group": "第01组",
+                "remarks": "",
+                "min_score": 645,
+                "min_rank": 1100,
+                "coverage_min_rank": 1,
+                "coverage_max_rank": 10000,
+                "coverage_status": "partial",
+                "row_hash": admission_row_hash(original),
+            },
+            unit=None,
+            status=EvidenceStatus.REFERENCE,
+            source_ids=("cli-s1", "cli-s2", "cli-s3"),
+            method="three-source-consensus",
+            notes="",
+        ).to_dict()
+        profile = RecommendationProfile(
+            rank=1100,
+            target_province="演示甲省",
+            subject_group="物理",
+            secondary_subjects=frozenset(("化学", "地理")),
+        )
+        mutations = {
+            "school_name": "替换大学",
+            "school_level": "替换层次",
+            "city_location": "替换城市",
+            "province_location": "替换省份",
+            "majors_in_group": '["替换专业"]',
+        }
+        for field, value in mutations.items():
+            with self.subTest(field=field):
+                payload = original.to_dict()
+                payload[field] = value
+                mutated = ValidatedAdmissionRow.from_mapping(payload)
+                result = report_cli._public_recommendations(
+                    (mutated,),
+                    profile,
+                    validation.snapshot.config.ordinary_batch_policy,
+                    (fact,),
+                )
+                self.assertEqual(result.items, ())
+                self.assertEqual(result.coverage_status, EvidenceStatus.CONFLICT)
+        self.assertNotIn("cli-s1", result.to_dict().__repr__())
+
+
+class MarkdownPublicationTest(unittest.TestCase):
+    def test_private_write_is_fsynced_before_exclusive_atomic_publication(self):
+        real_fsync = report_cli.os.fsync
+        visibility = []
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "report.md"
+
+            def observe_fsync(descriptor):
+                visibility.append(output.exists())
+                return real_fsync(descriptor)
+
+            with mock.patch.object(report_cli.os, "fsync", side_effect=observe_fsync):
+                report_cli._publish_markdown("完整报告\n", output)
+
+            self.assertEqual(visibility, [False])
+            self.assertEqual(output.read_text(encoding="utf-8"), "完整报告\n")
+            self.assertEqual(list(Path(temporary).iterdir()), [output])
+
+    def test_partial_private_write_and_publish_failures_leave_no_owned_files(self):
+        for failure_point in ("fsync", "link"):
+            with self.subTest(failure_point=failure_point), tempfile.TemporaryDirectory() as temporary:
+                output = Path(temporary) / "report.md"
+                target = report_cli.os.fsync if failure_point == "fsync" else report_cli.os.link
+                with mock.patch.object(
+                    report_cli.os,
+                    failure_point,
+                    side_effect=OSError(f"synthetic {failure_point} failure"),
+                ):
+                    with self.assertRaisesRegex(OSError, f"synthetic {failure_point} failure"):
+                        report_cli._publish_markdown("partial bytes", output)
+                self.assertFalse(output.exists())
+                self.assertEqual(list(Path(temporary).iterdir()), [])
+
+    def test_competing_destination_is_preserved(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "report.md"
+
+            def competitor(_source, destination):
+                Path(destination).write_text("RIVAL", encoding="utf-8")
+                raise FileExistsError("synthetic competitor")
+
+            with mock.patch.object(report_cli.os, "link", side_effect=competitor):
+                with self.assertRaisesRegex(FileExistsError, "synthetic competitor"):
+                    report_cli._publish_markdown("ours", output)
+            self.assertEqual(output.read_text(encoding="utf-8"), "RIVAL")
+            self.assertEqual(list(Path(temporary).iterdir()), [output])
+
+    def test_cleanup_error_never_masks_primary_publish_error(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "report.md"
+            with mock.patch.object(
+                report_cli.os, "link", side_effect=OSError("primary publish failure")
+            ), mock.patch.object(
+                report_cli.Path, "unlink", autospec=True, side_effect=OSError("cleanup failure")
+            ):
+                with self.assertRaisesRegex(OSError, "primary publish failure"):
+                    report_cli._publish_markdown("ours", output)
 
 
 if __name__ == "__main__":

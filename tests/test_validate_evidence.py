@@ -112,6 +112,126 @@ class ValidateEvidenceCliTest(unittest.TestCase):
         self.assertEqual(summary["candidate_count"], 3)
         self.assertEqual(summary["fact_count"], 1)
 
+    def test_replay_rejects_non_machine_session_and_malformed_manifest_hash(self):
+        cases = (
+            ("session_id", "session-13800138000"),
+            ("manifest_hash", "sha256:" + "A" * 64),
+        )
+        for field, value in cases:
+            with self.subTest(field=field):
+                bundle = self.copy_fixture(
+                    "three-source-consensus", f"bad-machine-{field}"
+                )
+                manifest_path = bundle / "manifest.json"
+                manifest = json.loads(manifest_path.read_text("utf-8"))
+                manifest[field] = value
+                manifest_path.write_text(
+                    json.dumps(
+                        manifest,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                    newline="\n",
+                )
+
+                result, summary = self.run_cli(bundle)
+
+                self.assertEqual(result.returncode, 2)
+                self.assertFalse(summary["valid"])
+                self.assertTrue(
+                    any(item["code"] == "schema" for item in summary["errors"]),
+                    summary,
+                )
+
+    def test_replay_rejects_pii_shaped_identifier_fields_and_references(self):
+        cases = (
+            ("source_id", "13800138000"),
+            ("source_id", "138-0013-8000"),
+            ("fact_id", "11010519491231002X"),
+            ("source_reference", "138.0013.8000"),
+            ("rejection_id", "11010519491231002X"),
+        )
+        for index, (kind, identifier) in enumerate(cases):
+            with self.subTest(kind=kind, identifier=identifier):
+                bundle = self.copy_fixture(
+                    "three-source-consensus", f"pii-id-{index}"
+                )
+                if kind == "source_id":
+                    old_id = json.loads(
+                        (bundle / "candidates.jsonl")
+                        .read_text("utf-8")
+                        .splitlines()[0]
+                    )["source_id"]
+                    self.rewrite_candidates(
+                        bundle,
+                        lambda row_index, candidate: {
+                            **candidate,
+                            "source_id": identifier if row_index == 0 else candidate["source_id"],
+                        },
+                    )
+                    self.rewrite_facts(
+                        bundle,
+                        lambda _row_index, fact: {
+                            **fact,
+                            "source_ids": [
+                                identifier if item == old_id else item
+                                for item in fact["source_ids"]
+                            ],
+                        },
+                    )
+                elif kind == "fact_id":
+                    self.rewrite_facts(
+                        bundle,
+                        lambda _row_index, fact: {**fact, "fact_id": identifier},
+                    )
+                elif kind == "source_reference":
+                    self.rewrite_facts(
+                        bundle,
+                        lambda _row_index, fact: {
+                            **fact,
+                            "source_ids": [*fact["source_ids"], identifier],
+                        },
+                    )
+                else:
+                    (bundle / "rejections.jsonl").write_text(
+                        json.dumps(
+                            {"source_id": identifier, "reason": "synthetic rejection"},
+                            ensure_ascii=False,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        )
+                        + "\n",
+                        encoding="utf-8",
+                        newline="\n",
+                    )
+                    manifest_path = bundle / "manifest.json"
+                    manifest = json.loads(manifest_path.read_text("utf-8"))
+                    manifest["rejected_count"] = 1
+                    manifest_path.write_text(
+                        json.dumps(
+                            manifest,
+                            ensure_ascii=False,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        )
+                        + "\n",
+                        encoding="utf-8",
+                        newline="\n",
+                    )
+                self.rewrite_manifest_hash(bundle)
+
+                result, summary = self.run_cli(bundle)
+
+                self.assertEqual(result.returncode, 2)
+                self.assertFalse(summary["valid"])
+                self.assertTrue(
+                    any(item["code"] == "privacy" for item in summary["errors"]),
+                    summary,
+                )
+
     def test_public_snapshot_is_factory_only_deep_frozen_and_hash_bound(self):
         result = validate_bundle_snapshot(FIXTURES / "three-source-consensus")
 
@@ -542,6 +662,43 @@ class ValidateEvidenceCliTest(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertIn("artifact", {item["code"] for item in summary["errors"]})
 
+    def test_same_name_bundle_replacement_never_publishes_a_mixed_snapshot(self):
+        stages = (
+            "after_read:manifest.json",
+            "after_read:candidates.jsonl",
+            "before_snapshot",
+        )
+        for index, target_stage in enumerate(stages):
+            with self.subTest(stage=target_stage):
+                bundle = self.copy_fixture(
+                    "three-source-consensus", f"root-swap-{index}"
+                )
+                displaced = self.temp_root / f"root-swap-{index}-displaced"
+                replaced = False
+
+                def replace_root(stage):
+                    nonlocal replaced
+                    if replaced or stage != target_stage:
+                        return
+                    bundle.rename(displaced)
+                    shutil.copytree(displaced, bundle)
+                    replaced = True
+
+                try:
+                    result = validate_bundle_snapshot(
+                        bundle, _operation_hook=replace_root
+                    )
+                except TypeError as error:
+                    self.fail(f"validator lacks the deterministic root-identity hook: {error}")
+
+                self.assertTrue(replaced)
+                self.assertIsNone(result.snapshot)
+                self.assertTrue(result.issues)
+                self.assertIn("artifact", {issue[0] for issue in result.issues})
+                serialized = json.dumps(result.issues, ensure_ascii=False)
+                self.assertNotIn(str(bundle), serialized)
+                self.assertNotIn(str(displaced), serialized)
+
     def test_manifest_path_escape_is_rejected(self):
         bundle = self.copy_fixture("three-source-consensus")
         manifest_path = bundle / "manifest.json"
@@ -573,6 +730,12 @@ class ValidateEvidenceCliTest(unittest.TestCase):
 
         self.assertEqual(result.returncode, 2)
         self.assertIn("artifact", {item["code"] for item in summary["errors"]})
+
+        bundle_link = self.temp_root / "linked-bundle"
+        bundle_link.symlink_to(bundle, target_is_directory=True)
+        linked_result = validate_bundle_snapshot(bundle_link)
+        self.assertIsNone(linked_result.snapshot)
+        self.assertIn("artifact", {issue[0] for issue in linked_result.issues})
 
 
 if __name__ == "__main__":

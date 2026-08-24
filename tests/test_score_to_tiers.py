@@ -15,7 +15,7 @@ SKILL_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(SKILL_ROOT, "scripts"))
 
 from data_loader import DataError, load_toudang, load_yifenyiduan, score_to_rank  # noqa: E402
-from contracts import RecommendationProfile  # noqa: E402
+from contracts import OrdinaryBatchPolicy, RecommendationProfile  # noqa: E402
 from school_recommend import SchoolRecommendError, recommend_schools  # noqa: E402
 
 TOUDANG_COLUMNS = ["year", "province", "school_name", "school_code", "subject_group",
@@ -23,6 +23,18 @@ TOUDANG_COLUMNS = ["year", "province", "school_name", "school_code", "subject_gr
                    "majors_in_group", "school_level", "school_type", "province_location",
                    "city_location", "is_inside_hubei", "remarks"]
 YFD_COLUMNS = ["year", "score", "rank", "cumulative_count", "subject_group"]
+
+
+POLICY = OrdinaryBatchPolicy(
+    schema_version="1.0",
+    policy_id="synthetic-ordinary-batch-v1",
+    basis_id="synthetic-policy-basis-v1",
+    search_delta_min=-8000,
+    search_delta_max=6000,
+    challenge_delta_lt=-2000,
+    stable_delta_le=2000,
+    tier_caps={"冲": 3, "稳": 4, "保": 5},
+)
 
 
 def td_row(school, group, min_score, min_rank, level="", city="", in_hubei=0,
@@ -51,6 +63,7 @@ def evidence_recommend(rows, rank, *, majors=(), schools=(), secondary=()):
                 else (row.get("province_location") or "江苏")
             ),
             "evidence_status": "official",
+            "coverage_status": "official",
             "source_ids": ("synthetic-tier-source",),
             "coverage_min_rank": 1,
             "coverage_max_rank": 100000,
@@ -66,6 +79,7 @@ def evidence_recommend(rows, rank, *, majors=(), schools=(), secondary=()):
             target_major_categories=majors,
             target_schools=schools,
         ),
+        POLICY,
     )
 
 
@@ -92,6 +106,7 @@ class FixtureMixin:
                 "secondary_subjects": ["化学", "生物", "思想政治", "地理"],
                 "score_scale": 750,
                 "schema_version": "1.0",
+                "ordinary_batch_policy": POLICY.to_dict(),
             }, f, ensure_ascii=False)
 
     def tearDown(self):
@@ -211,7 +226,7 @@ class ExtremeRankTest(FixtureMixin, unittest.TestCase):
     def test_invalid_rank_raises(self):
         year, rows = load_toudang("湖北", "物理", root=self.root)
         with self.assertRaises(SchoolRecommendError) as ctx:
-            recommend_schools(rows, {"rank": 0, "target_province": "湖北"})
+            recommend_schools(rows, {"rank": 0, "target_province": "湖北"}, POLICY)
         self.assertEqual(ctx.exception.code, "REC_001")
 
 

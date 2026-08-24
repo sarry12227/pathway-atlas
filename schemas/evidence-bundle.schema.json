@@ -130,12 +130,12 @@
       ],
       "properties": {
         "schema_version": {"const": "1.0"},
-        "session_id": {"type": "string", "minLength": 1},
+        "session_id": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
         "capability_tier": {"$ref": "#/$defs/capabilityTier"},
         "candidates_filename": {"type": "string", "minLength": 1},
         "facts_filename": {"type": "string", "minLength": 1},
         "rejected_count": {"type": "integer", "minimum": 0},
-        "manifest_hash": {"type": "string"}
+        "manifest_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
       }
     }
   }
