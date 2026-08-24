@@ -265,10 +265,6 @@ def _admission_fixed_projection(record):
     )
 
 
-def _admission_fact_key(record):
-    return _admission_fixed_projection(record)[:6]
-
-
 def _strict_admission_fact(record):
     if not isinstance(record, dict):
         return None
@@ -323,26 +319,24 @@ def _strict_admission_fact(record):
         for source_id in source_ids
     ):
         return None
-    key = _admission_fact_key(value)
-    return key, value, status, tuple(sorted(source_ids))
+    return value["row_hash"], value, status, tuple(sorted(source_ids))
 
 
 def _admission_fact_index(facts):
     index = {}
-    conflicted = set()
+    projections = set()
     for record in facts:
         parsed = _strict_admission_fact(record)
         if parsed is None:
             continue
-        key, value, status, source_ids = parsed
+        row_hash, value, status, source_ids = parsed
+        projections.add(_admission_fixed_projection(value))
         snapshot = (value, status, source_ids)
-        if key in index and index[key] != snapshot:
-            conflicted.add(key)
-        else:
-            index[key] = snapshot
-    for key in conflicted:
-        index.pop(key, None)
-    return index
+        if row_hash not in index:
+            index[row_hash] = snapshot
+        elif index[row_hash] != snapshot:
+            index[row_hash] = None
+    return index, frozenset(projections)
 
 
 def _public_recommendations(
@@ -367,48 +361,55 @@ def _public_recommendations(
         authenticated_rows = tuple(
             (row.to_dict(), admission_row_hash(row)) for row in admission_rows
         )
-        rows = [row for row, _row_hash in authenticated_rows]
         matching_years = [
             row["year"]
-            for row in rows
+            for row, _row_hash in authenticated_rows
             if row.get("subject_group") == profile.subject_group
         ]
         if not matching_years:
             raise DataError("已验证投档数据没有匹配的科目组")
         latest_year = max(matching_years)
         rows = [
-            row for row in rows
+            (row, row_hash) for row, row_hash in authenticated_rows
             if row.get("subject_group") == profile.subject_group
             and row.get("year") == latest_year
         ]
-        row_hashes = {
-            tuple(sorted(row.items())): row_hash
-            for row, row_hash in authenticated_rows
-            if row.get("subject_group") == profile.subject_group
-            and row.get("year") == latest_year
-        }
-        evidence_by_row = _admission_fact_index(facts)
+        evidence_by_hash, evidence_projections = _admission_fact_index(facts)
         bounded_rows = []
-        for original in rows:
+        for original, expected_row_hash in rows:
             row = dict(original)
-            key = _admission_fact_key(row)
-            accepted = evidence_by_row.get(key)
-            if accepted is None:
+            if expected_row_hash not in evidence_by_hash:
+                status = (
+                    EvidenceStatus.CONFLICT
+                    if _admission_fixed_projection(row) in evidence_projections
+                    else EvidenceStatus.MISSING
+                )
                 row.update(
                     {
-                        "evidence_status": EvidenceStatus.MISSING.value,
+                        "evidence_status": status.value,
                         "source_ids": (),
                         "coverage_min_rank": None,
                         "coverage_max_rank": None,
-                        "coverage_status": EvidenceStatus.MISSING.value,
+                        "coverage_status": status.value,
                     }
                 )
             else:
+                accepted = evidence_by_hash[expected_row_hash]
+                if accepted is None:
+                    row.update(
+                        {
+                            "evidence_status": EvidenceStatus.CONFLICT.value,
+                            "source_ids": (),
+                            "coverage_min_rank": None,
+                            "coverage_max_rank": None,
+                            "coverage_status": EvidenceStatus.CONFLICT.value,
+                        }
+                    )
+                    bounded_rows.append(row)
+                    continue
                 value, status, source_ids = accepted
-                expected_row_hash = row_hashes.get(tuple(sorted(original.items())))
                 if (
-                    expected_row_hash is None
-                    or value["row_hash"] != expected_row_hash
+                    value["row_hash"] != expected_row_hash
                     or _admission_fixed_projection(value)
                     != _admission_fixed_projection(row)
                 ):
