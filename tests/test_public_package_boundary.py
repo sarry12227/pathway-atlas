@@ -141,33 +141,65 @@ def _fold_static_text(node: ast.AST, depth: int = 0) -> str | None:
     return None
 
 
-def _fold_static_int(node: ast.AST, depth: int = 0) -> int | None:
-    """Fold only signed integer literals needed by the mutation boundary."""
+def _fold_static_int(
+    node: ast.AST,
+    environment: dict[str, int] | None = None,
+    depth: int = 0,
+) -> int | None:
+    """Fold signed integer literals and unambiguous simple-name bindings."""
 
     if depth > _MAX_STATIC_AST_DEPTH:
         return None
+    if isinstance(node, ast.Name) and environment is not None:
+        return environment.get(node.id)
     if isinstance(node, ast.Constant):
         if isinstance(node.value, int) and not isinstance(node.value, bool):
             return node.value
         return None
     if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.USub, ast.UAdd)):
-        value = _fold_static_int(node.operand, depth + 1)
+        value = _fold_static_int(node.operand, environment, depth + 1)
         if value is None:
             return None
         return -value if isinstance(node.op, ast.USub) else value
     return None
 
 
-def _contains_rank_reference(node: ast.AST) -> bool:
-    return any(
-        "rank" in candidate.casefold()
-        for candidate in (
-            child.id
-            if isinstance(child, ast.Name)
-            else child.attr
-            for child in ast.walk(node)
-            if isinstance(child, (ast.Name, ast.Attribute))
+def _fold_semantic_text(
+    node: ast.AST,
+    environment: dict[str, str],
+    depth: int = 0,
+) -> str | None:
+    """Fold finite string literals/concatenation and simple-name bindings."""
+
+    if depth > _MAX_STATIC_AST_DEPTH:
+        return None
+    if isinstance(node, ast.Name):
+        return environment.get(node.id)
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return (
+            node.value
+            if len(node.value) <= _MAX_STATIC_TEXT_LENGTH
+            else None
         )
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left = _fold_semantic_text(node.left, environment, depth + 1)
+        right = _fold_semantic_text(node.right, environment, depth + 1)
+        if left is None or right is None or len(left) + len(right) > _MAX_STATIC_TEXT_LENGTH:
+            return None
+        return left + right
+    return None
+
+
+def _contains_rank_reference(node: ast.AST) -> bool:
+    candidates = (
+        child.id if isinstance(child, ast.Name) else child.attr
+        for child in ast.walk(node)
+        if isinstance(child, (ast.Name, ast.Attribute))
+    )
+    return any(
+        candidate.casefold() == "rank"
+        or candidate.casefold().endswith("_rank")
+        for candidate in candidates
     )
 
 
@@ -181,12 +213,74 @@ def _recommendation_boundary_findings(
     findings: list[str] = []
     module_aliases: dict[str, str] = {}
     call_aliases: dict[str, str] = {}
+    static_ints: dict[str, int] = {}
+    static_strings: dict[str, str] = {}
+    ambiguous_ints: set[str] = set()
+    ambiguous_strings: set[str] = set()
+    ambiguous_modules: set[str] = set()
+    ambiguous_calls: set[str] = set()
+
+    def bind(
+        environment: dict[str, object],
+        ambiguous: set[str],
+        name: str,
+        value: object | None,
+    ) -> bool:
+        if value is None or name in ambiguous:
+            return False
+        if name not in environment:
+            environment[name] = value
+            return True
+        if environment[name] != value:
+            environment.pop(name, None)
+            ambiguous.add(name)
+            return True
+        return False
+
+    def simple_targets(node: ast.Assign | ast.AnnAssign) -> tuple[str, ...]:
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+        return tuple(target.id for target in targets if isinstance(target, ast.Name))
+
+    def resolve_module(node: ast.AST) -> str | None:
+        dotted = _dotted_name(node)
+        if dotted is not None and dotted.casefold().endswith("data_loader"):
+            return "data_loader"
+        if isinstance(node, ast.Name):
+            return module_aliases.get(node.id)
+        return None
+
+    def resolve_callable(node: ast.AST) -> str | None:
+        if isinstance(node, ast.Name):
+            if node.id in _FORBIDDEN_RECOMMENDATION_SYMBOLS:
+                return node.id
+            return call_aliases.get(node.id)
+        if isinstance(node, ast.Attribute):
+            if node.attr in _FORBIDDEN_RECOMMENDATION_SYMBOLS:
+                return node.attr
+            if (
+                node.attr in _FORBIDDEN_REPORT_DATA_CALLS
+                and resolve_module(node.value) == "data_loader"
+            ):
+                return node.attr
+        if (
+            isinstance(node, ast.Call)
+            and _dotted_name(node.func) == "getattr"
+            and len(node.args) >= 2
+            and resolve_module(node.args[0]) == "data_loader"
+        ):
+            accessed = _fold_semantic_text(node.args[1], static_strings)
+            if accessed in _FORBIDDEN_REPORT_DATA_CALLS:
+                return accessed
+        return None
 
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
-                if alias.asname:
-                    module_aliases[alias.asname] = alias.name
+                local = alias.asname or alias.name.split(".", 1)[0]
+                if alias.name.casefold().endswith("data_loader") and alias.asname:
+                    module_aliases[local] = "data_loader"
+                if local in _FORBIDDEN_RECOMMENDATION_SYMBOLS:
+                    findings.append(f"forbidden-import-alias:{local}")
         elif isinstance(node, ast.ImportFrom):
             module = node.module or ""
             for alias in node.names:
@@ -196,9 +290,47 @@ def _recommendation_boundary_findings(
                 ):
                     module_aliases[local] = "data_loader"
                 elif module.casefold().endswith("data_loader"):
-                    call_aliases[local] = alias.name
+                    if alias.name in _FORBIDDEN_REPORT_DATA_CALLS:
+                        call_aliases[local] = alias.name
                 if alias.name in _FORBIDDEN_RECOMMENDATION_SYMBOLS:
                     findings.append(f"forbidden-import:{alias.name}")
+                    call_aliases[local] = alias.name
+                if local in _FORBIDDEN_RECOMMENDATION_SYMBOLS:
+                    findings.append(f"forbidden-import-alias:{local}")
+
+    assignments = tuple(
+        node for node in ast.walk(tree) if isinstance(node, (ast.Assign, ast.AnnAssign))
+    )
+    for _iteration in range(_MAX_STATIC_AST_DEPTH):
+        changed = False
+        for node in assignments:
+            for target in simple_targets(node):
+                changed |= bind(
+                    static_ints,
+                    ambiguous_ints,
+                    target,
+                    _fold_static_int(node.value, static_ints),
+                )
+                changed |= bind(
+                    static_strings,
+                    ambiguous_strings,
+                    target,
+                    _fold_semantic_text(node.value, static_strings),
+                )
+                changed |= bind(
+                    module_aliases,
+                    ambiguous_modules,
+                    target,
+                    resolve_module(node.value),
+                )
+                changed |= bind(
+                    call_aliases,
+                    ambiguous_calls,
+                    target,
+                    resolve_callable(node.value),
+                )
+        if not changed:
+            break
 
     for node in ast.walk(tree):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
@@ -222,30 +354,33 @@ def _recommendation_boundary_findings(
                         else (value,)
                     )
                     for element in elements:
-                        exported = _fold_static_text(element)
+                        exported = _fold_semantic_text(element, static_strings)
                         if exported in _FORBIDDEN_RECOMMENDATION_SYMBOLS:
                             findings.append(f"forbidden-export:{exported}")
+                resolved = resolve_callable(node.value)
+                if resolved in (
+                    _FORBIDDEN_RECOMMENDATION_SYMBOLS
+                    | _FORBIDDEN_REPORT_DATA_CALLS
+                ):
+                    for target in simple_targets(node):
+                        findings.append(f"forbidden-alias:{target}->{resolved}")
 
         if isinstance(node, ast.BinOp) and relative in _RECOMMENDATION_RUNTIME_PATHS:
-            fixed_adjustment = (
-                isinstance(node.op, ast.Sub)
-                and _contains_rank_reference(node.left)
-                and _fold_static_int(node.right) == 4000
-            ) or (
-                isinstance(node.op, ast.Add)
-                and (
-                    (
-                        _contains_rank_reference(node.left)
-                        and _fold_static_int(node.right) == -4000
-                    )
-                    or (
-                        _contains_rank_reference(node.right)
-                        and _fold_static_int(node.left) == -4000
-                    )
-                )
+            left_rank = _contains_rank_reference(node.left)
+            right_rank = _contains_rank_reference(node.right)
+            left_value = _fold_static_int(node.left, static_ints)
+            right_value = _fold_static_int(node.right, static_ints)
+            fixed_adjustment = isinstance(node.op, (ast.Add, ast.Sub)) and (
+                (left_rank and right_value is not None and abs(right_value) == 4000)
+                or (right_rank and left_value is not None and abs(left_value) == 4000)
             )
             if fixed_adjustment:
                 findings.append("fixed-rank-adjustment:4000")
+
+        if isinstance(node, (ast.Constant, ast.BinOp, ast.Name)):
+            runtime_string = _fold_semantic_text(node, static_strings)
+            if runtime_string in {"legacy-local-dataset", "equiv_rank_adjust"}:
+                findings.append(f"forbidden-runtime-string:{runtime_string}")
 
         if isinstance(node, ast.Subscript):
             owner = node.value
@@ -255,27 +390,19 @@ def _recommendation_boundary_findings(
                 and not owner.args
                 and not owner.keywords
             ):
-                accessed = _fold_static_text(node.slice)
+                accessed = _fold_semantic_text(node.slice, static_strings)
                 if accessed in _FORBIDDEN_RECOMMENDATION_SYMBOLS:
                     findings.append(f"dynamic-access:{accessed}")
 
         if isinstance(node, ast.Call):
             function_name = _dotted_name(node.func)
-            canonical = None
-            if isinstance(node.func, ast.Name):
-                canonical = call_aliases.get(node.func.id, node.func.id)
-            elif isinstance(node.func, ast.Attribute):
-                owner = _dotted_name(node.func.value) or ""
-                root = owner.split(".", 1)[0]
-                canonical_owner = module_aliases.get(root, owner)
-                if canonical_owner.casefold().endswith("data_loader"):
-                    canonical = node.func.attr
-                elif owner.casefold().endswith("data_loader"):
-                    canonical = node.func.attr
+            canonical = resolve_callable(node.func)
             if canonical in _FORBIDDEN_REPORT_DATA_CALLS:
                 findings.append(f"old-data-call:{canonical}")
-            if function_name in {"getattr", "hasattr"} and len(node.args) >= 2:
-                accessed = _fold_static_text(node.args[1])
+            if canonical in _FORBIDDEN_RECOMMENDATION_SYMBOLS:
+                findings.append(f"forbidden-call:{canonical}")
+            if function_name in {"getattr", "hasattr", "setattr"} and len(node.args) >= 2:
+                accessed = _fold_semantic_text(node.args[1], static_strings)
                 if accessed in _FORBIDDEN_RECOMMENDATION_SYMBOLS:
                     findings.append(f"dynamic-access:{accessed}")
 
@@ -835,17 +962,6 @@ class PublicPackageBoundaryTest(unittest.TestCase):
         self.assertFalse(hasattr(path_module, "EQUIV_RANK_ADJUST"))
         self.assertFalse(hasattr(path_module, "recommend_paths"))
 
-        recommendation_findings = {
-            relative: findings
-            for relative in sorted(_RECOMMENDATION_RUNTIME_PATHS)
-            if (
-                findings := _recommendation_boundary_findings(
-                    (ROOT / relative).read_text("utf-8"), relative
-                )
-            )
-        }
-        self.assertEqual(recommendation_findings, {})
-
         tracked_scripts = subprocess.run(
             ["git", "ls-files", "--", "scripts/*.py"],
             cwd=ROOT,
@@ -854,6 +970,17 @@ class PublicPackageBoundaryTest(unittest.TestCase):
             text=True,
             encoding="utf-8",
         ).stdout.splitlines()
+        recommendation_findings = {
+            relative: findings
+            for relative in tracked_scripts
+            if (
+                findings := _recommendation_boundary_findings(
+                    (ROOT / relative).read_text("utf-8"), relative
+                )
+            )
+        }
+        self.assertEqual(recommendation_findings, {})
+
         runtime_trees = {
             relative: ast.parse((ROOT / relative).read_text("utf-8"))
             for relative in tracked_scripts
@@ -920,7 +1047,18 @@ class PublicPackageBoundaryTest(unittest.TestCase):
         bad_sources = {
             "fixed subtract": "def f(rank):\n    return rank - 4000\n",
             "fixed negative add": "def f(rank):\n    return rank + (-4000)\n",
+            "local positive offset": (
+                "OFFSET = 4000\ndef f(rank):\n    return rank - OFFSET\n"
+            ),
+            "local negative delta": (
+                "DELTA = -4000\ndef f(rank):\n    return rank + DELTA\n"
+            ),
+            "direct positive add": "def f(rank):\n    return rank + 4000\n",
+            "direct negative subtract": "def f(rank):\n    return rank - (-4000)\n",
             "dynamic export": "__all__ = ['recommend_' + 'paths']\n",
+            "aliased dynamic export": (
+                "legacy_name = 'recommend_' + 'paths'\n__all__ = [legacy_name]\n"
+            ),
             "dynamic globals access": (
                 "legacy = globals()['recommend_' + 'paths']\n"
             ),
@@ -933,8 +1071,39 @@ class PublicPackageBoundaryTest(unittest.TestCase):
             "module-aliased package data call": (
                 "from scripts import data_loader as dl\ndl.load_toudang()\n"
             ),
+            "module and callable alias chain": (
+                "import scripts.data_loader as data_loader\n"
+                "dl = data_loader\n"
+                "lookup = dl.load_toudang\n"
+                "lookup()\n"
+            ),
             "direct relative data call": (
                 "from .data_loader import score_to_rank as lookup\nlookup()\n"
+            ),
+            "folded getattr data call": (
+                "import data_loader\n"
+                "dl = data_loader\n"
+                "lookup = getattr(dl, 'load_' + 'toudang')\n"
+                "lookup()\n"
+            ),
+            "forbidden import local alias": (
+                "from path_recommend import evaluate_pathways as recommend_paths\n"
+            ),
+            "forbidden module import local alias": (
+                "import path_recommend as recommend_paths\n"
+            ),
+            "static forbidden alias": "legacy = recommend_paths\n",
+            "static forbidden attribute alias": (
+                "legacy = path_recommend.recommend_paths\n"
+            ),
+            "folded setattr": (
+                "setattr(module, 'recommend_' + 'paths', handler)\n"
+            ),
+            "folded legacy source string": (
+                "source_id = 'legacy-local-' + 'dataset'\n"
+            ),
+            "folded adjustment key string": (
+                "config_key = 'equiv_rank_' + 'adjust'\n"
             ),
             "old function": "def recommend_paths():\n    pass\n",
             "old config function": "def params_from_config():\n    pass\n",
@@ -949,11 +1118,14 @@ class PublicPackageBoundaryTest(unittest.TestCase):
 
         safe_source = """
 page_limit = 4000
+page_rank_limit = 9000
+remaining = page_rank_limit - 4000
 model = RankAdjustmentModel(rank_delta=-4000)
 def evaluate(rank, model):
     return rank + model.rank_delta
 from data_loader import load_admission_rows
 labels = {'recommend_paths': 'historical prose only'}
+notes = 'historical recommendation adapter prose'
 """
         self.assertEqual(_recommendation_boundary_findings(safe_source), ())
 
