@@ -7,6 +7,7 @@ import ipaddress
 import json
 import re
 import shutil
+import stat
 import sys
 import tempfile
 import unicodedata
@@ -24,6 +25,7 @@ from scripts.downloader import (
     DownloadHttpError,
     DownloadMediaTypeError,
     DownloadNetworkError,
+    DownloadRedirectError,
     DownloadResult,
     DownloadSecurityError,
     DownloadStorageError,
@@ -31,14 +33,17 @@ from scripts.downloader import (
     DownloadTooLarge,
     download_public_file,
 )
+from scripts.downloader import _MEDIA_TYPE_EXTENSIONS
 from scripts.source_policy import canonical_site_identity
 
 
 MAX_RESPONSE_BYTES = 1_048_576
 TOTAL_TIMEOUT_SECONDS = 5.0
 _STATES = frozenset({"healthy", "redirect_review", "unavailable"})
-_REASONS = frozenset({"timeout", "dns_or_network", "http_error", "unsupported_content_type", "response_too_large", "security_rejection", "storage_error"})
+_REASONS = frozenset({"timeout", "dns_or_network", "http_error", "redirect_error", "unsupported_content_type", "response_too_large", "security_rejection", "storage_error"})
 _MEDIA_TYPE = re.compile(r"^[A-Za-z0-9!#$&^_.+-]+/[A-Za-z0-9!#$&^_.+-]+$")
+_UTC = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
+_CATALOG_PATH = Path(__file__).resolve().parents[1] / "references" / "provinces" / "index.json"
 
 
 def _domain(url: str) -> str:
@@ -53,7 +58,7 @@ def _domain(url: str) -> str:
     if part.scheme.casefold() not in {"http", "https"} or not part.hostname or part.username is not None or part.password is not None:
         return ""
     host = part.hostname.rstrip(".").casefold()
-    if not host:
+    if not host or host == "localhost" or host.endswith(".localhost") or host.isdecimal():
         return ""
     try:
         ipaddress.ip_address(host)
@@ -62,6 +67,20 @@ def _domain(url: str) -> str:
         pass
     default = (part.scheme.casefold() == "http" and port == 80) or (part.scheme.casefold() == "https" and port == 443)
     return host if port is None or default else f"{host}:{port}"
+
+
+def _safe_url(url: object, *, root_only: bool = False) -> bool:
+    if not isinstance(url, str) or not _domain(url):
+        return False
+    try:
+        part = urlsplit(url)
+    except ValueError:
+        return False
+    if part.scheme.casefold() != "https" or part.username is not None or part.password is not None:
+        return False
+    if root_only and (part.path not in {"", "/"} or part.query or part.fragment):
+        return False
+    return True
 
 
 def _utc_timestamp(clock: Callable[[], datetime]) -> str:
@@ -85,14 +104,18 @@ class LiveSmokeResult:
     schema_version: str = "1.0"
 
     def __post_init__(self) -> None:
-        if self.schema_version != "1.0" or self.status not in _STATES or not self.province or not self.requested_domain:
+        if self.schema_version != "1.0" or self.status not in _STATES or not isinstance(self.province, str) or not self.province or any(char in self.province for char in "/\\?:#@") or not isinstance(self.requested_domain, str) or not self.requested_domain:
             raise ValueError("invalid live smoke result")
-        if not self.redirect_domains or any(not item or "://" in item or "/" in item for item in self.redirect_domains):
+        if not isinstance(self.checked_at, str) or not _UTC.fullmatch(self.checked_at):
+            raise ValueError("invalid checked time")
+        if not isinstance(self.redirect_domains, tuple) or not self.redirect_domains or len(set(self.redirect_domains)) != len(self.redirect_domains) or any(not isinstance(item, str) or not item or "://" in item or "/" in item or "?" in item or "#" in item for item in self.redirect_domains):
             raise ValueError("invalid redirect domains")
+        if self.requested_domain != self.redirect_domains[0]:
+            raise ValueError("invalid requested domain")
         if self.status == "unavailable":
             if self.final_domain is not None or self.content_type is not None or self.size_bytes is not None or self.reason_code not in _REASONS:
                 raise ValueError("invalid unavailable result")
-        elif self.final_domain is None or self.content_type is None or not isinstance(self.size_bytes, int) or self.size_bytes < 0:
+        elif self.final_domain is None or self.final_domain not in self.redirect_domains or self.content_type not in _MEDIA_TYPE_EXTENSIONS or not isinstance(self.size_bytes, int) or isinstance(self.size_bytes, bool) or not 0 <= self.size_bytes <= MAX_RESPONSE_BYTES:
             raise ValueError("invalid successful result")
         elif (self.status == "healthy") != (self.reason_code is None):
             raise ValueError("invalid successful result reason")
@@ -116,6 +139,7 @@ class LiveSmokeResult:
 
 def _reason(error: DownloadError) -> str:
     if isinstance(error, DownloadTimeout): return "timeout"
+    if isinstance(error, DownloadRedirectError): return "redirect_error"
     if isinstance(error, DownloadNetworkError): return "dns_or_network"
     if isinstance(error, DownloadHttpError): return "http_error"
     if isinstance(error, DownloadMediaTypeError): return "unsupported_content_type"
@@ -132,31 +156,44 @@ def check_official_root(province: str, official_roots: tuple[str, ...], *, downl
     requested_url, requested_domain = official_roots[0], _domain(official_roots[0])
     known_domains = (requested_domain,)
     timestamp = _utc_timestamp(clock)
-    with tempfile.TemporaryDirectory(prefix="live-smoke-") as temporary:
-        workspace = Path(temporary).resolve()
+    workspace = Path(tempfile.mkdtemp(prefix="live-smoke-")).resolve()
+    outcome: LiveSmokeResult
+    try:
+        result = downloader(requested_url, workspace, max_bytes=MAX_RESPONSE_BYTES, timeout=TOTAL_TIMEOUT_SECONDS)
+        if not isinstance(result, DownloadResult) or not isinstance(result.path, Path):
+            raise DownloadSecurityError("forged result")
+        chain = tuple(result.redirect_chain)
+        domains = tuple(_domain(item) for item in chain)
         try:
-            result = downloader(requested_url, workspace, max_bytes=MAX_RESPONSE_BYTES, timeout=TOTAL_TIMEOUT_SECONDS)
-            if not isinstance(result, DownloadResult) or not isinstance(result.path, Path):
-                raise ValueError("forged download result")
-            chain = tuple(result.redirect_chain)
-            domains = tuple(_domain(item) for item in chain)
-            if not chain or not all(domains) or canonical_site_identity(chain[0]) != canonical_site_identity(requested_url) or chain[-1] != result.source_url or _domain(result.source_url) != domains[-1] or result.path.parent.resolve() != workspace or not result.path.is_file() or result.size_bytes < 0 or result.path.stat().st_size != result.size_bytes or not isinstance(result.media_type, str) or not _MEDIA_TYPE.fullmatch(result.media_type):
-                raise ValueError("forged download result")
-            ordered = tuple(dict.fromkeys(domains))
-            allowlisted = {canonical_site_identity(root) for root in official_roots}
-            status = "healthy" if all(canonical_site_identity(item) in allowlisted for item in chain) else "redirect_review"
-            return LiveSmokeResult(province, status, requested_domain, domains[-1], ordered, timestamp, result.media_type, result.size_bytes, None if status == "healthy" else "unlisted_redirect_domain")
-        except DownloadError as error:
-            return LiveSmokeResult(province, "unavailable", requested_domain, None, known_domains, timestamp, None, None, _reason(error))
-        except (OSError, TypeError, ValueError):
-            return LiveSmokeResult(province, "unavailable", requested_domain, None, known_domains, timestamp, None, None, "storage_error")
-        finally:
-            try:
-                for child in workspace.iterdir():
-                    if child.is_file() or child.is_symlink(): child.unlink(missing_ok=True)
-                    elif child.is_dir(): shutil.rmtree(child, ignore_errors=True)
-            except OSError:
-                pass
+            file_stat = result.path.lstat()
+        except OSError as error:
+            raise DownloadStorageError("result file unavailable") from error
+        suffix = _MEDIA_TYPE_EXTENSIONS.get(result.media_type) if isinstance(result.media_type, str) else None
+        if (not chain or not all(_safe_url(item) for item in chain) or not all(domains)
+                or canonical_site_identity(chain[0]) != canonical_site_identity(requested_url)
+                or chain[-1] != result.source_url or result.path.parent != workspace
+                or result.path.resolve() != result.path or result.path.is_symlink()
+                or not stat.S_ISREG(file_stat.st_mode) or not isinstance(result.size_bytes, int)
+                or isinstance(result.size_bytes, bool) or not 0 <= result.size_bytes <= MAX_RESPONSE_BYTES
+                or file_stat.st_size != result.size_bytes or suffix is None or result.path.suffix.casefold() != suffix):
+            raise DownloadSecurityError("forged result")
+        ordered = tuple(dict.fromkeys(domains))
+        allowlisted = {canonical_site_identity(root) for root in official_roots}
+        status = "healthy" if all(canonical_site_identity(item) in allowlisted for item in chain) else "redirect_review"
+        outcome = LiveSmokeResult(province, status, requested_domain, domains[-1], ordered, timestamp, result.media_type, result.size_bytes, None if status == "healthy" else "unlisted_redirect_domain")
+    except DownloadError as error:
+        outcome = LiveSmokeResult(province, "unavailable", requested_domain, None, known_domains, timestamp, None, None, _reason(error))
+    except (OSError, TypeError, ValueError):
+        outcome = LiveSmokeResult(province, "unavailable", requested_domain, None, known_domains, timestamp, None, None, "security_rejection")
+    try:
+        shutil.rmtree(workspace)
+    except OSError:
+        try:
+            shutil.rmtree(workspace, ignore_errors=True)
+        except OSError:
+            pass
+        return LiveSmokeResult(province, "unavailable", requested_domain, None, known_domains, timestamp, None, None, "storage_error")
+    return outcome
 
 
 def _strict_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -171,16 +208,31 @@ def _reject_constant(_value: str) -> None: raise ValueError("non-finite")
 
 
 def _load_province(token: str) -> tuple[str, tuple[str, ...]]:
-    path = Path(__file__).resolve().parents[1] / "references" / "provinces" / "index.json"
-    payload = json.loads(path.read_bytes().decode("utf-8"), object_pairs_hook=_strict_object, parse_constant=_reject_constant)
-    if not isinstance(payload, dict) or set(payload) != {"schema_version", "verified_at", "coverage_note", "mode_authority_urls", "provinces"} or payload["schema_version"] != "1.0" or not isinstance(payload["provinces"], list): raise ValueError("invalid catalog")
+    payload = json.loads(_CATALOG_PATH.read_bytes().decode("utf-8"), object_pairs_hook=_strict_object, parse_constant=_reject_constant)
+    if (not isinstance(token, str) or not isinstance(payload, dict)
+            or set(payload) != {"schema_version", "verified_at", "coverage_note", "mode_authority_urls", "provinces"}
+            or payload["schema_version"] != "1.0" or not isinstance(payload["verified_at"], str)
+            or not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", payload["verified_at"])
+            or not isinstance(payload["coverage_note"], str) or not payload["coverage_note"]
+            or not isinstance(payload["mode_authority_urls"], list) or not payload["mode_authority_urls"]
+            or not all(_safe_url(url) for url in payload["mode_authority_urls"])
+            or not isinstance(payload["provinces"], list) or not payload["provinces"]): raise ValueError("invalid catalog")
     needle = unicodedata.normalize("NFKC", token).casefold()
     matches = []
+    aliases_seen: set[str] = set()
     for record in payload["provinces"]:
         if not isinstance(record, dict) or set(record) != {"province", "aliases", "mode", "authority_name", "official_roots", "mode_source_url", "verified_at", "notes"}: raise ValueError("invalid catalog")
         roots = record["official_roots"]
-        if not isinstance(record["province"], str) or not isinstance(record["aliases"], list) or not isinstance(roots, list) or not roots or not all(isinstance(root, str) and _domain(root) and urlsplit(root).scheme == "https" for root in roots): raise ValueError("invalid catalog")
-        if needle in {unicodedata.normalize("NFKC", item).casefold() for item in [record["province"], *record["aliases"]] if isinstance(item, str)}: matches.append((record["province"], tuple(roots)))
+        aliases = record["aliases"]
+        if (not isinstance(record["province"], str) or not record["province"] or not isinstance(aliases, list) or not aliases or not all(isinstance(item, str) and item.strip() for item in aliases)
+                or record["mode"] not in {"3+3", "3+1+2"} or not isinstance(record["authority_name"], str) or not record["authority_name"]
+                or not isinstance(roots, list) or not roots or not all(_safe_url(root, root_only=True) for root in roots)
+                or not _safe_url(record["mode_source_url"]) or not isinstance(record["verified_at"], str) or not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", record["verified_at"])
+                or not isinstance(record["notes"], str) or not record["notes"]): raise ValueError("invalid catalog")
+        keys = [unicodedata.normalize("NFKC", item).casefold() for item in [record["province"], *aliases]]
+        if len(set(keys)) != len(keys) or aliases_seen.intersection(keys): raise ValueError("ambiguous aliases")
+        aliases_seen.update(keys)
+        if needle in keys: matches.append((record["province"], tuple(roots)))
     if len(matches) != 1: raise ValueError("unknown province")
     return matches[0]
 
@@ -190,9 +242,16 @@ class _SafeArgumentParser(argparse.ArgumentParser):
         raise ValueError("invalid arguments")
 
 
+class _SingleUseAction(argparse.Action):
+    def __call__(self, parser: argparse.ArgumentParser, namespace: argparse.Namespace, values: object, option_string: str | None = None) -> None:
+        if getattr(namespace, self.dest, None) is not None:
+            raise ValueError("duplicate argument")
+        setattr(namespace, self.dest, values)
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = _SafeArgumentParser(description=__doc__)
-    parser.add_argument("--province", required=True)
+    parser.add_argument("--province", required=True, action=_SingleUseAction)
     return parser
 
 

@@ -5,14 +5,20 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import os
+import stat
+import tempfile
 import unittest
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 from scripts.downloader import (
     DownloadHttpError,
     DownloadMediaTypeError,
     DownloadNetworkError,
+    DownloadRedirectError,
     DownloadResult,
     DownloadSecurityError,
     DownloadStorageError,
@@ -128,6 +134,103 @@ class LiveSmokeContractTest(unittest.TestCase):
         self.assertEqual(2, exit_code)
         self.assertEqual("", stdout.getvalue())
         self.assertEqual("live-smoke: invalid input\n", stderr.getvalue())
+
+    def test_forged_metadata_and_unsafe_chain_fail_closed_without_leaking_query(self) -> None:
+        def forged(_url: str, workspace: Path, **_kwargs: object) -> DownloadResult:
+            result = self._result(workspace, "https://www.hljea.org.cn/?token=secret", "https://localhost.invalid/next?token=secret")
+            object.__setattr__(result, "media_type", "application/x-forged")
+            object.__setattr__(result, "size_bytes", 1_048_577)
+            return result
+
+        result = check_official_root("黑龙江", self.roots, downloader=forged, clock=self.clock)
+        self.assertEqual(("unavailable", "security_rejection"), (result.status, result.reason_code))
+        self.assertNotIn("secret", repr(result))
+        self.assertNotIn("localhost", json.dumps(result.to_dict(), ensure_ascii=False))
+
+    def test_result_constructor_and_replace_enforce_the_complete_public_contract(self) -> None:
+        healthy = LiveSmokeResult(
+            province="黑龙江", status="healthy", requested_domain="www.hljea.org.cn",
+            final_domain="hljea.org.cn", redirect_domains=("www.hljea.org.cn", "hljea.org.cn"),
+            checked_at="2026-08-24T00:00:00Z", content_type="text/html", size_bytes=0,
+            reason_code=None,
+        )
+        for changes in (
+            {"checked_at": "2026-08-24 00:00:00"},
+            {"province": "https://secret.example.test/a?token=secret"},
+            {"redirect_domains": ("www.hljea.org.cn", "hljea.org.cn", "hljea.org.cn")},
+            {"final_domain": "other.example.test"},
+            {"size_bytes": True},
+            {"content_type": "application/x-forged"},
+            {"reason_code": "timeout"},
+        ):
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                replace(healthy, **changes)
+
+    def test_strict_catalog_rejects_duplicate_alias_and_unsafe_root_without_echoing_input(self) -> None:
+        valid = {
+            "schema_version": "1.0", "verified_at": "2026-08-24", "coverage_note": "synthetic",
+            "mode_authority_urls": ["https://authority.example.test/source"],
+            "provinces": [
+                {"province": "甲", "aliases": ["甲", "Ａ"], "mode": "3+3", "authority_name": "甲院",
+                 "official_roots": ["https://official.example.test/"], "mode_source_url": "https://authority.example.test/source",
+                 "verified_at": "2026-08-24", "notes": "synthetic"},
+                {"province": "乙", "aliases": ["A"], "mode": "3+1+2", "authority_name": "乙院",
+                 "official_roots": ["https://127.0.0.1/"], "mode_source_url": "https://authority.example.test/source",
+                 "verified_at": "2026-08-24", "notes": "synthetic"},
+            ],
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            catalog = Path(temporary) / "catalog.json"
+            catalog.write_text(json.dumps(valid, ensure_ascii=False), encoding="utf-8")
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with patch("scripts.live_smoke._CATALOG_PATH", catalog, create=True), contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                exit_code = main(["--province", "token=secret"])
+            self.assertEqual(2, exit_code)
+            self.assertEqual("", stdout.getvalue())
+            self.assertEqual("live-smoke: invalid input\n", stderr.getvalue())
+            self.assertNotIn("secret", stderr.getvalue())
+
+    def test_redirect_error_and_duplicate_province_are_controlled_data_or_input_errors(self) -> None:
+        result = check_official_root(
+            "黑龙江", self.roots,
+            downloader=lambda *args, **kwargs: (_ for _ in ()).throw(DownloadRedirectError("token=secret")),
+            clock=self.clock,
+        )
+        self.assertEqual(("unavailable", "redirect_error"), (result.status, result.reason_code))
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            exit_code = main(["--province", "黑龙江", "--province", "黑龙江"])
+        self.assertEqual(2, exit_code)
+        self.assertEqual("live-smoke: invalid input\n", stderr.getvalue())
+
+    def test_cleanup_failure_is_path_neutral_storage_observation(self) -> None:
+        with patch("scripts.live_smoke.shutil.rmtree", side_effect=[OSError("C:/secret/path"), None]):
+            result = check_official_root(
+                "黑龙江", self.roots,
+                downloader=lambda _url, workspace, **kwargs: self._result(workspace, "https://www.hljea.org.cn/"),
+                clock=self.clock,
+            )
+        self.assertEqual(("unavailable", "storage_error"), (result.status, result.reason_code))
+        self.assertNotIn("secret", repr(result))
+
+    def test_complete_network_sentinel_permits_import_and_help(self) -> None:
+        import socket
+        import runpy
+
+        blocked = lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("network"))
+        patches = [
+            patch.object(socket, "getaddrinfo", blocked), patch.object(socket, "gethostbyname", blocked),
+            patch.object(socket, "gethostbyname_ex", blocked), patch.object(socket, "create_connection", blocked),
+            patch.object(socket.socket, "connect", blocked), patch.object(socket.socket, "connect_ex", blocked),
+            patch.object(socket.socket, "sendto", blocked),
+        ]
+        for item in patches: item.start()
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(0, main(["--help"]))
+            runpy.run_path("scripts/live_smoke.py", run_name="not_main")
+        finally:
+            for item in reversed(patches): item.stop()
 
 
 if __name__ == "__main__":
