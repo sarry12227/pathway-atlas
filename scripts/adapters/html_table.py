@@ -42,6 +42,37 @@ _VOID_TAGS = {
     "track",
     "wbr",
 }
+_GLOBAL_ATTRIBUTES = {
+    "accesskey",
+    "autocapitalize",
+    "autofocus",
+    "class",
+    "contenteditable",
+    "dir",
+    "draggable",
+    "enterkeyhint",
+    "exportparts",
+    "hidden",
+    "id",
+    "inert",
+    "inputmode",
+    "is",
+    "itemid",
+    "itemprop",
+    "itemref",
+    "itemscope",
+    "itemtype",
+    "lang",
+    "nonce",
+    "part",
+    "popover",
+    "slot",
+    "spellcheck",
+    "style",
+    "tabindex",
+    "title",
+    "translate",
+}
 
 
 class HtmlStructureError(StructuredValidationError):
@@ -81,6 +112,19 @@ class _Table:
         return text or None
 
 
+def _column_attributes(attrs: list[tuple[str, str | None]]) -> tuple[bool, bool]:
+    has_span = False
+    for raw_name, value in attrs:
+        name = raw_name.casefold()
+        if name == "span":
+            if value is None or re.fullmatch(r"[0-9]+", value) is None or not 1 <= int(value) <= 1000:
+                return False, False
+            has_span = True
+        elif name not in _GLOBAL_ATTRIBUTES and not name.startswith(("aria-", "data-")):
+            return False, False
+    return True, has_span
+
+
 class _TableParser(HTMLParser):
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
@@ -93,26 +137,43 @@ class _TableParser(HTMLParser):
         self._ignored_depth = 0
         self._nested_table_depth = 0
         self._inline_stack: list[str] = []
+        self._colgroup = False
+        self._colgroup_has_span = False
+        self._column_groups_seen = False
+        self._data_structure_started = False
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        self.handle_starttag(tag, attrs)
+        if tag.casefold() not in _VOID_TAGS:
+            self.handle_endtag(tag)
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         tag = tag.casefold()
-        if tag in {"script", "style"}:
-            self._ignored_depth += 1
-            return
         if self._ignored_depth:
+            if tag in {"script", "style"}:
+                self._ignored_depth += 1
+            return
+        attribute_names = [name.casefold() for name, _ in attrs]
+        duplicate_attributes = len(attribute_names) != len(set(attribute_names))
+        if tag in {"script", "style"}:
+            if duplicate_attributes and self._table is not None:
+                self._table.malformed = True
+            self._ignored_depth += 1
             return
         if tag == "table":
             if self._table is not None:
                 self._table.malformed = True
                 self._nested_table_depth += 1
                 return
-            self._table = _Table(index=len(self.tables) + 1)
+            self._table = _Table(index=len(self.tables) + 1, malformed=duplicate_attributes)
             return
         if self._nested_table_depth:
             return
-        elif self._table is None:
+        if self._table is None:
             return
-        elif tag == "caption":
+        if duplicate_attributes:
+            self._table.malformed = True
+        if tag == "caption":
             if (
                 self._caption
                 or self._section is not None
@@ -120,21 +181,51 @@ class _TableParser(HTMLParser):
                 or self._cell is not None
                 or self._table.caption_seen
                 or self._table.rows
+                or self._column_groups_seen
             ):
                 self._table.malformed = True
                 return
             self._caption = True
             self._table.caption_seen = True
+        elif tag == "colgroup":
+            valid_attributes, has_span = _column_attributes(attrs)
+            if (
+                self._caption
+                or self._colgroup
+                or self._section is not None
+                or self._row is not None
+                or self._cell is not None
+                or self._data_structure_started
+                or not valid_attributes
+            ):
+                self._table.malformed = True
+                return
+            self._colgroup = True
+            self._colgroup_has_span = has_span
+            self._column_groups_seen = True
+        elif tag == "col":
+            valid_attributes, _ = _column_attributes(attrs)
+            if not self._colgroup or self._colgroup_has_span or not valid_attributes:
+                self._table.malformed = True
+                return
         elif tag in {"thead", "tbody", "tfoot"}:
-            if self._caption or self._section is not None or self._row is not None or self._cell is not None:
+            if (
+                self._caption
+                or self._colgroup
+                or self._section is not None
+                or self._row is not None
+                or self._cell is not None
+            ):
                 self._table.malformed = True
                 return
             self._section = tag
+            self._data_structure_started = True
         elif tag == "tr":
-            if self._caption or self._row is not None or self._cell is not None:
+            if self._caption or self._colgroup or self._row is not None or self._cell is not None:
                 self._table.malformed = True
                 return
             self._row = _Row(section=self._section or "tbody")
+            self._data_structure_started = True
         elif tag in {"th", "td"}:
             if self._caption or self._row is None or self._cell is not None:
                 self._table.malformed = True
@@ -180,6 +271,14 @@ class _TableParser(HTMLParser):
                 self._table.malformed = True
                 return
             self._section = None
+        elif tag == "colgroup":
+            if not self._colgroup or self._section is not None or self._row is not None or self._cell is not None:
+                self._table.malformed = True
+                return
+            self._colgroup = False
+            self._colgroup_has_span = False
+        elif tag == "col":
+            self._table.malformed = True
         elif tag == "caption":
             if (
                 not self._caption
@@ -194,6 +293,7 @@ class _TableParser(HTMLParser):
         elif tag == "table":
             if (
                 self._caption
+                or self._colgroup
                 or self._section is not None
                 or self._row is not None
                 or self._cell is not None
@@ -208,6 +308,10 @@ class _TableParser(HTMLParser):
             self._section = None
             self._caption = False
             self._inline_stack.clear()
+            self._colgroup = False
+            self._colgroup_has_span = False
+            self._column_groups_seen = False
+            self._data_structure_started = False
         else:
             if self._inline_stack and self._inline_stack[-1] == tag:
                 self._inline_stack.pop()
@@ -215,12 +319,14 @@ class _TableParser(HTMLParser):
                 self._table.malformed = True
 
     def handle_data(self, data: str) -> None:
-        if self._ignored_depth or self._table is None:
+        if self._ignored_depth or self._nested_table_depth or self._table is None:
             return
         if self._cell is not None:
             self._cell.parts.append(data)
         elif self._caption:
             self._table.caption_parts.append(data)
+        elif data.strip():
+            self._table.malformed = True
 
     def finish(self) -> None:
         self.close()
@@ -229,6 +335,7 @@ class _TableParser(HTMLParser):
             or self._row is not None
             or self._cell is not None
             or self._caption
+            or self._colgroup
             or self._section is not None
             or self._nested_table_depth
             or self._inline_stack

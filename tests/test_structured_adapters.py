@@ -496,6 +496,170 @@ class HtmlAdapterTest(unittest.TestCase):
                     self.assertEqual(table.rows[0].cell_status["name"], CellStatus.EXACT)
                     self.assertEqual(table.rows[0].confidence, 1.0)
 
+    def test_duplicate_casefolded_attributes_fail_closed_before_last_value_can_win(self):
+        cases = {
+            "duplicate-rowspan.html": (
+                "<table><caption>x</caption><tr><th>名称</th></tr>"
+                "<tr><td rowspan='2' ROWSPAN='1'>合成</td></tr></table>"
+            ),
+            "duplicate-colspan.html": (
+                "<table><caption>x</caption><tr><th colspan='2' COLSPAN='1'>名称</th></tr>"
+                "<tr><td>合成</td></tr></table>"
+            ),
+            "duplicate-generic-cell-attribute.html": (
+                "<table><caption>x</caption><tr><th>名称</th></tr>"
+                "<tr><td data-kind='a' DATA-KIND='b'>合成</td></tr></table>"
+            ),
+            "duplicate-table-attribute.html": (
+                "<table id='a' ID='b'><caption>x</caption><tr><th>名称</th></tr>"
+                "<tr><td>合成</td></tr></table>"
+            ),
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            for name, source in cases.items():
+                with self.subTest(name=name):
+                    path = self._write_html(directory, source, name)
+                    with self.assertRaises(HtmlStructureError):
+                        extract_html_table(path, table_index=1, expected_caption="x", mapping={"name": "名称"})
+
+    def test_nonwhitespace_text_at_table_section_or_row_level_is_malformed(self):
+        cases = {
+            "table-text.html": (
+                "<table><caption>x</caption>leak<thead><tr><th>名称</th></tr></thead>"
+                "<tbody><tr><td>合成甲</td></tr></tbody></table>"
+            ),
+            "thead-text.html": (
+                "<table><caption>x</caption><thead>leak<tr><th>名称</th></tr></thead>"
+                "<tbody><tr><td>合成甲</td></tr></tbody></table>"
+            ),
+            "tbody-text.html": (
+                "<table><caption>x</caption><thead><tr><th>名称</th></tr></thead>"
+                "<tbody>leak<tr><td>合成甲</td></tr></tbody></table>"
+            ),
+            "tfoot-text.html": (
+                "<table><caption>x</caption><thead><tr><th>名称</th></tr></thead>"
+                "<tbody><tr><td>合成甲</td></tr></tbody>"
+                "<tfoot>leak<tr><td>合成乙</td></tr></tfoot></table>"
+            ),
+            "row-text.html": (
+                "<table><caption>x</caption><thead><tr>leak<th>名称</th></tr></thead>"
+                "<tbody><tr><td>合成甲</td></tr></tbody></table>"
+            ),
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            for name, source in cases.items():
+                with self.subTest(name=name):
+                    path = self._write_html(directory, source, name)
+                    with self.assertRaises(HtmlStructureError):
+                        extract_html_table(path, table_index=1, expected_caption="x", mapping={"name": "名称"})
+
+    def test_structure_whitespace_and_ignored_payloads_keep_cell_and_caption_controls(self):
+        source = (
+            "<table>\n  <caption><span>x</span></caption>\n"
+            "<script>ignored table payload</script>\n"
+            "<thead>\n<tr>\n<th>名称</th>\n</tr>\n</thead>\n"
+            "<tbody>\n<style>ignored body payload</style>\n"
+            "<tr>\n<td><span>合成甲</span></td>\n</tr>\n</tbody>\n</table>"
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            path = self._write_html(Path(temporary), source, "whitespace-control.html")
+            table = extract_html_table(path, table_index=1, expected_caption="x", mapping={"name": "名称"})
+        self.assertEqual(table.rows[0].values["name"], "合成甲")
+        self.assertEqual(table.rows[0].cell_status["name"], CellStatus.EXACT)
+
+    def test_balanced_colgroup_and_void_col_before_table_sections_are_supported(self):
+        cases = {
+            "plain-col.html": (
+                "<table><caption>x</caption><colgroup><col><col span='2'></colgroup>"
+                "<thead><tr><th>名称</th></tr></thead>"
+                "<tbody><tr><td>合成甲</td></tr></tbody></table>"
+            ),
+            "self-closing-col.html": (
+                "<table><caption>x</caption>"
+                "<colgroup class='layout'>"
+                "<col span='1' class='name' data-purpose='layout' aria-label='name' />"
+                "</colgroup>"
+                "<tr><th>名称</th></tr><tr><td>合成甲</td></tr></table>"
+            ),
+            "group-span.html": (
+                "<table><caption>x</caption><colgroup span='1'></colgroup>"
+                "<tr><th>名称</th></tr><tr><td>合成甲</td></tr></table>"
+            ),
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            for name, source in cases.items():
+                with self.subTest(name=name):
+                    path = self._write_html(directory, source, name)
+                    try:
+                        table = extract_html_table(
+                            path,
+                            table_index=1,
+                            expected_caption="x",
+                            mapping={"name": "名称"},
+                        )
+                    except HtmlStructureError:
+                        self.fail("balanced colgroup/col markup was rejected")
+                    self.assertEqual(table.rows[0].values["name"], "合成甲")
+                    self.assertEqual(table.rows[0].cell_status["name"], CellStatus.EXACT)
+
+    def test_colgroup_rejects_wrong_parent_order_unbalanced_col_and_invalid_attributes(self):
+        cases = {
+            "col-outside-group.html": (
+                "<table><caption>x</caption><col><tr><th>名称</th></tr>"
+                "<tr><td>合成甲</td></tr></table>"
+            ),
+            "group-after-head.html": (
+                "<table><caption>x</caption><thead><tr><th>名称</th></tr></thead>"
+                "<colgroup><col></colgroup><tbody><tr><td>合成甲</td></tr></tbody></table>"
+            ),
+            "group-inside-body.html": (
+                "<table><caption>x</caption><thead><tr><th>名称</th></tr></thead>"
+                "<tbody><colgroup><col></colgroup><tr><td>合成甲</td></tr></tbody></table>"
+            ),
+            "nested-group.html": (
+                "<table><caption>x</caption><colgroup><colgroup><col></colgroup></colgroup>"
+                "<tr><th>名称</th></tr><tr><td>合成甲</td></tr></table>"
+            ),
+            "explicit-col-close.html": (
+                "<table><caption>x</caption><colgroup><col></col></colgroup>"
+                "<tr><th>名称</th></tr><tr><td>合成甲</td></tr></table>"
+            ),
+            "unclosed-group.html": (
+                "<table><caption>x</caption><colgroup><col>"
+                "<tr><th>名称</th></tr><tr><td>合成甲</td></tr></table>"
+            ),
+            "cell-only-col-attribute.html": (
+                "<table><caption>x</caption><colgroup><col rowspan='1'></colgroup>"
+                "<tr><th>名称</th></tr><tr><td>合成甲</td></tr></table>"
+            ),
+            "zero-col-span.html": (
+                "<table><caption>x</caption><colgroup><col span='0'></colgroup>"
+                "<tr><th>名称</th></tr><tr><td>合成甲</td></tr></table>"
+            ),
+            "oversized-col-span.html": (
+                "<table><caption>x</caption><colgroup><col span='1001'></colgroup>"
+                "<tr><th>名称</th></tr><tr><td>合成甲</td></tr></table>"
+            ),
+            "group-span-with-child.html": (
+                "<table><caption>x</caption><colgroup span='1'><col></colgroup>"
+                "<tr><th>名称</th></tr><tr><td>合成甲</td></tr></table>"
+            ),
+            "unknown-col-attribute.html": (
+                "<table><caption>x</caption><colgroup><col rank='1'></colgroup>"
+                "<tr><th>名称</th></tr><tr><td>合成甲</td></tr></table>"
+            ),
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            for name, source in cases.items():
+                with self.subTest(name=name):
+                    path = self._write_html(directory, source, name)
+                    with self.assertRaises(HtmlStructureError):
+                        extract_html_table(path, table_index=1, expected_caption="x", mapping={"name": "名称"})
+
 
 class FileBoundaryTest(unittest.TestCase):
     def test_html_requires_absolute_exact_suffix_regular_bounded_non_url_file(self):
