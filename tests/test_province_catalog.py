@@ -90,8 +90,6 @@ EXPECTED_MODE_AUTHORITIES = {
     "https://hudong.moe.gov.cn/jyb_xwfb/xw_zt/moe_357/2024/2024_zt12/wd/gkwd_zlhz/202406/t20240603_1133733.html",
     "https://hudong.moe.gov.cn/jyb_xxgk/xxgk_jyta/jyta_xueshengsi/201911/t20191126_409732.html",
     "https://hudong.moe.gov.cn/jyb_xwfb/s5147/202109/t20210916_563605.html",
-    "https://jy.tj.gov.cn/JYXW/GNJY/202506/t20250609_6950729.html",
-    "https://www.beijing.gov.cn/fuwu/bmfw/sy/jrts/202606/t20260609_4692338.html",
 }
 MODE_SOURCE_2019 = (
     "https://hudong.moe.gov.cn/jyb_xxgk/xxgk_jyta/jyta_xueshengsi/"
@@ -250,8 +248,9 @@ def _parse_public_https(url: str) -> tuple[str, str]:
     host = (split.hostname or "").rstrip(".").casefold()
     if not host or "." not in host:
         raise AssertionError(f"host is not public DNS-style: {url}")
-    if re.fullmatch(r"[0-9.]+", host):
-        raise AssertionError(f"ambiguous all-numeric host is forbidden: {url}")
+    numeric_component = re.compile(r"(?:[0-9]+|0x[0-9a-f]+)", re.IGNORECASE)
+    if all(numeric_component.fullmatch(label) for label in host.split(".")):
+        raise AssertionError(f"ambiguous numeric-component host is forbidden: {url}")
     try:
         ipaddress.ip_address(host)
     except ValueError:
@@ -305,6 +304,11 @@ class PublicHttpsUrlOracleTest(unittest.TestCase):
             "https://0177.0.0.1/",
             "https://127.000.000.001/",
             "https://1.2.3/",
+            "https://0x7f.0.0.1/",
+            "https://127.0.0.0x1/",
+            "https://0x7f.1/",
+            "https://0X7F.0.0.1/",
+            "https://127.0.0.0X1/",
             "https://[::1]/",
             "https://[2001:4860:4860::8888]/",
         )
@@ -348,6 +352,11 @@ class ProvinceCatalogTest(unittest.TestCase):
         self.assertEqual(self.catalog["schema_version"], "1.0")
         self.assertEqual(self.catalog["verified_at"], TASK_DATE.isoformat())
         self.assertEqual(set(self.catalog["mode_authority_urls"]), EXPECTED_MODE_AUTHORITIES)
+        self.assertEqual(len(self.catalog["mode_authority_urls"]), 4)
+        self.assertEqual(
+            {_parse_public_https(url)[0] for url in self.catalog["mode_authority_urls"]},
+            {"hudong.moe.gov.cn"},
+        )
         self.assertNotIn("www.moe.gov.cn", "\n".join(self.catalog["mode_authority_urls"]))
         coverage = self.catalog["coverage_note"]
         for required_text in ("29", "西藏", "新疆", "未纳入"):
