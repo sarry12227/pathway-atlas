@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 from collections.abc import Iterator, Mapping
+import contextlib
 from dataclasses import FrozenInstanceError, replace
 from enum import Enum
 import http.client
+import io
 import json
 import math
 import os
 from pathlib import Path
 import socket
+import shutil
 import stat
 import subprocess
 import sys
@@ -69,6 +72,51 @@ class _RepeatedCanonicalMapping(Mapping[str, object]):
 
 
 class ContractTest(unittest.TestCase):
+    def test_public_locator_contract_is_shared_by_direct_adapter_constructors(self):
+        from scripts.adapters import PublicLocatorError, validate_public_locator
+
+        safe = "page[1]/image[page-1]/bbox[1,2,3,4]"
+        self.assertEqual(safe, validate_public_locator(safe))
+        unsafe = (
+            "C:\\private\\scores.xlsx",
+            "sheet[C:relative-sheet]",
+            "sheet:C:relative-sheet",
+            "//server/share/scores.xlsx",
+            "source[/home/user/scores.html]",
+            "sheet[/opt/data/scores.xlsx]",
+            "source[https://private.example.test/item]",
+            "sheet[%TEMP%]",
+            "sheet[$HOME]",
+            "sheet[${HOME}]",
+            "student[name@example.test]",
+            "student-138-0013-8000",
+            "office-010-12345678",
+        )
+        row = ExtractedRow(
+            values={"score": 650},
+            cell_status={"score": CellStatus.EXACT},
+            location="table[1]/tbody/tr[1]",
+            confidence=1,
+        )
+        table = ExtractedTable(
+            table_id="table[1]",
+            caption="合成表",
+            sheet=None,
+            rows=(row,),
+            coverage=ExtractedCoverage(lower_score=650, upper_score=650),
+            warnings=(),
+            extraction_method="html-table",
+        )
+        for locator in unsafe:
+            with self.subTest(locator=locator):
+                with self.assertRaises(PublicLocatorError) as raised:
+                    validate_public_locator(locator)
+                self.assertNotIn(locator, str(raised.exception))
+                with self.assertRaises(PublicLocatorError):
+                    replace(row, location=locator)
+                with self.assertRaises(PublicLocatorError):
+                    replace(table, table_id=locator)
+
     def test_coverage_normalizes_mathematical_integers_and_rejects_invalid_bounds(self):
         coverage = ExtractedCoverage(630.0, 650, 100.0, 300)
         self.assertEqual(
@@ -277,6 +325,29 @@ class HtmlAdapterTest(unittest.TestCase):
                     with self.assertRaises(MappingError):
                         extract_html_table(path, table_index=1, expected_caption="x", mapping=mappings[name])
 
+    def test_nonempty_data_before_explicit_header_fails_closed(self):
+        from scripts.adapters.html_table import HtmlStructureError
+
+        with tempfile.TemporaryDirectory() as temporary:
+            path = self._write_html(
+                Path(temporary),
+                "<table><caption>x</caption>"
+                "<tr><td>650</td><td>100</td></tr>"
+                "<tr><th>分数</th><th>位次</th></tr>"
+                "<tr><td>640</td><td>200</td></tr></table>",
+                "pre-header-data.html",
+            )
+            with self.assertRaises(HtmlStructureError):
+                extract_html_table(
+                    path,
+                    table_index=1,
+                    expected_caption="x",
+                    mapping=ColumnMapping(
+                        {"score": "分数", "rank": "位次"},
+                        roles={"score": "score", "rank": "rank"},
+                    ),
+                )
+
     def test_malformed_table_fails_and_truncated_or_empty_rows_warn(self):
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
@@ -365,6 +436,238 @@ class HtmlAdapterTest(unittest.TestCase):
             )
             with self.assertRaises(StructuredValidationError):
                 extract_html_table(duplicate, table_index=1, expected_caption="x", mapping=mapping)
+
+
+class _AdmissionEvidenceBridgeContractMixin:
+    @staticmethod
+    def _candidate():
+        return SourceCandidate(
+            source_id="html-source",
+            url="https://www.hljea.org.cn/synthetic-admission.html",
+            publisher="黑龙江省招生考试院",
+            tier=SourceTier.A,
+            published_at="2026-06-25",
+            retrieved_at="2026-08-24T00:00:00Z",
+            content_hash="sha256:" + "a" * 64,
+            citation_root="https://www.hljea.org.cn/",
+            summary="合成普通批投档表",
+        )
+
+    @staticmethod
+    def _inputs():
+        from scripts.contracts import RecommendationProfile
+        from scripts.province_registry import discover_provinces
+        from scripts.query_plan import build_query_plan, load_province_catalog
+        from scripts.validate_data import ValidatedAdmissionRow
+
+        configs = discover_provinces(ROOT / "tests" / "fixtures" / "provinces")
+        config = replace(configs["演示甲省"], province="黑龙江")
+        profile = RecommendationProfile(
+            rank=1100,
+            target_province="黑龙江",
+            subject_group="物理",
+            secondary_subjects=frozenset({"化学", "地理"}),
+        )
+        plan = build_query_plan(
+            profile, config, 2026, catalog=load_province_catalog()
+        )
+        task = next(
+            item
+            for item in plan.tasks
+            if item.kind == "batch_admission"
+            and item.year == 2026
+            and item.target_name == "普通批"
+        )
+        dataset_row = ValidatedAdmissionRow.from_mapping(
+            {
+                "year": 2026,
+                "province": "黑龙江",
+                "subject_group": "物理",
+                "school_code": "SYN312A",
+                "school_name": "虚构甲大学",
+                "program_group": "第01组",
+                "min_score": 645,
+                "min_rank": 1100,
+                "remarks": "",
+            }
+        )
+        adapter_row = ExtractedRow(
+            values={
+                "school_code": "SYN312A",
+                "school_name": "虚构甲大学",
+                "program_group": "第01组",
+                "min_score": 645,
+                "min_rank": 1100,
+            },
+            cell_status={
+                "school_code": CellStatus.EXACT,
+                "school_name": CellStatus.EXACT,
+                "program_group": CellStatus.EXACT,
+                "min_score": CellStatus.EXACT,
+                "min_rank": CellStatus.EXACT,
+            },
+            location="table[1]/tbody/tr[1]",
+            confidence=1,
+        )
+        table = ExtractedTable(
+            table_id="table[1]",
+            caption="普通批投档",
+            sheet=None,
+            rows=(adapter_row,),
+            coverage=ExtractedCoverage(
+                lower_score=645,
+                upper_score=645,
+                lower_rank=1100,
+                upper_rank=1100,
+            ),
+            warnings=(),
+            extraction_method="html-table",
+        )
+        return task, dataset_row, adapter_row, table
+
+    def test_bridge_reuses_public_whole_row_hash_and_keeps_coverage_status_separate(self):
+        from scripts.adapters.admission_bridge import bridge_admission_evidence
+        from scripts.validate_data import admission_row_hash
+
+        task, dataset_row, adapter_row, table = self._inputs()
+        candidate = self._candidate()
+        with mock.patch(
+            "scripts.adapters.admission_bridge.admission_row_hash",
+            wraps=admission_row_hash,
+        ) as hasher:
+            bridged = bridge_admission_evidence(
+                table=table,
+                adapter_row=adapter_row,
+                task=task,
+                dataset_row=dataset_row,
+                fact_id="html-admission-row",
+                candidates=(candidate,),
+                coverage_status=EvidenceStatus.PARTIAL,
+            )
+        hasher.assert_called_once_with(dataset_row)
+        self.assertEqual(bridged.admission_row_hash, admission_row_hash(dataset_row))
+        self.assertEqual(bridged.coverage_status, EvidenceStatus.PARTIAL)
+        self.assertEqual(bridged.fact.status, EvidenceStatus.OFFICIAL)
+        self.assertEqual(bridged.fact.value["coverage_status"], "partial")
+        self.assertEqual(
+            bridged.fact.value["row_hash"], bridged.admission_row_hash
+        )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            store = EvidenceStore.create(
+                Path(temporary).resolve(), CapabilityReport(CapabilityTier.OFFLINE)
+            )
+            store.add_candidate(candidate)
+            bridged.persist(store)
+            store.finalize()
+            validation = validate_bundle_snapshot(store.session_path)
+        self.assertEqual(validation.issues, ())
+        self.assertIsNotNone(validation.snapshot)
+        fact = validation.snapshot.facts[0].to_dict()
+        self.assertEqual(fact["value"]["row_hash"], admission_row_hash(dataset_row))
+        self.assertEqual(fact["value"]["coverage_status"], "partial")
+        self.assertEqual(fact["status"], "official")
+
+    def test_bridge_rejects_detached_nonexact_or_context_mismatched_rows(self):
+        from scripts.adapters.admission_bridge import (
+            AdmissionBridgeError,
+            bridge_admission_evidence,
+        )
+        from scripts.contracts import RecommendationProfile
+        from scripts.province_registry import discover_provinces
+        from scripts.query_plan import build_query_plan, load_province_catalog
+
+        task, dataset_row, adapter_row, table = self._inputs()
+        arguments = {
+            "table": table,
+            "adapter_row": adapter_row,
+            "task": task,
+            "dataset_row": dataset_row,
+            "fact_id": "admission-row",
+            "candidates": (self._candidate(),),
+            "coverage_status": EvidenceStatus.PARTIAL,
+        }
+        detached = replace(adapter_row)
+        uncertain = replace(
+            adapter_row,
+            cell_status={**adapter_row.cell_status, "min_rank": CellStatus.UNCERTAIN},
+        )
+        config = replace(
+            discover_provinces(ROOT / "tests" / "fixtures" / "provinces")[
+                "演示甲省"
+            ],
+            province="黑龙江",
+        )
+        wrong_task = next(
+            item
+            for item in build_query_plan(
+                RecommendationProfile(
+                    rank=1100,
+                    target_province="黑龙江",
+                    subject_group="物理",
+                    secondary_subjects=frozenset({"化学", "地理"}),
+                ),
+                config,
+                2026,
+                catalog=load_province_catalog(),
+            ).tasks
+            if item.kind == "score_table"
+        )
+        for changes in (
+            {"adapter_row": detached},
+            {"table": replace(table, rows=(uncertain,)), "adapter_row": uncertain},
+            {"task": wrong_task},
+        ):
+            with self.subTest(changes=tuple(changes)), self.assertRaises(
+                AdmissionBridgeError
+            ):
+                bridge_admission_evidence(**{**arguments, **changes})
+
+
+class AdmissionEvidenceBridgeContractTest(
+    _AdmissionEvidenceBridgeContractMixin, unittest.TestCase
+):
+    def test_package_and_flat_imports_are_lazy_and_perform_no_io(self):
+        cases = (
+            (ROOT, "scripts.adapters.admission_bridge"),
+            (ROOT / "scripts", "adapters.admission_bridge"),
+        )
+        for search_root, module_name in cases:
+            with self.subTest(module=module_name):
+                code = f"""
+import pathlib, socket, sys
+sys.path.insert(0, {str(search_root)!r})
+def blocked(*args, **kwargs):
+    raise AssertionError('I/O during import')
+pathlib.Path.open = blocked
+pathlib.Path.read_bytes = blocked
+pathlib.Path.read_text = blocked
+socket.create_connection = blocked
+socket.getaddrinfo = blocked
+__import__({module_name!r})
+print('ok')
+"""
+                completed = subprocess.run(
+                    [sys.executable, "-I", "-S", "-c", code],
+                    cwd=ROOT,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(
+                    completed.returncode,
+                    0,
+                    completed.stdout + completed.stderr,
+                )
+                self.assertEqual(completed.stdout.strip(), "ok")
+
+
+class HtmlAdapterStructureTest(unittest.TestCase):
+    @staticmethod
+    def _write_html(directory: Path, text: str, name: str = "input.html") -> Path:
+        path = (directory / name).resolve()
+        path.write_text(text, encoding="utf-8")
+        return path
 
     def test_masked_numeric_cells_remain_nonexact_and_do_not_fabricate_coverage(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -839,6 +1142,286 @@ class FileBoundaryTest(unittest.TestCase):
         self.assertIsNone(caught.__cause__)
         self.assertTrue(caught.__suppress_context__)
         self.assertNotIn(secret, "".join(traceback.format_exception(caught)))
+
+
+class AdmissionAdapterEndToEndTest(unittest.TestCase):
+    @staticmethod
+    def _mapping() -> ColumnMapping:
+        return ColumnMapping(
+            {
+                "school_code": "院校代码",
+                "school_name": "院校名称",
+                "program_group": "专业组",
+                "min_score": "最低分",
+                "min_rank": "最低位次",
+            },
+            roles={"min_score": "score", "min_rank": "rank"},
+            score_scale=(0, 750),
+        )
+
+    def _dataset_context(self, workspace: Path):
+        from scripts.contracts import RecommendationProfile
+        from scripts.query_plan import build_query_plan, load_province_catalog
+        from scripts.validate_data import validate_dataset_snapshot
+
+        dataset = workspace / "dataset"
+        shutil.copytree(ROOT / "tests" / "fixtures" / "provinces" / "demo-312", dataset)
+        metadata_path = dataset / "province.json"
+        metadata = json.loads(metadata_path.read_text("utf-8"))
+        metadata["province"] = "黑龙江"
+        metadata_path.write_text(
+            json.dumps(metadata, ensure_ascii=False), encoding="utf-8"
+        )
+        admission_path = dataset / "tou_dang.csv"
+        admission_path.write_text(
+            admission_path.read_text("utf-8").replace("演示甲省", "黑龙江"),
+            encoding="utf-8",
+        )
+        profile_path = workspace / "profile.json"
+        profile = json.loads(
+            (ROOT / "tests" / "fixtures" / "profiles" / "demo.json").read_text(
+                "utf-8"
+            )
+        )
+        profile["province"] = "黑龙江"
+        profile_path.write_text(
+            json.dumps(profile, ensure_ascii=False), encoding="utf-8"
+        )
+
+        validation = validate_dataset_snapshot(dataset.resolve())
+        self.assertEqual(validation.issues, ())
+        self.assertIsNotNone(validation.snapshot)
+        snapshot = validation.snapshot
+        recommendation_profile = RecommendationProfile(
+            rank=1100,
+            target_province="黑龙江",
+            subject_group="物理",
+            secondary_subjects=frozenset({"化学", "地理"}),
+        )
+        plan = build_query_plan(
+            recommendation_profile,
+            snapshot.config,
+            2026,
+            catalog=load_province_catalog(),
+        )
+        task = next(
+            item
+            for item in plan.tasks
+            if item.kind == "batch_admission"
+            and item.target_name == "普通批"
+            and item.year == 2026
+        )
+        return dataset, profile_path, snapshot.admission_rows[0], task
+
+    def _html_table(self, workspace: Path):
+        path = (workspace / "admission.html").resolve()
+        path.write_text(
+            "<table><caption>普通批投档</caption><tr>"
+            "<th>院校代码</th><th>院校名称</th><th>专业组</th>"
+            "<th>最低分</th><th>最低位次</th></tr>"
+            "<tr><td>SYN312A</td><td>虚构甲大学</td><td>第01组</td>"
+            "<td>645</td><td>1100</td></tr></table>",
+            encoding="utf-8",
+        )
+        return extract_html_table(
+            path,
+            table_index=1,
+            expected_caption="普通批投档",
+            mapping=self._mapping(),
+        )
+
+    def _xlsx_table(self, workspace: Path):
+        from openpyxl import Workbook
+
+        path = (workspace / "admission.xlsx").resolve()
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.title = "普通批"
+        sheet.append(("院校代码", "院校名称", "专业组", "最低分", "最低位次"))
+        sheet.append(("SYN312A", "虚构甲大学", "第01组", 645, 1100))
+        workbook.save(path)
+        workbook.close()
+        return extract_spreadsheet(path, sheet="普通批", mapping=self._mapping())
+
+    def _ocr_table(self, workspace: Path):
+        from scripts.adapters.ocr_rows import normalize_ocr_rows
+
+        labels = ("院校代码", "院校名称", "专业组", "最低分", "最低位次")
+        rows = (
+            ("SYN312A", "虚构甲大学", "第01组", 645, 1100),
+            ("SYN312B", "虚构乙大学", "第02组", 640, 1200),
+        )
+        payload_rows = []
+        for row_index, values in enumerate(rows):
+            top = row_index * 50
+            cells = []
+            for column_index, (label, value) in enumerate(zip(labels, values)):
+                left = column_index * 100
+                cells.append(
+                    {
+                        "label": label,
+                        "bbox": [left, top, left + 90, top + 40],
+                        "raw_text": str(value),
+                        "normalized_value": value,
+                        "confidence": 0.99,
+                        "verified": True,
+                    }
+                )
+            payload_rows.append(
+                {
+                    "page_number": 1,
+                    "image_id": "page-1",
+                    "bbox": [0, top, 500, top + 40],
+                    "cropped": False,
+                    "cells": cells,
+                }
+            )
+        payload = {
+            "schema_version": 1,
+            "document_id": "ocr-admission",
+            "total_pages": 1,
+            "covered_pages": [1],
+            "images": [{"page_number": 1, "image_id": "page-1"}],
+            "rows": payload_rows,
+            "anchors": [
+                {
+                    "row_index": 1,
+                    "label": "院校代码",
+                    "bbox": [0, 0, 90, 40],
+                    "raw_text": "SYN312A",
+                    "normalized_value": "SYN312A",
+                },
+                {
+                    "row_index": 2,
+                    "label": "最低位次",
+                    "bbox": [400, 50, 490, 90],
+                    "raw_text": "1200",
+                    "normalized_value": 1200,
+                },
+            ],
+        }
+        path = (workspace / "admission-ocr.json").resolve()
+        path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        return normalize_ocr_rows(
+            path,
+            self._mapping(),
+            score_scale=(0, 750),
+            min_exact_confidence=0.95,
+        )
+
+    def test_html_xlsx_and_ocr_reach_authenticated_markdown_and_docx(self):
+        from scripts import docx_export, generate_report
+        from scripts.adapters.admission_bridge import bridge_admission_evidence
+        from scripts.validate_data import admission_row_hash
+
+        builders = {
+            "html": self._html_table,
+            "xlsx": self._xlsx_table,
+            "ocr": self._ocr_table,
+        }
+        for index, (adapter_name, build_table) in enumerate(builders.items()):
+            with self.subTest(adapter=adapter_name), tempfile.TemporaryDirectory() as temporary:
+                workspace = Path(temporary).resolve()
+                dataset, profile_path, dataset_row, task = self._dataset_context(workspace)
+                table = build_table(workspace)
+                adapter_row = next(
+                    row
+                    for row in table.rows
+                    if row.values["school_code"] == "SYN312A"
+                )
+                source_id = f"{adapter_name}-admission-source"
+                candidate = SourceCandidate(
+                    source_id=source_id,
+                    url=f"https://www.hljea.org.cn/{adapter_name}-admission",
+                    publisher="黑龙江省招生考试院",
+                    tier=SourceTier.A,
+                    published_at="2026-06-25",
+                    retrieved_at="2026-08-24T00:00:00Z",
+                    content_hash="sha256:" + chr(ord("a") + index) * 64,
+                    citation_root="https://www.hljea.org.cn/",
+                    summary=f"{adapter_name} 合成普通批投档表",
+                )
+                bridged = bridge_admission_evidence(
+                    table=table,
+                    adapter_row=adapter_row,
+                    task=task,
+                    dataset_row=dataset_row,
+                    fact_id=f"{adapter_name}-admission-row",
+                    candidates=(candidate,),
+                    coverage_status=EvidenceStatus.PARTIAL,
+                )
+                self.assertEqual(
+                    bridged.admission_row_hash, admission_row_hash(dataset_row)
+                )
+                self.assertEqual(bridged.fact.status, EvidenceStatus.OFFICIAL)
+                self.assertEqual(
+                    bridged.fact.value["coverage_status"], "partial"
+                )
+
+                evidence_root = workspace / "evidence-root"
+                evidence_root.mkdir()
+                store = EvidenceStore.create(
+                    evidence_root,
+                    CapabilityReport(
+                        tier=CapabilityTier.STANDARD,
+                        host_capabilities=("browse", "search"),
+                        available_capabilities=("browse", "search"),
+                        missing_capabilities=("pdfplumber", "vision"),
+                        degradations=("synthetic offline replay",),
+                        python_version="3.14.0",
+                        optional_modules=("docx", "openpyxl"),
+                    ),
+                )
+                store.add_candidate(candidate)
+                bridged.persist(store)
+                store.finalize()
+                validation = validate_bundle_snapshot(store.session_path)
+                self.assertEqual(validation.issues, ())
+                self.assertIsNotNone(validation.snapshot)
+
+                markdown_stdout, markdown_stderr = io.StringIO(), io.StringIO()
+                with contextlib.redirect_stdout(markdown_stdout), contextlib.redirect_stderr(
+                    markdown_stderr
+                ):
+                    markdown_exit = generate_report.main(
+                        [
+                            "--dataset",
+                            str(dataset),
+                            "--profile",
+                            str(profile_path),
+                            "--evidence",
+                            str(store.session_path),
+                        ]
+                    )
+                self.assertEqual(markdown_exit, 0, markdown_stderr.getvalue())
+                self.assertEqual(markdown_stderr.getvalue(), "")
+                self.assertIn("虚构甲大学", markdown_stdout.getvalue())
+
+                docx_directory = workspace / "docx-output"
+                docx_directory.mkdir()
+                docx_path = docx_directory / docx_export.PUBLIC_DOCX_BASENAME
+                docx_stdout, docx_stderr = io.StringIO(), io.StringIO()
+                with contextlib.redirect_stdout(docx_stdout), contextlib.redirect_stderr(
+                    docx_stderr
+                ):
+                    docx_exit = docx_export.main(
+                        [
+                            "--dataset",
+                            str(dataset),
+                            "--profile",
+                            str(profile_path),
+                            "--evidence",
+                            str(store.session_path),
+                            "--output",
+                            str(docx_path),
+                        ]
+                    )
+                self.assertEqual(docx_exit, 0, docx_stderr.getvalue())
+                self.assertEqual(docx_stderr.getvalue(), "")
+                self.assertTrue(zipfile.is_zipfile(docx_path))
+                with zipfile.ZipFile(docx_path) as archive:
+                    document_xml = archive.read("word/document.xml").decode("utf-8")
+                self.assertIn("虚构甲大学", document_xml)
 
 
 class SpreadsheetAdapterTest(unittest.TestCase):

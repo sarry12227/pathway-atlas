@@ -48,6 +48,8 @@ offline 仅消费已认证的用户提供本地材料，不声称当前或实时
 
 HTML、XLSX、PDF、OCR、QR 分别进入匹配 adapter；下载只走 secure downloader。每项事实保存 year、method、locator、source provenance，并按[信源规范](references/source-policy.md)完成分级、独立性、去重、采纳与冲突处理；冲突不得取平均或挑选方便值。
 
+普通批投档行只经 `scripts.adapters.admission_bridge` 组合 exact adapter row、对应 `QueryTask`、验证器返回的 `ValidatedAdmissionRow` 与 extraction coverage；整行绑定委托公共 `admission_row_hash`，并单独保留 `coverage_status`。
+
 依次运行 `python scripts/validate_data.py` 和 `python scripts/validate_evidence.py`。形成 authenticated snapshot 之前不得给出数字或开始计算；按信源规范仍未达到采纳门槛时保留 `partial`、`conflict` 或 `missing`，不降低门槛。
 
 完成：证据包已最终化且验证成功，或依赖该事实的输出明确 unavailable。

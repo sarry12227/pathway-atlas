@@ -419,6 +419,14 @@ def extract_html_table(
 def _header_position(table: _Table) -> int:
     for index, row in enumerate(table.rows):
         if any(cell.kind == "th" for cell in row.cells):
+            if any(
+                cell.raw_text.strip()
+                for preceding in table.rows[:index]
+                for cell in preceding.cells
+            ):
+                raise HtmlStructureError(
+                    "selected table contains data before its explicit header"
+                )
             return index
     raise MappingError("selected table has no explicit header row")
 

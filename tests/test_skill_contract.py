@@ -191,6 +191,25 @@ class SkillContractTest(unittest.TestCase):
         self.assertRegex(calculation, r"evidence status.*coverage")
         self.assertIsNone(re.search(r"(?:rank|位次).{0,20}[+-]\s*[0-9]", calculation, re.I))
 
+    def test_admission_rows_use_the_public_typed_bridge_without_rule_duplication(self):
+        evidence = stage_sections(self.body)["证据归一化"]
+        for marker in (
+            "scripts.adapters.admission_bridge",
+            "QueryTask",
+            "ValidatedAdmissionRow",
+            "admission_row_hash",
+            "coverage_status",
+        ):
+            self.assertIn(marker, evidence)
+        self.assertIsNone(
+            re.search(
+                r"(?:coverage_status|admission_row_hash)[^。\n]{0,30}"
+                r"(?:阈值|至少|required\s+sources?|minimum)",
+                evidence,
+                re.IGNORECASE,
+            )
+        )
+
     def test_evidence_admission_delegates_to_policy_without_official_only_downgrade(self):
         evidence = stage_sections(self.body)["证据归一化"]
         self.assertRegex(

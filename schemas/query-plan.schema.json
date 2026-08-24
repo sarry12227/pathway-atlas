@@ -2,13 +2,14 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://example.invalid/shengxue-skill/schemas/query-plan.schema.json",
   "title": "Deterministic research query plan",
-  "$comment": "Structure is validated here; per-task ID, context, target, availability, candidate, tier, and extraction semantics also require the declared pure runtime validator.",
+  "$comment": "Structure is validated here; per-task ID, catalog discovery context, target, availability, candidate, tier, and extraction semantics also require the declared pure runtime validator.",
   "x-semantic-validator": {
     "locator": "scripts.query_plan.validate_query_plan_payload",
     "flat_locator": "query_plan.validate_query_plan_payload",
     "checks": [
       "task_id_digest",
       "task_context",
+      "catalog_discovery_context",
       "structured_target",
       "explicit_three_year_window",
       "availability_expectation",
@@ -24,6 +25,9 @@
     "province",
     "exam_year",
     "subject_group",
+    "authority_name",
+    "official_roots",
+    "catalog_verified_at",
     "tasks"
   ],
   "properties": {
@@ -42,9 +46,23 @@
     "subject_group": {
       "$ref": "#/$defs/publicText"
     },
+    "authority_name": {
+      "$ref": "#/$defs/publicText"
+    },
+    "official_roots": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/officialRoot"}
+    },
+    "catalog_verified_at": {
+      "type": "string",
+      "format": "date",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+    },
     "tasks": {
       "type": "array",
-      "minItems": 6,
+      "minItems": 21,
       "uniqueItems": true,
       "items": {
         "$ref": "#/$defs/queryTask"
@@ -62,6 +80,10 @@
       "type": "string",
       "pattern": "^[a-z][a-z0-9_]{0,63}$"
     },
+    "officialRoot": {
+      "type": "string",
+      "pattern": "^https://[^/?#\\s]+(?:/[^?#\\s]*)?$"
+    },
     "queryTask": {
       "type": "object",
       "additionalProperties": false,
@@ -71,6 +93,8 @@
         "province",
         "year",
         "subject_group",
+        "authority_name",
+        "official_roots",
         "target_name",
         "query_variants",
         "preferred_source_tiers",
@@ -87,10 +111,16 @@
         "kind": {
           "type": "string",
           "enum": [
+            "province_policy",
             "score_table",
-            "admission",
+            "batch_admission",
             "joy_report",
-            "pathway_policy"
+            "enrollment_plan",
+            "subject_requirement",
+            "strong_foundation",
+            "comprehensive_evaluation",
+            "hk_macao_admission",
+            "special_pathway"
           ]
         },
         "province": {
@@ -103,6 +133,15 @@
         },
         "subject_group": {
           "$ref": "#/$defs/publicText"
+        },
+        "authority_name": {
+          "$ref": "#/$defs/publicText"
+        },
+        "official_roots": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/officialRoot"}
         },
         "target_name": {
           "type": ["string", "null"],

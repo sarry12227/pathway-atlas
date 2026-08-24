@@ -100,6 +100,23 @@ class InstructionContractTest(unittest.TestCase):
         self.assertTrue(SOURCE_POLICY.is_file(), "missing references/source-policy.md")
         self.assertTrue(RETRIEVAL_PLAYBOOK.is_file(), "missing references/retrieval-playbook.md")
 
+    def test_playbook_uses_the_typed_admission_bridge_as_a_thin_handoff(self):
+        extraction = section(self.playbook, "## 5. 通过匹配适配器提取")
+        for marker in (
+            "scripts.adapters.admission_bridge.bridge_admission_evidence",
+            "QueryTask",
+            "ValidatedAdmissionRow",
+            "admission_row_hash",
+            "coverage_status",
+            "EvidenceStore",
+        ):
+            self.assertIn(marker, extraction)
+        self.assertNotRegex(
+            extraction,
+            r"(?:A|B|C)\s*(?:级|tier)[^。\n|]{0,30}"
+            r"(?:至少|required|minimum)[^。\n|]{0,12}[0-9]",
+        )
+
     def test_required_host_guides_exist(self):
         self.assertEqual(
             tuple(sorted(path.name for path in (ROOT / "references" / "hosts").glob("*.md"))),

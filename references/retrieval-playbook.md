@@ -56,6 +56,8 @@ $ python -m scripts.validate_evidence --help
 
 按媒体类型选择 HTML、spreadsheet、PDF、OCR-row 或 QR adapter。保存字段级 `page/sheet/table/row` 或 `page/image/bbox` locator、coverage 和 ordered warnings。QR 输入是 host-decoded text，并只通过 secure downloader 获取目标；adapter 不自行上传图片或创建隐藏识别路径。
 
+普通批投档行的唯一 handoff 是 `scripts.adapters.admission_bridge.bridge_admission_evidence`：组合 exact adapter row、对应 `QueryTask`、验证器返回的 `ValidatedAdmissionRow` 与 extraction coverage，委托公共 `admission_row_hash` 生成整行绑定，并将 `coverage_status` 与 evidence status 分开交给 `EvidenceStore`；本流程不重写这些语义。
+
 完成标准：每个 kept candidate 都产生显式 extraction coverage/warnings，或一个受控 missing result。
 
 ## 6. 证据采纳

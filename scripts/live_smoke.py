@@ -10,7 +10,6 @@ import shutil
 import stat
 import sys
 import tempfile
-import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -34,6 +33,7 @@ from scripts.downloader import (
     download_public_file,
 )
 from scripts.downloader import _MEDIA_TYPE_EXTENSIONS
+from scripts.query_plan import load_province_catalog
 from scripts.source_policy import canonical_site_identity
 
 
@@ -43,7 +43,7 @@ _STATES = frozenset({"healthy", "redirect_review", "unavailable"})
 _REASONS = frozenset({"timeout", "dns_or_network", "http_error", "redirect_error", "unsupported_content_type", "response_too_large", "security_rejection", "storage_error"})
 _MEDIA_TYPE = re.compile(r"^[A-Za-z0-9!#$&^_.+-]+/[A-Za-z0-9!#$&^_.+-]+$")
 _UTC = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
-_CATALOG_PATH = Path(__file__).resolve().parents[1] / "references" / "provinces" / "index.json"
+_CATALOG_PATH = Path(__file__).parent.parent / "references" / "provinces" / "index.json"
 # IANA reserves ``alt`` for special use and ``arpa`` exclusively for Internet
 # infrastructure.  Blocking the complete namespaces also covers future ARPA
 # delegations without treating ordinary digit-bearing public DNS names as local.
@@ -228,46 +228,9 @@ def check_official_root(province: str, official_roots: tuple[str, ...], *, downl
     return outcome
 
 
-def _strict_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-    result: dict[str, Any] = {}
-    for key, value in pairs:
-        if key in result: raise ValueError("duplicate key")
-        result[key] = value
-    return result
-
-
-def _reject_constant(_value: str) -> None: raise ValueError("non-finite")
-
-
 def _load_province(token: str) -> tuple[str, tuple[str, ...]]:
-    payload = json.loads(_CATALOG_PATH.read_bytes().decode("utf-8"), object_pairs_hook=_strict_object, parse_constant=_reject_constant)
-    if (not isinstance(token, str) or not isinstance(payload, dict)
-            or set(payload) != {"schema_version", "verified_at", "coverage_note", "mode_authority_urls", "provinces"}
-            or payload["schema_version"] != "1.0" or not isinstance(payload["verified_at"], str)
-            or not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", payload["verified_at"])
-            or not isinstance(payload["coverage_note"], str) or not payload["coverage_note"]
-            or not isinstance(payload["mode_authority_urls"], list) or not payload["mode_authority_urls"]
-            or not all(_safe_url(url, catalog=True) for url in payload["mode_authority_urls"])
-            or not isinstance(payload["provinces"], list) or not payload["provinces"]): raise ValueError("invalid catalog")
-    needle = unicodedata.normalize("NFKC", token).casefold()
-    matches = []
-    aliases_seen: set[str] = set()
-    for record in payload["provinces"]:
-        if not isinstance(record, dict) or set(record) != {"province", "aliases", "mode", "authority_name", "official_roots", "mode_source_url", "verified_at", "notes"}: raise ValueError("invalid catalog")
-        roots = record["official_roots"]
-        aliases = record["aliases"]
-        if (not isinstance(record["province"], str) or not record["province"] or not isinstance(aliases, list) or not aliases or not all(isinstance(item, str) and item.strip() for item in aliases)
-                or record["mode"] not in {"3+3", "3+1+2"} or not isinstance(record["authority_name"], str) or not record["authority_name"]
-                or not isinstance(roots, list) or not roots or not all(_safe_url(root, catalog=True) for root in roots)
-                or not _safe_url(record["mode_source_url"], catalog=True) or not isinstance(record["verified_at"], str) or not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", record["verified_at"])
-                or not isinstance(record["notes"], str) or not record["notes"]): raise ValueError("invalid catalog")
-        keys = [unicodedata.normalize("NFKC", item).casefold() for item in [record["province"], *aliases]]
-        normalized_keys = set(keys)
-        if aliases_seen.intersection(normalized_keys): raise ValueError("ambiguous aliases")
-        aliases_seen.update(normalized_keys)
-        if needle in keys: matches.append((record["province"], tuple(roots)))
-    if len(matches) != 1: raise ValueError("unknown province")
-    return matches[0]
+    discovery = load_province_catalog(_CATALOG_PATH).resolve(token)
+    return discovery.province, discovery.official_roots
 
 
 class _SafeArgumentParser(argparse.ArgumentParser):

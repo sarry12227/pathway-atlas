@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+from datetime import date
 import hashlib
+import ipaddress
 import json
 import math
 import os
@@ -19,6 +21,7 @@ import stat
 import sys
 from typing import Any
 import unicodedata
+from urllib.parse import urlsplit
 
 _MISSING_LOCAL_CAPABILITY: str | None = None
 
@@ -79,7 +82,20 @@ if _MISSING_LOCAL_CAPABILITY is not None:
 
 
 _SCHEMA_VERSION = "1.0"
-_KINDS = frozenset({"score_table", "admission", "joy_report", "pathway_policy"})
+_KINDS = frozenset(
+    {
+        "province_policy",
+        "score_table",
+        "batch_admission",
+        "joy_report",
+        "enrollment_plan",
+        "subject_requirement",
+        "strong_foundation",
+        "comprehensive_evaluation",
+        "hk_macao_admission",
+        "special_pathway",
+    }
+)
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _FIELD_ID = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _ENV_REFERENCE = re.compile(
@@ -95,8 +111,36 @@ _FRESHNESS_BY_EXPECTATION = {
 }
 _GENERIC_KIND_SYNONYMS = {
     "joy_report": ("高中喜报", "高考光荣榜", "高中升学成果"),
-    "pathway_policy": ("多元升学", "特殊招生", "升学路径政策"),
 }
+_CATALOG_PATH = Path(__file__).parent.parent / "references" / "provinces" / "index.json"
+_CATALOG_FIELDS = frozenset(
+    {"schema_version", "verified_at", "coverage_note", "mode_authority_urls", "provinces"}
+)
+_CATALOG_RECORD_FIELDS = frozenset(
+    {
+        "province",
+        "aliases",
+        "mode",
+        "authority_name",
+        "official_roots",
+        "mode_source_url",
+        "verified_at",
+        "notes",
+    }
+)
+_CATALOG_PROVINCES = (
+    "北京", "天津", "上海", "浙江", "山东", "海南", "河北", "山西", "内蒙古",
+    "辽宁", "吉林", "黑龙江", "江苏", "安徽", "福建", "江西", "河南", "湖北",
+    "湖南", "广东", "广西", "重庆", "四川", "贵州", "云南", "陕西", "甘肃",
+    "青海", "宁夏",
+)
+_CATALOG_MODES = {
+    **{name: "3+3" for name in _CATALOG_PROVINCES[:6]},
+    **{name: "3+1+2" for name in _CATALOG_PROVINCES[6:]},
+}
+_SPECIAL_USE_SUFFIXES = frozenset(
+    {"alt", "arpa", "example", "internal", "invalid", "local", "localhost", "onion", "test"}
+)
 _TASK_FIELDS = frozenset(
     {
         "task_id",
@@ -104,6 +148,8 @@ _TASK_FIELDS = frozenset(
         "province",
         "year",
         "subject_group",
+        "authority_name",
+        "official_roots",
         "target_name",
         "query_variants",
         "preferred_source_tiers",
@@ -114,7 +160,16 @@ _TASK_FIELDS = frozenset(
     }
 )
 _PLAN_FIELDS = frozenset(
-    {"schema_version", "province", "exam_year", "subject_group", "tasks"}
+    {
+        "schema_version",
+        "province",
+        "exam_year",
+        "subject_group",
+        "authority_name",
+        "official_roots",
+        "catalog_verified_at",
+        "tasks",
+    }
 )
 _PROFILE_FIELDS = frozenset(
     {
@@ -141,6 +196,246 @@ class QueryPlanCapabilityError(RuntimeError):
 
 class QueryPlanInputError(ValueError):
     """The CLI received an invalid argument shape."""
+
+
+class ProvinceCatalogError(ValueError):
+    """The discovery catalog is malformed or cannot resolve one province."""
+
+
+def _calendar_date(value: Any, name: str) -> str:
+    if not isinstance(value, str) or value != value.strip():
+        raise ProvinceCatalogError(f"{name} must be an ISO calendar date")
+    try:
+        parsed = date.fromisoformat(value)
+    except ValueError:
+        raise ProvinceCatalogError(f"{name} must be an ISO calendar date") from None
+    if parsed.isoformat() != value:
+        raise ProvinceCatalogError(f"{name} must be an ISO calendar date")
+    return value
+
+
+def _public_https_url(value: Any, name: str) -> str:
+    """Validate one catalog URL while preserving its exact tracked spelling."""
+
+    if not isinstance(value, str) or not value or value != value.strip():
+        raise ProvinceCatalogError(f"{name} must be a public HTTPS URL")
+    if any(ord(character) < 32 or ord(character) == 127 for character in value):
+        raise ProvinceCatalogError(f"{name} must be a public HTTPS URL")
+    try:
+        parsed = urlsplit(value)
+        hostname = parsed.hostname
+        port = parsed.port
+    except ValueError:
+        raise ProvinceCatalogError(f"{name} must be a public HTTPS URL") from None
+    if (
+        parsed.scheme != "https"
+        or not hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+        or port not in {None, 443}
+        or not parsed.path.startswith("/")
+        or "\\" in parsed.path
+        or any(component in {".", ".."} for component in parsed.path.split("/"))
+    ):
+        raise ProvinceCatalogError(f"{name} must be a public HTTPS URL")
+    try:
+        canonical_host = hostname.encode("idna").decode("ascii").casefold().rstrip(".")
+    except UnicodeError:
+        raise ProvinceCatalogError(f"{name} must use a public DNS host") from None
+    labels = canonical_host.split(".")
+    if (
+        len(labels) < 2
+        or any(
+            not label
+            or len(label) > 63
+            or re.fullmatch(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?", label) is None
+            for label in labels
+        )
+        or any(canonical_host == suffix or canonical_host.endswith("." + suffix) for suffix in _SPECIAL_USE_SUFFIXES)
+        or all(re.fullmatch(r"(?:[0-9]+|0x[0-9a-f]+)", label) for label in labels)
+    ):
+        raise ProvinceCatalogError(f"{name} must use a public DNS host")
+    try:
+        ipaddress.ip_address(canonical_host)
+    except ValueError:
+        pass
+    else:
+        raise ProvinceCatalogError(f"{name} must use a public DNS host")
+    return value
+
+
+def _exact_string_collection(value: Any, name: str) -> tuple[str, ...]:
+    if isinstance(value, (str, bytes, bytearray)):
+        raise TypeError(f"{name} must be an ordered string collection")
+    try:
+        items = tuple(value)
+    except TypeError as error:
+        raise TypeError(f"{name} must be an ordered string collection") from error
+    if not items or any(
+        not isinstance(item, str) or not item or item != item.strip()
+        for item in items
+    ):
+        raise ValueError(f"{name} must contain nonempty exact strings")
+    if len(items) != len(set(items)):
+        raise ValueError(f"{name} must not contain duplicates")
+    return items
+
+
+@dataclass(frozen=True)
+class ProvinceDiscovery:
+    """Immutable discovery metadata sourced only from the tracked catalog."""
+
+    province: str
+    aliases: tuple[str, ...]
+    mode: str
+    authority_name: str
+    official_roots: tuple[str, ...]
+    mode_source_url: str
+    verified_at: str
+    notes: str
+
+    def __post_init__(self) -> None:
+        province = _public_text(self.province, "catalog province")
+        aliases = _text_collection(self.aliases, "catalog aliases", nonempty=True)
+        if province not in aliases:
+            raise ProvinceCatalogError("catalog aliases must contain the canonical province")
+        if self.mode not in {"3+3", "3+1+2"}:
+            raise ProvinceCatalogError("catalog mode is unsupported")
+        authority = _public_text(self.authority_name, "catalog authority_name", maximum=512)
+        roots = tuple(
+            _public_https_url(item, "catalog official root")
+            for item in _exact_string_collection(self.official_roots, "catalog official_roots")
+        )
+        if len(roots) != len(set(roots)):
+            raise ProvinceCatalogError("catalog official roots must be unique")
+        object.__setattr__(self, "province", province)
+        object.__setattr__(self, "aliases", aliases)
+        object.__setattr__(self, "authority_name", authority)
+        object.__setattr__(self, "official_roots", roots)
+        object.__setattr__(
+            self,
+            "mode_source_url",
+            _public_https_url(self.mode_source_url, "catalog mode source URL"),
+        )
+        object.__setattr__(self, "verified_at", _calendar_date(self.verified_at, "catalog record verified_at"))
+        object.__setattr__(self, "notes", _public_text(self.notes, "catalog notes", maximum=2048))
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "province": self.province,
+            "aliases": list(self.aliases),
+            "mode": self.mode,
+            "authority_name": self.authority_name,
+            "official_roots": list(self.official_roots),
+            "mode_source_url": self.mode_source_url,
+            "verified_at": self.verified_at,
+            "notes": self.notes,
+        }
+
+
+@dataclass(frozen=True)
+class ProvinceCatalogSnapshot:
+    """Strict immutable snapshot of ``references/provinces/index.json``."""
+
+    schema_version: str
+    verified_at: str
+    coverage_note: str
+    mode_authority_urls: tuple[str, ...]
+    provinces: tuple[ProvinceDiscovery, ...]
+
+    def __post_init__(self) -> None:
+        if self.schema_version != "1.0":
+            raise ProvinceCatalogError("unsupported province catalog schema version")
+        verified_at = _calendar_date(self.verified_at, "catalog verified_at")
+        coverage_note = _public_text(self.coverage_note, "catalog coverage_note", maximum=2048)
+        authority_urls = tuple(
+            _public_https_url(item, "catalog mode authority URL")
+            for item in _exact_string_collection(
+                self.mode_authority_urls,
+                "catalog mode_authority_urls",
+            )
+        )
+        if isinstance(self.provinces, (str, bytes, bytearray)):
+            raise TypeError("catalog provinces must be an ordered collection")
+        try:
+            provinces = tuple(self.provinces)
+        except TypeError as error:
+            raise TypeError("catalog provinces must be an ordered collection") from error
+        if any(not isinstance(item, ProvinceDiscovery) for item in provinces):
+            raise TypeError("catalog provinces must contain ProvinceDiscovery records")
+        if tuple(item.province for item in provinces) != _CATALOG_PROVINCES:
+            raise ProvinceCatalogError("catalog province order or completeness is invalid")
+        if any(item.mode != _CATALOG_MODES[item.province] for item in provinces):
+            raise ProvinceCatalogError("catalog province mode partition is invalid")
+        aliases = [unicodedata.normalize("NFKC", alias).casefold() for item in provinces for alias in item.aliases]
+        if len(aliases) != len(set(aliases)):
+            raise ProvinceCatalogError("catalog aliases must be globally unique")
+        if any(item.verified_at != verified_at for item in provinces):
+            raise ProvinceCatalogError("catalog record verification dates must match the snapshot")
+        object.__setattr__(self, "verified_at", verified_at)
+        object.__setattr__(self, "coverage_note", coverage_note)
+        object.__setattr__(self, "mode_authority_urls", authority_urls)
+        object.__setattr__(self, "provinces", provinces)
+
+    def resolve(self, province_or_alias: Any) -> ProvinceDiscovery:
+        normalized = unicodedata.normalize(
+            "NFKC", _public_text(province_or_alias, "province catalog lookup")
+        ).casefold()
+        matches = [
+            item
+            for item in self.provinces
+            if normalized in {unicodedata.normalize("NFKC", alias).casefold() for alias in item.aliases}
+        ]
+        if len(matches) != 1:
+            raise ProvinceCatalogError("province catalog lookup is unknown or ambiguous")
+        return matches[0]
+
+
+def _catalog_from_payload(payload: Any) -> ProvinceCatalogSnapshot:
+    if not isinstance(payload, dict) or set(payload) != _CATALOG_FIELDS:
+        raise ProvinceCatalogError("province catalog fields do not match the strict contract")
+    raw_records = payload["provinces"]
+    if not isinstance(raw_records, list):
+        raise ProvinceCatalogError("province catalog records must be an array")
+    records: list[ProvinceDiscovery] = []
+    for raw_record in raw_records:
+        if not isinstance(raw_record, dict) or set(raw_record) != _CATALOG_RECORD_FIELDS:
+            raise ProvinceCatalogError("province catalog record fields do not match the strict contract")
+        if not isinstance(raw_record["aliases"], list) or not isinstance(
+            raw_record["official_roots"], list
+        ):
+            raise ProvinceCatalogError("province catalog collections must be arrays")
+        records.append(
+            ProvinceDiscovery(
+                province=raw_record["province"],
+                aliases=tuple(raw_record["aliases"]),
+                mode=raw_record["mode"],
+                authority_name=raw_record["authority_name"],
+                official_roots=tuple(raw_record["official_roots"]),
+                mode_source_url=raw_record["mode_source_url"],
+                verified_at=raw_record["verified_at"],
+                notes=raw_record["notes"],
+            )
+        )
+    raw_authorities = payload["mode_authority_urls"]
+    if not isinstance(raw_authorities, list):
+        raise ProvinceCatalogError("catalog mode authority URLs must be an array")
+    return ProvinceCatalogSnapshot(
+        schema_version=payload["schema_version"],
+        verified_at=payload["verified_at"],
+        coverage_note=payload["coverage_note"],
+        mode_authority_urls=tuple(raw_authorities),
+        provinces=tuple(records),
+    )
+
+
+def load_province_catalog(path: Any = None) -> ProvinceCatalogSnapshot:
+    """Read one strict tracked catalog snapshot; import itself performs no I/O."""
+
+    selected = _CATALOG_PATH if path is None else path
+    return _catalog_from_payload(_strict_json_file(selected))
 
 
 class _SafeArgumentParser(argparse.ArgumentParser):
@@ -314,6 +609,8 @@ def _task_identity_payload(task: "QueryTask") -> dict[str, Any]:
         "province": task.province,
         "year": task.year,
         "subject_group": task.subject_group,
+        "authority_name": task.authority_name,
+        "official_roots": list(task.official_roots),
         "target_name": task.target_name,
         "query_variants": list(task.query_variants),
         "preferred_source_tiers": list(task.preferred_source_tiers),
@@ -342,6 +639,8 @@ class QueryTask:
     province: str
     year: int
     subject_group: str
+    authority_name: str
+    official_roots: tuple[str, ...]
     target_name: str | None
     query_variants: tuple[str, ...]
     preferred_source_tiers: tuple[str, ...]
@@ -364,12 +663,35 @@ class QueryTask:
         object.__setattr__(
             self, "subject_group", _public_text(self.subject_group, "subject_group")
         )
+        object.__setattr__(
+            self,
+            "authority_name",
+            _public_text(self.authority_name, "authority_name", maximum=512),
+        )
+        roots = tuple(
+            _public_https_url(root, "official root")
+            for root in _exact_string_collection(self.official_roots, "official_roots")
+        )
+        object.__setattr__(self, "official_roots", roots)
         if self.target_name is not None:
             object.__setattr__(
                 self, "target_name", _public_text(self.target_name, "target_name")
             )
-        if self.kind in {"score_table", "admission"} and self.target_name is not None:
-            raise ValueError("score-table and admission tasks cannot carry a target")
+        if self.kind in {
+            "province_policy",
+            "score_table",
+            "enrollment_plan",
+            "subject_requirement",
+        } and self.target_name is not None:
+            raise ValueError("this query kind cannot carry a structured target")
+        if self.kind in {
+            "batch_admission",
+            "strong_foundation",
+            "comprehensive_evaluation",
+            "hk_macao_admission",
+            "special_pathway",
+        } and self.target_name is None:
+            raise ValueError("this query kind requires a structured target")
         object.__setattr__(
             self,
             "query_variants",
@@ -408,7 +730,12 @@ class QueryTask:
         if self.required_extraction_fields != _EXTRACTION_FIELDS[self.kind]:
             raise ValueError("required extraction fields do not match query kind")
         query_text = " ".join(self.query_variants)
-        for context in (self.province, str(self.year), self.subject_group):
+        for context in (
+            self.province,
+            str(self.year),
+            self.subject_group,
+            self.authority_name,
+        ):
             if context not in query_text:
                 raise ValueError("query variants do not carry the task context")
         if self.target_name is not None and self.target_name not in query_text:
@@ -431,6 +758,8 @@ class QueryTask:
             "province": self.province,
             "year": self.year,
             "subject_group": self.subject_group,
+            "authority_name": self.authority_name,
+            "official_roots": list(self.official_roots),
             "target_name": self.target_name,
             "query_variants": list(self.query_variants),
             "preferred_source_tiers": list(self.preferred_source_tiers),
@@ -447,6 +776,9 @@ class QueryPlan:
     province: str
     exam_year: int
     subject_group: str
+    authority_name: str
+    official_roots: tuple[str, ...]
+    catalog_verified_at: str
     tasks: tuple[QueryTask, ...]
 
     def __post_init__(self) -> None:
@@ -456,6 +788,21 @@ class QueryPlan:
         object.__setattr__(self, "exam_year", _normalize_exam_year(self.exam_year))
         object.__setattr__(
             self, "subject_group", _public_text(self.subject_group, "subject_group")
+        )
+        object.__setattr__(
+            self,
+            "authority_name",
+            _public_text(self.authority_name, "authority_name", maximum=512),
+        )
+        roots = tuple(
+            _public_https_url(item, "official root")
+            for item in _exact_string_collection(self.official_roots, "official_roots")
+        )
+        object.__setattr__(self, "official_roots", roots)
+        object.__setattr__(
+            self,
+            "catalog_verified_at",
+            _calendar_date(self.catalog_verified_at, "catalog_verified_at"),
         )
         if isinstance(self.tasks, (str, bytes, bytearray)):
             raise TypeError("tasks must be a collection of QueryTask records")
@@ -470,7 +817,12 @@ class QueryPlan:
             raise ValueError("query plan contains duplicate task IDs")
         window = {self.exam_year - 2, self.exam_year - 1, self.exam_year}
         for task in tasks:
-            if task.province != self.province or task.subject_group != self.subject_group:
+            if (
+                task.province != self.province
+                or task.subject_group != self.subject_group
+                or task.authority_name != self.authority_name
+                or task.official_roots != self.official_roots
+            ):
                 raise ValueError("task context does not match query plan")
             if task.year not in window:
                 raise ValueError("task year is outside the explicit three-year window")
@@ -484,14 +836,42 @@ class QueryPlan:
         by_kind = {
             kind: tuple(task for task in tasks if task.kind == kind) for kind in _KINDS
         }
-        for required_kind in ("score_table", "admission"):
-            if {task.year for task in by_kind[required_kind]} != window:
-                raise ValueError(f"{required_kind} tasks must cover the exact three-year window")
+        if {task.year for task in by_kind["score_table"]} != window:
+            raise ValueError("score_table tasks must cover the exact three-year window")
+        batch_targets = {"普通批", "提前批", "综合评价批"}
+        if {task.target_name for task in by_kind["batch_admission"]} != batch_targets:
+            raise ValueError("batch admission tasks must cover every declared batch")
+        for target in batch_targets:
+            if {
+                task.year
+                for task in by_kind["batch_admission"]
+                if task.target_name == target
+            } != window:
+                raise ValueError("each batch admission target must cover the exact three-year window")
         joy_years = tuple(task.year for task in by_kind["joy_report"])
         if len(joy_years) > 3 or len(set(joy_years)) != len(joy_years):
             raise ValueError("joy-report tasks must use at most three explicit years")
-        if any(task.year != self.exam_year for task in by_kind["pathway_policy"]):
-            raise ValueError("pathway-policy tasks must target the explicit exam year")
+        current_year_kinds = _KINDS - {
+            "score_table",
+            "batch_admission",
+            "joy_report",
+            "special_pathway",
+        }
+        for kind in current_year_kinds:
+            if not by_kind[kind] or any(task.year != self.exam_year for task in by_kind[kind]):
+                raise ValueError(f"{kind} tasks must target the explicit exam year")
+        for singleton in (
+            "province_policy",
+            "enrollment_plan",
+            "subject_requirement",
+            "strong_foundation",
+            "comprehensive_evaluation",
+            "hk_macao_admission",
+        ):
+            if len(by_kind[singleton]) != 1:
+                raise ValueError(f"{singleton} must have exactly one task")
+        if any(task.year != self.exam_year for task in by_kind["special_pathway"]):
+            raise ValueError("special pathway tasks must target the explicit exam year")
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -499,11 +879,25 @@ class QueryPlan:
             "province": self.province,
             "exam_year": self.exam_year,
             "subject_group": self.subject_group,
+            "authority_name": self.authority_name,
+            "official_roots": list(self.official_roots),
+            "catalog_verified_at": self.catalog_verified_at,
             "tasks": [task.to_dict() for task in self.tasks],
         }
 
 
 _EXTRACTION_FIELDS = {
+    "province_policy": (
+        "province",
+        "year",
+        "exam_mode",
+        "subject_structure",
+        "batch_structure",
+        "effective_date",
+        "source_url",
+        "publisher",
+        "publication_date",
+    ),
     "score_table": (
         "province",
         "year",
@@ -514,10 +908,11 @@ _EXTRACTION_FIELDS = {
         "publisher",
         "publication_date",
     ),
-    "admission": (
+    "batch_admission": (
         "province",
         "year",
         "subject_group",
+        "batch",
         "institution",
         "program_group",
         "min_score",
@@ -536,14 +931,83 @@ _EXTRACTION_FIELDS = {
         "publisher",
         "publication_date",
     ),
-    "pathway_policy": (
+    "enrollment_plan": (
+        "province",
+        "year",
+        "subject_group",
+        "institution",
+        "institution_code",
+        "program",
+        "program_code",
+        "plan_count",
+        "batch",
+        "source_url",
+        "publisher",
+        "publication_date",
+    ),
+    "subject_requirement": (
+        "province",
+        "year",
+        "institution",
+        "program",
+        "required_subjects",
+        "allowed_combinations",
+        "special_conditions",
+        "source_url",
+        "publisher",
+        "publication_date",
+    ),
+    "strong_foundation": (
+        "province",
+        "year",
+        "institutions",
+        "majors",
+        "shortlist_rules",
+        "admission_rules",
+        "training_model",
+        "transition_routes",
+        "outcomes",
+        "source_url",
+        "publisher",
+        "publication_date",
+    ),
+    "comprehensive_evaluation": (
+        "province",
+        "year",
+        "institutions",
+        "eligibility",
+        "score_ratio",
+        "school_assessment",
+        "admission_rules",
+        "outcomes",
+        "source_url",
+        "publisher",
+        "publication_date",
+    ),
+    "hk_macao_admission": (
+        "province",
+        "year",
+        "institutions",
+        "admission_method",
+        "english_requirement",
+        "fees",
+        "scholarships",
+        "outcomes",
+        "source_url",
+        "publisher",
+        "publication_date",
+    ),
+    "special_pathway": (
         "province",
         "year",
         "pathway",
         "eligibility",
-        "institutions",
-        "application_window",
-        "constraints",
+        "ordinary_path_difference",
+        "employment_restrictions",
+        "geographic_restrictions",
+        "service_term",
+        "breach_consequences",
+        "fees_and_subsidies",
         "source_url",
         "publisher",
         "publication_date",
@@ -557,6 +1021,8 @@ def _make_task(
     province: str,
     year: int,
     subject_group: str,
+    authority_name: str,
+    official_roots: tuple[str, ...],
     target_name: str | None,
     query_variants: tuple[str, ...],
     exam_year: int,
@@ -572,6 +1038,8 @@ def _make_task(
         "province": province,
         "year": year,
         "subject_group": subject_group,
+        "authority_name": authority_name,
+        "official_roots": official_roots,
         "target_name": target_name,
         "query_variants": query_variants,
         "preferred_source_tiers": ("A", "B", "C"),
@@ -594,6 +1062,7 @@ def build_query_plan(
     *,
     high_school_name: str | None = None,
     requested_pathways: Any = (),
+    catalog: ProvinceCatalogSnapshot | None = None,
 ) -> QueryPlan:
     """Return an immutable plan for one anonymous recommendation profile."""
 
@@ -601,9 +1070,16 @@ def build_query_plan(
         raise TypeError("profile must be a RecommendationProfile")
     province = _validate_province_config(province)
     year = _normalize_exam_year(exam_year)
-    province_name = _public_text(province.province, "province")
+    if catalog is None:
+        catalog = load_province_catalog()
+    if type(catalog) is not ProvinceCatalogSnapshot:
+        raise TypeError("catalog must be a strict ProvinceCatalogSnapshot")
+    discovery = catalog.resolve(province.province)
+    province_name = discovery.province
+    if province.mode != discovery.mode:
+        raise ValueError("province policy mode conflicts with discovery catalog mode")
     profile_province = _public_text(profile.target_province, "profile target_province")
-    if profile_province != province_name:
+    if catalog.resolve(profile_province).province != province_name:
         raise ValueError("profile and province configuration do not match")
     primary = _public_text(profile.subject_group, "profile subject_group")
     secondary = tuple(
@@ -622,100 +1098,144 @@ def build_query_plan(
         sort_values=True,
     )
 
-    authority = f"{province_name}教育考试院"
+    authority = discovery.authority_name
+    roots = discovery.official_roots
     years = (year - 2, year - 1, year)
     tasks: list[QueryTask] = []
-    for task_year in years:
+
+    def add_task(
+        kind: str,
+        task_year: int,
+        target: str | None,
+        queries: tuple[str, ...],
+    ) -> None:
         tasks.append(
             _make_task(
-                kind="score_table",
+                kind=kind,
                 province=province_name,
                 year=task_year,
                 subject_group=subject_group,
-                target_name=None,
+                authority_name=authority,
+                official_roots=roots,
+                target_name=target,
                 exam_year=year,
-                query_variants=(
-                    f"{authority} {task_year} {subject_group} 一分一段表",
-                    f"{province_name} {task_year} {subject_group} 一分一段",
-                ),
+                query_variants=queries,
             )
         )
+
+    add_task(
+        "province_policy",
+        year,
+        None,
+        (
+            f"{authority} {province_name} {year} {subject_group} 高考政策 考试模式",
+            f"{authority} {province_name} {year} {subject_group} 批次设置 选科模式",
+        ),
+    )
     for task_year in years:
-        tasks.append(
-            _make_task(
-                kind="admission",
-                province=province_name,
-                year=task_year,
-                subject_group=subject_group,
-                target_name=None,
-                exam_year=year,
-                query_variants=(
-                    f"{authority} {task_year} {subject_group} 普通批 投档线",
-                    f"{province_name} {task_year} {subject_group} 院校专业组 录取",
+        add_task(
+            "score_table",
+            task_year,
+            None,
+            (
+                f"{authority} {province_name} {task_year} {subject_group} 一分一段表",
+                f"{province_name} {task_year} {subject_group} 一分一段 {authority}",
+            ),
+        )
+    for batch in ("普通批", "提前批", "综合评价批"):
+        for task_year in years:
+            add_task(
+                "batch_admission",
+                task_year,
+                batch,
+                (
+                    f"{authority} {province_name} {task_year} {subject_group} {batch} 投档录取",
+                    f"{province_name} {task_year} {subject_group} {batch} 院校专业组 {authority}",
                 ),
             )
-        )
     for task_year in years:
         if school is None:
             joy_queries = (
-                f"{province_name} {task_year} {subject_group} 高中喜报",
+                f"{authority} {province_name} {task_year} {subject_group} 高中喜报",
                 f"{authority} {task_year} {subject_group} 高考光荣榜",
-                f"{province_name} {task_year} {subject_group} 高中升学成果",
+                f"{province_name} {task_year} {subject_group} 高中升学成果 {authority}",
             )
         else:
             joy_queries = (
-                f"{province_name} {school} {task_year} {subject_group} 高考喜报",
-                f"{school} {task_year} {subject_group} 高考成绩 光荣榜",
+                f"{authority} {province_name} {school} {task_year} {subject_group} 高考喜报",
+                f"{school} {province_name} {task_year} {subject_group} 高考成绩 光荣榜 {authority}",
                 f"{authority} {school} {task_year} {subject_group} 升学成果",
             )
-        tasks.append(
-            _make_task(
-                kind="joy_report",
-                province=province_name,
-                year=task_year,
-                subject_group=subject_group,
-                target_name=school,
-                exam_year=year,
-                query_variants=joy_queries,
-            )
-        )
-    if pathways:
-        for pathway in pathways:
-            tasks.append(
-                _make_task(
-                    kind="pathway_policy",
-                    province=province_name,
-                    year=year,
-                    subject_group=subject_group,
-                    target_name=pathway,
-                    exam_year=year,
-                    query_variants=(
-                        f"{authority} {year} {subject_group} {pathway} 政策",
-                        f"{province_name} {year} {subject_group} {pathway} 招生",
-                    ),
-                )
-            )
-    else:
-        tasks.append(
-            _make_task(
-                kind="pathway_policy",
-                province=province_name,
-                year=year,
-                subject_group=subject_group,
-                target_name=None,
-                exam_year=year,
-                query_variants=(
-                    f"{province_name} {year} {subject_group} 多元升学",
-                    f"{authority} {year} {subject_group} 特殊招生",
-                    f"{province_name} {year} {subject_group} 升学路径政策",
-                ),
-            )
+        add_task("joy_report", task_year, school, joy_queries)
+
+    add_task(
+        "enrollment_plan",
+        year,
+        None,
+        (
+            f"{authority} {province_name} {year} {subject_group} 高校 招生计划 专业 计划数",
+            f"{authority} {province_name} {year} {subject_group} 院校代码 专业代码 招生批次",
+        ),
+    )
+    add_task(
+        "subject_requirement",
+        year,
+        None,
+        (
+            f"{authority} {province_name} {year} {subject_group} 招生专业 选科要求",
+            f"{authority} {province_name} {year} {subject_group} 院校专业 选考科目要求",
+        ),
+    )
+    add_task(
+        "strong_foundation",
+        year,
+        "强基计划",
+        (
+            f"{authority} {province_name} {year} {subject_group} 强基计划 招生专业 入围 录取",
+            f"{authority} {province_name} {year} {subject_group} 强基计划 培养方案 转段方向 出口",
+        ),
+    )
+    add_task(
+        "comprehensive_evaluation",
+        year,
+        "综合评价",
+        (
+            f"{authority} {province_name} {year} {subject_group} 综合评价 报考条件 成绩比例",
+            f"{authority} {province_name} {year} {subject_group} 综合评价 校测 录取 出口",
+        ),
+    )
+    add_task(
+        "hk_macao_admission",
+        year,
+        "港澳招生",
+        (
+            f"{authority} {province_name} {year} {subject_group} 港澳招生 招生方式 英语要求",
+            f"{authority} {province_name} {year} {subject_group} 港澳院校 费用 奖学金 出口",
+        ),
+    )
+
+    built_in_pathways = frozenset({"强基", "强基计划", "综合评价", "综评", "港澳", "港澳招生"})
+    for pathway in pathways:
+        if pathway in built_in_pathways:
+            continue
+        add_task(
+            "special_pathway",
+            year,
+            pathway,
+            (
+                f"{authority} {province_name} {year} {subject_group} {pathway} 报考条件 普通路径区别",
+                f"{authority} {province_name} {year} {subject_group} {pathway} 就业 地域限制 服务期 违约后果",
+                f"{authority} {province_name} {year} {subject_group} {pathway} 费用 补助 特殊限制",
+            ),
         )
     return QueryPlan(
         schema_version=_SCHEMA_VERSION,
         province=province_name,
         exam_year=year,
         subject_group=subject_group,
+        authority_name=authority,
+        official_roots=roots,
+        catalog_verified_at=catalog.verified_at,
         tasks=tuple(tasks),
     )
 
@@ -738,6 +1258,9 @@ def validate_query_plan_payload(payload: Any) -> QueryPlan:
         province=payload["province"],
         exam_year=payload["exam_year"],
         subject_group=payload["subject_group"],
+        authority_name=payload["authority_name"],
+        official_roots=tuple(payload["official_roots"]),
+        catalog_verified_at=payload["catalog_verified_at"],
         tasks=tuple(tasks),
     )
 
@@ -891,10 +1414,14 @@ def _reconfigure_utf8() -> None:
 
 
 __all__ = [
+    "ProvinceCatalogError",
+    "ProvinceCatalogSnapshot",
+    "ProvinceDiscovery",
     "QueryPlan",
     "QueryPlanCapabilityError",
     "QueryTask",
     "build_query_plan",
+    "load_province_catalog",
     "validate_query_plan_payload",
 ]
 

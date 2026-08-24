@@ -239,6 +239,36 @@ class LiveSmokeContractTest(unittest.TestCase):
             self.assertEqual("live-smoke: invalid input\n", stderr.getvalue())
             self.assertNotIn("secret", stderr.getvalue())
 
+    def test_impossible_catalog_dates_fail_before_health_or_network_calls(self) -> None:
+        tracked = json.loads(
+            (Path("references") / "provinces" / "index.json").read_text(encoding="utf-8")
+        )
+        mutations = (
+            lambda payload: payload.__setitem__("verified_at", "2026-99-99"),
+            lambda payload: payload["provinces"][0].__setitem__(
+                "verified_at", "2026-02-30"
+            ),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary).resolve()
+            for index, mutate in enumerate(mutations):
+                payload = json.loads(json.dumps(tracked, ensure_ascii=False))
+                mutate(payload)
+                catalog = directory / f"impossible-date-{index}.json"
+                catalog.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+                stdout, stderr = io.StringIO(), io.StringIO()
+                with (
+                    self.subTest(index=index),
+                    patch("scripts.live_smoke._CATALOG_PATH", catalog),
+                    patch("scripts.live_smoke.check_official_root") as check,
+                    contextlib.redirect_stdout(stdout),
+                    contextlib.redirect_stderr(stderr),
+                ):
+                    self.assertEqual(2, main(["--province", "黑龙江"]))
+                check.assert_not_called()
+                self.assertEqual("", stdout.getvalue())
+                self.assertEqual("live-smoke: invalid input\n", stderr.getvalue())
+
     def test_redirect_error_and_duplicate_province_are_controlled_data_or_input_errors(self) -> None:
         result = check_official_root(
             "黑龙江", self.roots,

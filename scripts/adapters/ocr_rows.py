@@ -24,6 +24,7 @@ from . import (
     read_stable_local_file,
     reject_duplicate_rows,
     validate_monotonicity,
+    validate_public_locator,
 )
 
 
@@ -62,11 +63,7 @@ class OcrExtractedRow(ExtractedRow):
         for key, location in self.cell_locations.items():
             if key not in self.values or key in snapshot:
                 raise ValueError("cell_locations must match extracted fields")
-            if not isinstance(location, str) or not location or location != location.strip():
-                raise ValueError("cell location must be a nonempty exact string")
-            if "\n" in location or "\r" in location:
-                raise ValueError("cell location must be one line")
-            snapshot[key] = location
+            snapshot[key] = validate_public_locator(location)
         if set(snapshot) != set(self.values):
             raise ValueError("cell_locations must match extracted fields")
         object.__setattr__(self, "cell_locations", MappingProxyType(snapshot))

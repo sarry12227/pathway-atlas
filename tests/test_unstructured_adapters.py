@@ -536,6 +536,29 @@ class OcrRowsAdapterTest(unittest.TestCase):
             with self.assertRaises(OcrValidationError):
                 self.extract(self.write_payload(directory, duplicate, "duplicate.json"))
 
+    def test_exact_score_monotonicity_is_independent_of_uncertain_sibling_rank(self):
+        from scripts.adapters.ocr_rows import OcrValidationError
+
+        payload = self.payload()
+        payload["rows"][1]["cells"][1].update(
+            raw_text="660",
+            normalized_value=660,
+            confidence=0.99,
+            verified=True,
+        )
+        payload["rows"][1]["cells"][2].update(
+            raw_text="150",
+            normalized_value=150,
+            confidence=0.50,
+            verified=True,
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            path = self.write_payload(
+                Path(temporary).resolve(), payload, "field-specific-monotonicity.json"
+            )
+            with self.assertRaises(OcrValidationError):
+                self.extract(path)
+
     def test_fractional_score_matches_task3_number_parity_but_not_integral_coverage(self):
         from scripts.adapters import CellStatus
 
@@ -570,7 +593,7 @@ class OcrRowsAdapterTest(unittest.TestCase):
             self.extract(path="tests/fixtures/replay/ocr/rows.json")
 
     def test_ocr_contract_extensions_are_frozen_and_replace_validated(self):
-        from scripts.adapters import CellStatus
+        from scripts.adapters import CellStatus, PublicLocatorError
         from scripts.adapters.ocr_rows import OcrExtractedRow
 
         locations = {"score": "page[1]/image[page-1]/bbox[1,2,3,4]"}
@@ -588,6 +611,10 @@ class OcrRowsAdapterTest(unittest.TestCase):
             row.cell_locations["score"] = "forged"
         with self.assertRaises(ValueError):
             replace(row, cell_locations={"other": "page[1]/image[x]/bbox[1,2,3,4]"})
+        unsafe = "page[1]/image[C:\\private\\page.png]/bbox[1,2,3,4]"
+        with self.assertRaises(PublicLocatorError) as raised:
+            replace(row, cell_locations={"score": unsafe})
+        self.assertNotIn(unsafe, str(raised.exception))
 
 
 class QrPayloadAdapterTest(unittest.TestCase):

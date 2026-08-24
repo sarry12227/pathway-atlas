@@ -39,6 +39,77 @@ class StructuredValidationError(StructuredAdapterError):
     """Raised when selected source data violates structural invariants."""
 
 
+class PublicLocatorError(StructuredValidationError, ValueError):
+    """A serialized adapter locator violates the public locator contract."""
+
+
+class PublicLocatorPathError(PublicLocatorError):
+    """A serialized adapter locator contains local or remote path material."""
+
+
+class PublicLocatorPrivacyError(PublicLocatorError):
+    """A serialized adapter locator contains personal or secret-shaped data."""
+
+
+_LOCATOR_PHONE = re.compile(r"1[3-9][0-9]{9}")
+_LOCATOR_IDENTITY = re.compile(r"[0-9]{17}[0-9Xx]")
+_LOCATOR_LANDLINE = re.compile(r"(?<![0-9])0[0-9]{2,3}-?[0-9]{7,8}(?![0-9])")
+_LOCATOR_LOCAL_PATH = re.compile(
+    r"(?i)(?:[a-z]:[\\/]|//|/(?:home|users|tmp|var|etc|private|mnt|opt)(?:/|\]))"
+)
+_LOCATOR_DRIVE_PREFIX = re.compile(r"(?:^|[/\[({=:,\s])[A-Za-z]:")
+_LOCATOR_ENVIRONMENT = re.compile(
+    r"%(?:[A-Za-z_][A-Za-z0-9_]*)%|\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][A-Za-z0-9_]*\})"
+)
+_LOCATOR_SECRET = re.compile(
+    r"(?i)(?:(?:api[\s_-]*key|password|bearer|private[\s_-]*key|token|secret)\s*[:=]|"
+    r"(?<![a-z0-9])(?:gh[pousr]_[a-z0-9]{20,}|github_pat_[a-z0-9_]{20,}|"
+    r"(?:akia|asia)[a-z0-9]{16}|sk-(?:proj-)?[a-z0-9_-]{20,}|"
+    r"sk_(?:live|test)_[a-z0-9]{16,}|glpat-[a-z0-9_-]{20,}|"
+    r"xox[baprs]-[a-z0-9-]{20,}|aiza[a-z0-9_-]{30,}|sk[-_](?:live|test))(?![a-z0-9]))"
+)
+_LOCATOR_EMBEDDED_ABSOLUTE = re.compile(r"(?:^|[\[({=:,\s])/(?!/)")
+_LOCATOR_TRAVERSAL = re.compile(r"(?:^|[/\[({=:,\s])\.\.(?=$|[/\]})=,\s])")
+_LOCATOR_HOME = re.compile(r"(?:^|[/\[({=:,\s])~(?:[/\\]|$)")
+
+
+def validate_public_locator(value: Any) -> str:
+    """Return one path-neutral, PII-safe locator without echoing rejected data."""
+
+    if not isinstance(value, str):
+        raise TypeError("public locator must be a string")
+    if (
+        not value
+        or value != value.strip()
+        or len(value) > 512
+        or any(ord(character) < 32 or ord(character) == 127 for character in value)
+    ):
+        raise PublicLocatorError("public locator is unsafe")
+    compact = re.sub(r"[._:-]+", "", value)
+    if (
+        _LOCATOR_PHONE.search(compact)
+        or _LOCATOR_IDENTITY.search(compact)
+        or _LOCATOR_LANDLINE.search(value)
+        or _LOCATOR_SECRET.search(value)
+        or "@" in value
+    ):
+        raise PublicLocatorPrivacyError("public locator contains private data")
+    if (
+        _LOCATOR_LOCAL_PATH.search(value)
+        or _LOCATOR_DRIVE_PREFIX.search(value)
+        or _LOCATOR_ENVIRONMENT.search(value)
+        or _LOCATOR_EMBEDDED_ABSOLUTE.search(value)
+        or _LOCATOR_TRAVERSAL.search(value)
+        or _LOCATOR_HOME.search(value)
+        or "\\" in value
+        or "://" in value
+        or value.startswith("/")
+        or any(component in {".", "..", "~"} for component in value.split("/"))
+    ):
+        raise PublicLocatorPathError("public locator contains path material")
+    return value
+
+
 class CellStatus(str, Enum):
     """Finite extraction-state vocabulary, separate from evidence status."""
 
@@ -163,10 +234,7 @@ class ExtractedRow(_Serializable):
             statuses[key] = status_item
         if set(frozen_values) != set(statuses):
             raise ValueError("values and cell_status must contain identical keys")
-        if not isinstance(self.location, str) or not self.location or self.location != self.location.strip():
-            raise ValueError("location must be a nonempty exact source locator")
-        if "\n" in self.location or "\r" in self.location:
-            raise ValueError("location must be one line")
+        location = validate_public_locator(self.location)
         if isinstance(self.confidence, bool) or not isinstance(self.confidence, (int, float)):
             raise TypeError("confidence must be a finite number")
         confidence = float(self.confidence)
@@ -174,6 +242,7 @@ class ExtractedRow(_Serializable):
             raise ValueError("confidence must be between zero and one")
         object.__setattr__(self, "values", frozen_values)
         object.__setattr__(self, "cell_status", MappingProxyType(statuses))
+        object.__setattr__(self, "location", location)
         object.__setattr__(self, "confidence", confidence)
         object.__setattr__(self, "warnings", _ordered_warnings(self.warnings))
 
@@ -189,10 +258,13 @@ class ExtractedTable(_Serializable):
     extraction_method: str
 
     def __post_init__(self) -> None:
-        for name in ("table_id", "extraction_method"):
-            value = getattr(self, name)
-            if not isinstance(value, str) or not value or value != value.strip():
-                raise ValueError(f"{name} must be a nonempty exact string")
+        table_id = validate_public_locator(self.table_id)
+        if (
+            not isinstance(self.extraction_method, str)
+            or not self.extraction_method
+            or self.extraction_method != self.extraction_method.strip()
+        ):
+            raise ValueError("extraction_method must be a nonempty exact string")
         for name in ("caption", "sheet"):
             value = getattr(self, name)
             if value is not None and (not isinstance(value, str) or not value or value != value.strip()):
@@ -207,6 +279,7 @@ class ExtractedTable(_Serializable):
             raise TypeError("rows must contain only ExtractedRow values")
         if not isinstance(self.coverage, ExtractedCoverage):
             raise TypeError("coverage must be ExtractedCoverage")
+        object.__setattr__(self, "table_id", table_id)
         object.__setattr__(self, "rows", rows)
         object.__setattr__(self, "coverage", ExtractedCoverage(**self.coverage.to_dict()))
         object.__setattr__(self, "warnings", _ordered_warnings(self.warnings))
@@ -350,14 +423,15 @@ def exact_rows(rows: list[ExtractedRow]) -> list[ExtractedRow]:
 
 
 def validate_monotonicity(rows: list[ExtractedRow], mapping: ColumnMapping) -> None:
-    exact = exact_rows(rows)
     for role, descending in (("score", True), ("rank", False)):
         fields_for_role = [field for field, declared in mapping.roles.items() if declared == role]
         for field in fields_for_role:
             sequence = [
                 row.values[field]
-                for row in exact
-                if isinstance(row.values[field], (int, float)) and not isinstance(row.values[field], bool)
+                for row in rows
+                if row.cell_status[field] is CellStatus.EXACT
+                and isinstance(row.values[field], (int, float))
+                and not isinstance(row.values[field], bool)
             ]
             for previous, current in zip(sequence, sequence[1:]):
                 if (descending and current > previous) or (not descending and current < previous):
@@ -478,7 +552,11 @@ __all__ = [
     "ExtractedTable",
     "MAX_FILE_BYTES",
     "MappingError",
+    "PublicLocatorError",
+    "PublicLocatorPathError",
+    "PublicLocatorPrivacyError",
     "StructuredAdapterError",
     "StructuredFileError",
     "StructuredValidationError",
+    "validate_public_locator",
 ]

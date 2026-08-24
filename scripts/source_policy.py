@@ -10,13 +10,22 @@ from dataclasses import replace
 from typing import Any, Iterable
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-from scripts.contracts import (
-    EvidenceFact,
-    EvidenceStatus,
-    FactClaim,
-    SourceCandidate,
-    SourceTier,
-)
+if __package__:
+    from .contracts import (
+        EvidenceFact,
+        EvidenceStatus,
+        FactClaim,
+        SourceCandidate,
+        SourceTier,
+    )
+else:  # ``sys.path`` rooted at ``scripts`` package compatibility.
+    from contracts import (  # type: ignore
+        EvidenceFact,
+        EvidenceStatus,
+        FactClaim,
+        SourceCandidate,
+        SourceTier,
+    )
 
 
 _TRACKING_PARAMETERS = frozenset(
