@@ -36,6 +36,16 @@ from scripts.adapters.spreadsheet import (
     SpreadsheetDependencyError,
     extract_spreadsheet,
 )
+from scripts.contracts import (
+    CapabilityReport,
+    CapabilityTier,
+    EvidenceFact,
+    EvidenceStatus,
+    SourceCandidate,
+    SourceTier,
+)
+from scripts.evidence import EvidenceStore
+from scripts.validate_evidence import validate_bundle_snapshot
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -882,6 +892,56 @@ class SpreadsheetAdapterTest(unittest.TestCase):
             ExtractedCoverage(lower_score=620, upper_score=620, lower_rank=1200, upper_rank=1200),
         )
         self.assertIn("coverage-excludes-nonexact-rows", table.warnings)
+
+    def test_real_xlsx_extraction_method_persists_as_validated_fact_provenance(self):
+        table = extract_spreadsheet(XLSX_FIXTURE, sheet="物理类", mapping=self.mapping())
+        row = table.rows[0]
+        with tempfile.TemporaryDirectory() as temporary:
+            store = EvidenceStore.create(
+                Path(temporary).resolve(),
+                CapabilityReport(tier=CapabilityTier.STANDARD),
+            )
+            for index in range(1, 4):
+                store.add_candidate(
+                    SourceCandidate(
+                        source_id=f"xlsx-s{index}",
+                        url=f"https://xlsx-{index}.example.test/article",
+                        publisher=f"Synthetic XLSX Publisher {index}",
+                        tier=SourceTier.C,
+                        published_at=None,
+                        retrieved_at="2026-08-24T00:00:00Z",
+                        content_hash=f"sha256:xlsx-{index}",
+                        citation_root=f"https://xlsx-{index}.example.test/original",
+                        summary="Synthetic worksheet source",
+                    )
+                )
+            store.add_fact(
+                EvidenceFact(
+                    fact_id="xlsx-admission-row-1",
+                    field="admission_record:xlsx-row-1",
+                    value=row.to_dict()["values"],
+                    unit=None,
+                    status=EvidenceStatus.REFERENCE,
+                    source_ids=("xlsx-s1", "xlsx-s2", "xlsx-s3"),
+                    method="three-source-consensus",
+                    notes="",
+                ),
+                year=2026,
+                extraction_method=table.extraction_method,
+                locator=row.location,
+            )
+            store.finalize()
+
+            validation = validate_bundle_snapshot(store.session_path)
+
+            self.assertEqual(validation.issues, ())
+            self.assertIsNotNone(validation.snapshot)
+            provenance = [
+                json.loads(line)
+                for line in (store.session_path / "context.jsonl").read_text("utf-8").splitlines()
+            ]
+            self.assertEqual(provenance[0]["extraction_method"], "xlsx-worksheet")
+            self.assertEqual(provenance[0]["locator"], "物理类!A2:F2")
 
     def test_exact_sheet_selection_never_falls_back_to_unrelated_sheet(self):
         with self.assertRaises(StructuredValidationError):

@@ -149,6 +149,11 @@ class InstructionContractTest(unittest.TestCase):
                 "locator",
             },
         )
+        citation_by_field = {row["字段"]: row["完成条件"] for row in citation_rows}
+        self.assertEqual(
+            tuple(re.findall(r"`([^`]+)`", citation_by_field["extraction_method"])),
+            FACT_EXTRACTION_METHODS,
+        )
 
     def assert_playbook_contract(self, text):
         self.assertEqual(headings(text), PLAYBOOK_HEADINGS)
@@ -275,6 +280,14 @@ class InstructionContractTest(unittest.TestCase):
         self.assertIn("fact-provenance", citation)
         self.assertIn("恰好 1 条", citation)
         self.assertIn("manifest hash", citation)
+        for unsafe_locator in (
+            "drive prefix",
+            "environment reference",
+            "UNC/device/absolute/traversal/URL",
+            "secret",
+            "PII",
+        ):
+            self.assertIn(unsafe_locator, citation)
 
     def test_playbook_steps_are_bounded_and_use_current_public_seams(self):
         required = (

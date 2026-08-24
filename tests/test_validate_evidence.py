@@ -44,37 +44,9 @@ class ValidateEvidenceCliTest(unittest.TestCase):
             self.fail(f"validator stdout was not JSON: {error}: {result.stdout!r}")
         return result, summary
 
-    def copy_fixture(
-        self,
-        name: str,
-        destination_name: str | None = None,
-        *,
-        include_provenance: bool = True,
-    ) -> Path:
+    def copy_fixture(self, name: str, destination_name: str | None = None) -> Path:
         destination = self.temp_root / (destination_name or name)
         shutil.copytree(FIXTURES / name, destination)
-        if include_provenance:
-            facts = [
-                json.loads(line)
-                for line in (destination / "normalized" / "facts.jsonl").read_text("utf-8").splitlines()
-            ]
-            contexts = [
-                json.loads(line)
-                for line in (destination / "context.jsonl").read_text("utf-8").splitlines()
-            ]
-            contexts.extend(
-                {
-                    "kind": "fact-provenance",
-                    "fact_id": fact["fact_id"],
-                    "source_ids": fact["source_ids"],
-                    "year": 2026,
-                    "extraction_method": "manual-structured",
-                    "locator": f"fixture[{name}]/fact[{fact['fact_id']}]",
-                }
-                for fact in facts
-            )
-            self.write_contexts(destination, contexts)
-            self.rewrite_manifest_hash(destination)
         return destination
 
     @staticmethod
@@ -154,11 +126,8 @@ class ValidateEvidenceCliTest(unittest.TestCase):
             **overrides,
         }
 
-    def provenance_fixture(self, name="three-source-consensus") -> Path:
-        return self.copy_fixture(name)
-
     def test_consensus_fixture_passes_with_machine_readable_summary(self):
-        result, summary = self.run_cli(self.provenance_fixture())
+        result, summary = self.run_cli(FIXTURES / "three-source-consensus")
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(summary["valid"], True)
@@ -175,9 +144,7 @@ class ValidateEvidenceCliTest(unittest.TestCase):
         }
         for name, records in cases.items():
             with self.subTest(name=name):
-                bundle = self.copy_fixture(
-                    "three-source-consensus", f"provenance-{name}", include_provenance=False
-                )
+                bundle = self.copy_fixture("three-source-consensus", f"provenance-{name}")
                 self.write_contexts(bundle, records)
                 self.rewrite_manifest_hash(bundle)
 
@@ -194,18 +161,31 @@ class ValidateEvidenceCliTest(unittest.TestCase):
             {"year": "2026"},
             {"extraction_method": "unknown-parser"},
             {"locator": "C:\\private\\scores.xlsx"},
+            {"locator": "C:relative-sheet"},
+            {"locator": "z:logical-row"},
+            {"locator": "sheet[C:relative-sheet]"},
             {"locator": "../private/scores.xlsx"},
+            {"locator": "sheet[../scores.xlsx]"},
+            {"locator": "//server/share/scores.xlsx"},
+            {"locator": "\\\\?\\C:\\private\\scores.xlsx"},
             {"locator": "sheet[C:/private/scores.xlsx]"},
             {"locator": "source[/home/user/scores.html]"},
+            {"locator": "sheet[/opt/data/scores.xlsx]"},
             {"locator": "source[https://private.example.test/item]"},
+            {"locator": "sheet[%TEMP%]"},
+            {"locator": "sheet[$HOME]"},
+            {"locator": "sheet[${HOME}]"},
+            {"locator": "source[sk-live]"},
+            {"locator": "source[ghp_abcdefghijklmnopqrstuvwxyz]"},
+            {"locator": "api_key=secret-value"},
+            {"locator": "Bearer=secret-value"},
             {"locator": "student[name@example.test]"},
             {"locator": "student-138-0013-8000"},
+            {"locator": "office-010-12345678"},
         )
         for index, mutation in enumerate(mutations):
             with self.subTest(index=index):
-                bundle = self.copy_fixture(
-                    "three-source-consensus", f"bad-provenance-{index}", include_provenance=False
-                )
+                bundle = self.copy_fixture("three-source-consensus", f"bad-provenance-{index}")
                 self.write_contexts(bundle, [self.provenance(**mutation)])
                 self.rewrite_manifest_hash(bundle)
 
@@ -213,6 +193,8 @@ class ValidateEvidenceCliTest(unittest.TestCase):
 
                 self.assertIsNone(result.snapshot)
                 self.assertIn("provenance", {issue[0] for issue in result.issues})
+                if "locator" in mutation:
+                    self.assertNotIn(str(mutation["locator"]), str(result.issues))
 
     def test_replay_rejects_non_machine_session_and_malformed_manifest_hash(self):
         cases = (
@@ -335,7 +317,7 @@ class ValidateEvidenceCliTest(unittest.TestCase):
                 )
 
     def test_public_snapshot_is_factory_only_deep_frozen_and_hash_bound(self):
-        result = validate_bundle_snapshot(self.provenance_fixture())
+        result = validate_bundle_snapshot(FIXTURES / "three-source-consensus")
 
         self.assertEqual(result.issues, ())
         self.assertIsInstance(result.snapshot, ValidatedEvidenceSnapshot)

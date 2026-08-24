@@ -40,64 +40,6 @@ from scripts.validate_data import (
 
 
 ROOT = Path(__file__).resolve().parents[1]
-_AUTHENTICATED_FIXTURES = tempfile.TemporaryDirectory()
-_AUTHENTICATED_FIXTURE_COUNT = 0
-
-
-def authenticated_evidence_fixture(name: str) -> Path:
-    global _AUTHENTICATED_FIXTURE_COUNT
-    _AUTHENTICATED_FIXTURE_COUNT += 1
-    source = ROOT / "tests" / "fixtures" / "evidence" / name
-    destination = Path(_AUTHENTICATED_FIXTURES.name) / f"{name}-{_AUTHENTICATED_FIXTURE_COUNT}"
-    shutil.copytree(source, destination)
-    facts = [
-        json.loads(line)
-        for line in (destination / "normalized" / "facts.jsonl").read_text("utf-8").splitlines()
-    ]
-    contexts = [
-        json.loads(line)
-        for line in (destination / "context.jsonl").read_text("utf-8").splitlines()
-    ]
-    contexts.extend(
-        {
-            "kind": "fact-provenance",
-            "fact_id": fact["fact_id"],
-            "source_ids": fact["source_ids"],
-            "year": 2026,
-            "extraction_method": "manual-structured",
-            "locator": f"fixture[{name}]/fact[{fact['fact_id']}]",
-        }
-        for fact in facts
-    )
-    (destination / "context.jsonl").write_text(
-        "".join(
-            json.dumps(item, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
-            for item in contexts
-        ),
-        encoding="utf-8",
-        newline="\n",
-    )
-    manifest_path = destination / "manifest.json"
-    manifest = json.loads(manifest_path.read_text("utf-8"))
-    capability_value = json.loads((destination / "capability.json").read_text("utf-8"))
-    rejection_count = len((destination / "rejections.jsonl").read_text("utf-8").splitlines())
-    store = object.__new__(EvidenceStore)
-    store._capability = capability_value
-    store._rejections = {str(index): None for index in range(rejection_count)}
-    records = {
-        artifact: (destination / artifact).read_text("utf-8")
-        for artifact in (
-            "capability.json", "candidates.jsonl", "context.jsonl",
-            "normalized/facts.jsonl", "rejections.jsonl",
-        )
-    }
-    manifest["manifest_hash"] = EvidenceStore._manifest_hash(store, records)
-    manifest_path.write_text(
-        json.dumps(manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n",
-        encoding="utf-8",
-        newline="\n",
-    )
-    return destination
 
 
 def capability(tier: CapabilityTier = CapabilityTier.STANDARD) -> CapabilityReport:
@@ -114,7 +56,7 @@ def capability(tier: CapabilityTier = CapabilityTier.STANDARD) -> CapabilityRepo
 
 def evidence_snapshot():
     result = validate_bundle_snapshot(
-        authenticated_evidence_fixture("three-source-consensus")
+        ROOT / "tests" / "fixtures" / "evidence" / "three-source-consensus"
     )
     if result.snapshot is None:
         raise AssertionError(result.issues)
@@ -611,7 +553,7 @@ class EvidenceReportModelTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             bundle = Path(temporary) / "bundle"
             shutil.copytree(
-                authenticated_evidence_fixture("three-source-consensus"),
+                ROOT / "tests" / "fixtures" / "evidence" / "three-source-consensus",
                 bundle,
             )
             candidate_path = bundle / "candidates.jsonl"
@@ -786,7 +728,7 @@ class EvidenceReportCliTest(unittest.TestCase):
             "--profile",
             str(ROOT / "tests" / "fixtures" / "profiles" / "demo.json"),
             "--evidence",
-            str(authenticated_evidence_fixture("three-source-consensus")),
+            str(ROOT / "tests" / "fixtures" / "evidence" / "three-source-consensus"),
             *extra,
         ]
 
@@ -813,7 +755,7 @@ class EvidenceReportCliTest(unittest.TestCase):
         result = subprocess.run(
             self.command(
                 "--evidence",
-                str(authenticated_evidence_fixture("repost-conflict")),
+                str(ROOT / "tests" / "fixtures" / "evidence" / "repost-conflict"),
             ),
             capture_output=True,
             text=True,
@@ -827,7 +769,7 @@ class EvidenceReportCliTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             bundle = Path(temporary) / "bundle"
             shutil.copytree(
-                authenticated_evidence_fixture("three-source-consensus"),
+                ROOT / "tests" / "fixtures" / "evidence" / "three-source-consensus",
                 bundle,
             )
             capability_path = bundle / "capability.json"

@@ -113,12 +113,27 @@ class EvidenceStoreTest(unittest.TestCase):
             {"year": "2026"},
             {"extraction_method": "unknown-parser"},
             {"locator": "C:\\private\\scores.xlsx"},
+            {"locator": "C:relative-sheet"},
+            {"locator": "z:logical-row"},
+            {"locator": "sheet[C:relative-sheet]"},
             {"locator": "../private/scores.xlsx"},
+            {"locator": "sheet[../scores.xlsx]"},
+            {"locator": "//server/share/scores.xlsx"},
+            {"locator": "\\\\?\\C:\\private\\scores.xlsx"},
             {"locator": "sheet[C:/private/scores.xlsx]"},
             {"locator": "source[/home/user/scores.html]"},
+            {"locator": "sheet[/opt/data/scores.xlsx]"},
             {"locator": "source[https://private.example.test/item]"},
+            {"locator": "sheet[%TEMP%]"},
+            {"locator": "sheet[$HOME]"},
+            {"locator": "sheet[${HOME}]"},
+            {"locator": "source[sk-live]"},
+            {"locator": "source[ghp_abcdefghijklmnopqrstuvwxyz]"},
+            {"locator": "api_key=secret-value"},
+            {"locator": "Bearer=secret-value"},
             {"locator": "student[name@example.test]"},
             {"locator": "student-138-0013-8000"},
+            {"locator": "office-010-12345678"},
         )
         for index, overrides in enumerate(invalid):
             with self.subTest(index=index):
@@ -130,8 +145,11 @@ class EvidenceStoreTest(unittest.TestCase):
                     "locator": "record[score-001]",
                     **overrides,
                 }
-                with self.assertRaises((TypeError, ValueError, EvidencePrivacyError, EvidencePathError)):
+                with self.assertRaises(
+                    (TypeError, ValueError, EvidencePrivacyError, EvidencePathError)
+                ) as raised:
                     store.add_fact(self.fact("score-001", ("s1",)), **values)
+                self.assertNotIn(str(values["locator"]), str(raised.exception))
                 self.assertEqual(store._facts, {})
                 self.assertEqual(store._contexts, [])
 

@@ -42,11 +42,12 @@ _SCHEMA_VERSION = "1.0"
 _SOURCE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 _PHONE_IDENTIFIER = re.compile(r"1[3-9][0-9]{9}")
 _IDENTITY_IDENTIFIER = re.compile(r"[0-9]{17}[0-9Xx]")
+_LANDLINE_IDENTIFIER = re.compile(r"(?<![0-9])0[0-9]{2,3}-?[0-9]{7,8}(?![0-9])")
 _REPARSE_POINT = 0x0400
 FACT_PROVENANCE_KIND = "fact-provenance"
 FACT_EXTRACTION_METHODS = (
     "html-table",
-    "spreadsheet",
+    "xlsx-worksheet",
     "pdfplumber-text",
     "host-ocr-rows",
     "qr",
@@ -56,6 +57,19 @@ _FACT_EXTRACTION_METHODS = frozenset(FACT_EXTRACTION_METHODS)
 _LOCAL_PATH_FRAGMENT = re.compile(
     r"(?i)(?:[a-z]:[\\/]|//|/(?:home|users|tmp|var|etc|private|mnt)(?:/|\]))"
 )
+_DRIVE_PREFIX = re.compile(r"(?:^|[\[({=,\s])[A-Za-z]:")
+_ENVIRONMENT_REFERENCE = re.compile(
+    r"%(?:[A-Za-z_][A-Za-z0-9_]*)%|\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][A-Za-z0-9_]*\})"
+)
+_SECRET_REFERENCE = re.compile(
+    r"(?i)(?:(?:api[\s_-]*key|password|bearer|private[\s_-]*key|token|secret)\s*[:=]|"
+    r"(?<![a-z0-9])(?:gh[pousr]_[a-z0-9]{20,}|github_pat_[a-z0-9_]{20,}|"
+    r"(?:akia|asia)[a-z0-9]{16}|sk-(?:proj-)?[a-z0-9_-]{20,}|"
+    r"sk_(?:live|test)_[a-z0-9]{16,}|glpat-[a-z0-9_-]{20,}|"
+    r"xox[baprs]-[a-z0-9-]{20,}|aiza[a-z0-9_-]{30,}|sk[-_](?:live|test))(?![a-z0-9]))"
+)
+_EMBEDDED_ABSOLUTE_PATH = re.compile(r"(?:^|[\[({=:,\s])/(?!/)")
+_TRAVERSAL_FRAGMENT = re.compile(r"(?:^|[/\[({=:,\s])\.\.(?=$|[/\]})=,\s])")
 _PII_KEYS = frozenset(
     {
         "name", "student_name", "phone", "mobile", "id_card", "address",
@@ -127,8 +141,15 @@ def _validate_locator(value: Any) -> str:
     if any(ord(character) < 32 or ord(character) == 127 for character in value):
         raise ValueError("Fact provenance locator is unsafe")
     _reject_pii_identifier(value)
+    if _LANDLINE_IDENTIFIER.search(value):
+        raise EvidencePrivacyError("Personal-data-shaped provenance locator is not allowed")
     if (
         _LOCAL_PATH_FRAGMENT.search(value)
+        or _DRIVE_PREFIX.search(value)
+        or _ENVIRONMENT_REFERENCE.search(value)
+        or _SECRET_REFERENCE.search(value)
+        or _EMBEDDED_ABSOLUTE_PATH.search(value)
+        or _TRAVERSAL_FRAGMENT.search(value)
         or "\\" in value
         or "://" in value
         or "@" in value

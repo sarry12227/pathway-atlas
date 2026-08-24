@@ -10,7 +10,6 @@ import tempfile
 import unittest
 from unittest import mock
 
-from tests.test_generate_report_evidence import authenticated_evidence_fixture
 from zipfile import ZipFile
 
 try:
@@ -211,7 +210,7 @@ class DocxSemanticParityTest(unittest.TestCase):
                 "--profile",
                 str(ROOT / "tests" / "fixtures" / "profiles" / "demo.json"),
                 "--evidence",
-                str(authenticated_evidence_fixture("three-source-consensus")),
+                str(ROOT / "tests" / "fixtures" / "evidence" / "three-source-consensus"),
                 "--secondary-subject",
                 "化学",
                 "--secondary-subject",
@@ -238,7 +237,7 @@ class DocxSemanticParityTest(unittest.TestCase):
             "--profile",
             str(ROOT / "tests" / "fixtures" / "profiles" / "demo.json"),
             "--evidence",
-            str(authenticated_evidence_fixture("three-source-consensus")),
+            str(ROOT / "tests" / "fixtures" / "evidence" / "three-source-consensus"),
         ]
         with tempfile.TemporaryDirectory() as temporary:
             sandbox = Path(temporary)

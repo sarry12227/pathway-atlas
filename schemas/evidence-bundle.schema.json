@@ -154,7 +154,7 @@
           "type": "string",
           "enum": [
             "html-table",
-            "spreadsheet",
+            "xlsx-worksheet",
             "pdfplumber-text",
             "host-ocr-rows",
             "qr",

@@ -87,10 +87,10 @@
 | content_fingerprint | 保存规范化内容或附件 hash |
 | citation_chain | 保存到 upstream root 的完整链 |
 | year | 保存事实适用年份，并与查询任务一致 |
-| extraction_method | 保存 HTML/XLSX/PDF/OCR/QR 或人工结构化方法 |
+| extraction_method | 只使用 `html-table`、`xlsx-worksheet`、`pdfplumber-text`、`host-ocr-rows`、`qr`、`manual-structured` |
 | locator | 保存 page/sheet/table/row 或 page/image/bbox 的字段级位置 |
 
-持久化事实时必须调用 `EvidenceStore.add_fact(..., year=, extraction_method=, locator=)`。该入口在 `context.jsonl` 写入与 fact ID 和 source IDs 精确绑定的 canonical `fact-provenance` 记录；每个 fact 恰好 1 条。year 必须是数学整数年，extraction_method 必须来自有限词汇，locator 必须是不含本地路径或个人数据的逻辑位置。所有 linked source 都必须保留 validated URL 与 citation root。记录纳入 manifest hash，并在形成 authenticated snapshot 前验证；缺失、重复、错配或伪造都 fail closed。
+持久化事实时必须调用 `EvidenceStore.add_fact(..., year=, extraction_method=, locator=)`。该入口在 `context.jsonl` 写入与 fact ID 和 source IDs 精确绑定的 canonical `fact-provenance` 记录；每个 fact 恰好 1 条。year 必须是数学整数年，extraction_method 必须来自有限词汇，locator 必须是逻辑位置，并拒绝 drive prefix、environment reference、UNC/device/absolute/traversal/URL、secret 和 PII 形态。所有 linked source 都必须保留 validated URL 与 citation root。记录纳入 manifest hash，并在形成 authenticated snapshot 前验证；缺失、重复、错配或伪造都 fail closed。
 
 当前年份是否可用由 deterministic query plan 决定。“not yet expected” 不是上一年事实；上一年或更早材料只能按实际 `year` 标为历史。当前年份无法验证时保留 `missing`，不替换成未标注的历史值。
 
