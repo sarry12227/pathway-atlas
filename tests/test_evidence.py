@@ -134,7 +134,9 @@ class EvidenceStoreTest(unittest.TestCase):
             {"locator": "Bearer=secret-value"},
             {"locator": "student[name@example.test]"},
             {"locator": "student-138-0013-8000"},
+            {"locator": "student 138 0013 8000"},
             {"locator": "office-010-12345678"},
+            {"locator": "row-C:private.txt"},
         )
         for index, overrides in enumerate(invalid):
             with self.subTest(index=index):

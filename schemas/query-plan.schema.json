@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://example.invalid/shengxue-skill/schemas/query-plan.schema.json",
   "title": "Deterministic research query plan",
-  "$comment": "Structure is validated here; per-task ID, catalog discovery context, target, availability, candidate, tier, and extraction semantics also require the declared pure runtime validator.",
+  "$comment": "Structure is validated here; trusted-catalog identity, per-task ID, discovery context, target, availability, candidate, tier, and extraction semantics also require the declared runtime validator.",
   "x-semantic-validator": {
     "locator": "scripts.query_plan.validate_query_plan_payload",
     "flat_locator": "query_plan.validate_query_plan_payload",
@@ -10,6 +10,7 @@
       "task_id_digest",
       "task_context",
       "catalog_discovery_context",
+      "trusted_catalog_identity",
       "structured_target",
       "explicit_three_year_window",
       "availability_expectation",

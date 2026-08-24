@@ -15,6 +15,7 @@ import os
 from pathlib import Path
 import re
 import stat
+import unicodedata
 from types import MappingProxyType
 from typing import Any
 
@@ -51,13 +52,14 @@ class PublicLocatorPrivacyError(PublicLocatorError):
     """A serialized adapter locator contains personal or secret-shaped data."""
 
 
-_LOCATOR_PHONE = re.compile(r"1[3-9][0-9]{9}")
+_LOCATOR_PHONE = re.compile(r"(?<![0-9])1[3-9][0-9]{9}(?![0-9])")
+_LOCATOR_PHONE_SEPARATORS = re.compile(r"[\s._:\-‐-―]+")
 _LOCATOR_IDENTITY = re.compile(r"[0-9]{17}[0-9Xx]")
 _LOCATOR_LANDLINE = re.compile(r"(?<![0-9])0[0-9]{2,3}-?[0-9]{7,8}(?![0-9])")
 _LOCATOR_LOCAL_PATH = re.compile(
     r"(?i)(?:[a-z]:[\\/]|//|/(?:home|users|tmp|var|etc|private|mnt|opt)(?:/|\]))"
 )
-_LOCATOR_DRIVE_PREFIX = re.compile(r"(?:^|[/\[({=:,\s])[A-Za-z]:")
+_LOCATOR_DRIVE_PREFIX = re.compile(r"(?:^|[^A-Za-z0-9])[A-Za-z]:")
 _LOCATOR_ENVIRONMENT = re.compile(
     r"%(?:[A-Za-z_][A-Za-z0-9_]*)%|\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][A-Za-z0-9_]*\})"
 )
@@ -85,26 +87,29 @@ def validate_public_locator(value: Any) -> str:
         or any(ord(character) < 32 or ord(character) == 127 for character in value)
     ):
         raise PublicLocatorError("public locator is unsafe")
-    compact = re.sub(r"[._:-]+", "", value)
+    normalized = unicodedata.normalize("NFKC", value)
+    compact = _LOCATOR_PHONE_SEPARATORS.sub("", normalized)
     if (
         _LOCATOR_PHONE.search(compact)
         or _LOCATOR_IDENTITY.search(compact)
-        or _LOCATOR_LANDLINE.search(value)
-        or _LOCATOR_SECRET.search(value)
-        or "@" in value
+        or _LOCATOR_LANDLINE.search(normalized)
+        or _LOCATOR_SECRET.search(normalized)
+        or "@" in normalized
     ):
         raise PublicLocatorPrivacyError("public locator contains private data")
     if (
-        _LOCATOR_LOCAL_PATH.search(value)
-        or _LOCATOR_DRIVE_PREFIX.search(value)
-        or _LOCATOR_ENVIRONMENT.search(value)
-        or _LOCATOR_EMBEDDED_ABSOLUTE.search(value)
-        or _LOCATOR_TRAVERSAL.search(value)
-        or _LOCATOR_HOME.search(value)
-        or "\\" in value
-        or "://" in value
-        or value.startswith("/")
-        or any(component in {".", "..", "~"} for component in value.split("/"))
+        _LOCATOR_LOCAL_PATH.search(normalized)
+        or _LOCATOR_DRIVE_PREFIX.search(normalized)
+        or _LOCATOR_ENVIRONMENT.search(normalized)
+        or _LOCATOR_EMBEDDED_ABSOLUTE.search(normalized)
+        or _LOCATOR_TRAVERSAL.search(normalized)
+        or _LOCATOR_HOME.search(normalized)
+        or "\\" in normalized
+        or "://" in normalized
+        or normalized.startswith("/")
+        or any(
+            component in {".", "..", "~"} for component in normalized.split("/")
+        )
     ):
         raise PublicLocatorPathError("public locator contains path material")
     return value

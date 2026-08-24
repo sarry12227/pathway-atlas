@@ -75,8 +75,16 @@ class ContractTest(unittest.TestCase):
     def test_public_locator_contract_is_shared_by_direct_adapter_constructors(self):
         from scripts.adapters import PublicLocatorError, validate_public_locator
 
-        safe = "page[1]/image[page-1]/bbox[1,2,3,4]"
-        self.assertEqual(safe, validate_public_locator(safe))
+        safe = (
+            "物理类!A2:F2",
+            "sheet[C3:F3]",
+            "page[1]/image[page-1]/bbox[1,2,3,4]",
+            "ordinary-safe-id-2026",
+            "fact[138001380000]",
+        )
+        for locator in safe:
+            with self.subTest(safe_locator=locator):
+                self.assertEqual(locator, validate_public_locator(locator))
         unsafe = (
             "C:\\private\\scores.xlsx",
             "sheet[C:relative-sheet]",
@@ -90,7 +98,11 @@ class ContractTest(unittest.TestCase):
             "sheet[${HOME}]",
             "student[name@example.test]",
             "student-138-0013-8000",
+            "student 138 0013 8000",
+            "student １３８　００１３　８０００",
             "office-010-12345678",
+            "row-C:private.txt",
+            "row-Ｃ：private.txt",
         )
         row = ExtractedRow(
             values={"score": 650},
@@ -112,10 +124,33 @@ class ContractTest(unittest.TestCase):
                 with self.assertRaises(PublicLocatorError) as raised:
                     validate_public_locator(locator)
                 self.assertNotIn(locator, str(raised.exception))
-                with self.assertRaises(PublicLocatorError):
+                with self.assertRaises(PublicLocatorError) as direct_row_error:
+                    ExtractedRow(
+                        values={"score": 650},
+                        cell_status={"score": CellStatus.EXACT},
+                        location=locator,
+                        confidence=1,
+                    )
+                self.assertNotIn(locator, str(direct_row_error.exception))
+                with self.assertRaises(PublicLocatorError) as direct_table_error:
+                    ExtractedTable(
+                        table_id=locator,
+                        caption="合成表",
+                        sheet=None,
+                        rows=(row,),
+                        coverage=ExtractedCoverage(
+                            lower_score=650, upper_score=650
+                        ),
+                        warnings=(),
+                        extraction_method="html-table",
+                    )
+                self.assertNotIn(locator, str(direct_table_error.exception))
+                with self.assertRaises(PublicLocatorError) as row_error:
                     replace(row, location=locator)
-                with self.assertRaises(PublicLocatorError):
+                self.assertNotIn(locator, str(row_error.exception))
+                with self.assertRaises(PublicLocatorError) as table_error:
                     replace(table, table_id=locator)
+                self.assertNotIn(locator, str(table_error.exception))
 
     def test_coverage_normalizes_mathematical_integers_and_rejects_invalid_bounds(self):
         coverage = ExtractedCoverage(630.0, 650, 100.0, 300)

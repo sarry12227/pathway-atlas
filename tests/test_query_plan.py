@@ -206,6 +206,14 @@ class QueryPlanTest(unittest.TestCase):
 
         self.assertEqual(plan.authority_name, "黑龙江省招生考试院")
         self.assertEqual(plan.official_roots, ("https://www.hljea.org.cn/",))
+        with mock.patch(
+            "query_plan.load_province_catalog",
+            side_effect=AssertionError("unexpected catalog I/O"),
+        ):
+            self.assertEqual(
+                validate_query_plan_payload(plan.to_dict(), catalog=catalog).to_dict(),
+                plan.to_dict(),
+            )
         kinds = {task.kind for task in plan.tasks}
         self.assertTrue(
             {
@@ -299,6 +307,12 @@ class QueryPlanTest(unittest.TestCase):
                     config = replace(base_312, province=discovery.province)
                     profile = self.profile_312(target_province=discovery.province)
                 plan = build_query_plan(profile, config, 2026, catalog=catalog)
+                self.assertEqual(
+                    validate_query_plan_payload(
+                        plan.to_dict(), catalog=catalog
+                    ).to_dict(),
+                    plan.to_dict(),
+                )
                 self.assertEqual(plan.authority_name, discovery.authority_name)
                 self.assertEqual(plan.official_roots, discovery.official_roots)
                 self.assertTrue(
@@ -315,6 +329,52 @@ class QueryPlanTest(unittest.TestCase):
                     serialized = json.dumps(plan.to_dict(), ensure_ascii=False)
                     self.assertIn("海南省考试局", serialized)
                     self.assertNotIn("海南教育考试院", serialized)
+
+    def test_semantic_validator_rejects_fully_forged_rehashed_catalog_authority(self):
+        payload = self.build_312().to_dict()
+        trusted_authority = payload["authority_name"]
+        payload["authority_name"] = "Forged Authority"
+        payload["official_roots"] = ["https://www.baidu.com/"]
+        for task in payload["tasks"]:
+            task["authority_name"] = "Forged Authority"
+            task["official_roots"] = ["https://www.baidu.com/"]
+            task["query_variants"] = [
+                query.replace(trusted_authority, "Forged Authority")
+                for query in task["query_variants"]
+            ]
+            rehash_task_payload(task)
+
+        with self.assertRaises(ValueError):
+            validate_query_plan_payload(payload)
+
+    def test_semantic_validator_compares_each_trusted_catalog_identity_field(self):
+        authority = self.build_312().to_dict()
+        trusted_authority = authority["authority_name"]
+        authority["authority_name"] = "Forged Authority"
+        for task in authority["tasks"]:
+            task["authority_name"] = "Forged Authority"
+            task["query_variants"] = [
+                query.replace(trusted_authority, "Forged Authority")
+                for query in task["query_variants"]
+            ]
+            rehash_task_payload(task)
+
+        roots = self.build_312().to_dict()
+        roots["official_roots"] = ["https://www.baidu.com/"]
+        for task in roots["tasks"]:
+            task["official_roots"] = ["https://www.baidu.com/"]
+            rehash_task_payload(task)
+
+        verification_date = self.build_312().to_dict()
+        verification_date["catalog_verified_at"] = "2026-08-23"
+
+        for name, forged in (
+            ("authority_name", authority),
+            ("official_roots", roots),
+            ("catalog_verified_at", verification_date),
+        ):
+            with self.subTest(field=name), self.assertRaises(ValueError):
+                validate_query_plan_payload(forged, catalog=self.catalog)
 
     def test_catalog_loader_rejects_nonarray_collections_and_nonweb_roots(self):
         tracked = json.loads(
@@ -785,6 +845,7 @@ class QueryPlanSchemaTest(unittest.TestCase):
                 "task_id_digest",
                 "task_context",
                 "catalog_discovery_context",
+                "trusted_catalog_identity",
                 "structured_target",
                 "explicit_three_year_window",
                 "availability_expectation",

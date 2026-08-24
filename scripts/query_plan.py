@@ -1240,8 +1240,12 @@ def build_query_plan(
     )
 
 
-def validate_query_plan_payload(payload: Any) -> QueryPlan:
-    """Validate JSON structure plus year, context, and task-ID semantics."""
+def validate_query_plan_payload(
+    payload: Any,
+    *,
+    catalog: ProvinceCatalogSnapshot | None = None,
+) -> QueryPlan:
+    """Validate JSON semantics against one trusted province catalog snapshot."""
 
     if not isinstance(payload, dict) or set(payload) != _PLAN_FIELDS:
         raise ValueError("query-plan object fields do not match the contract")
@@ -1253,7 +1257,7 @@ def validate_query_plan_payload(payload: Any) -> QueryPlan:
         if not isinstance(raw_task, dict) or set(raw_task) != _TASK_FIELDS:
             raise ValueError("query-task object fields do not match the contract")
         tasks.append(QueryTask(**raw_task))
-    return QueryPlan(
+    plan = QueryPlan(
         schema_version=payload["schema_version"],
         province=payload["province"],
         exam_year=payload["exam_year"],
@@ -1263,6 +1267,21 @@ def validate_query_plan_payload(payload: Any) -> QueryPlan:
         catalog_verified_at=payload["catalog_verified_at"],
         tasks=tuple(tasks),
     )
+    if catalog is None:
+        catalog = load_province_catalog()
+    if type(catalog) is not ProvinceCatalogSnapshot:
+        raise TypeError("catalog must be a strict ProvinceCatalogSnapshot")
+    discovery = catalog.resolve(plan.province)
+    if (
+        discovery.province != plan.province
+        or discovery.authority_name != plan.authority_name
+        or discovery.official_roots != plan.official_roots
+        or catalog.verified_at != plan.catalog_verified_at
+    ):
+        raise ValueError(
+            "query-plan discovery metadata does not match the trusted catalog"
+        )
+    return plan
 
 
 def _strict_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
