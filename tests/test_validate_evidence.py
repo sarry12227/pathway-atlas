@@ -44,9 +44,37 @@ class ValidateEvidenceCliTest(unittest.TestCase):
             self.fail(f"validator stdout was not JSON: {error}: {result.stdout!r}")
         return result, summary
 
-    def copy_fixture(self, name: str, destination_name: str | None = None) -> Path:
+    def copy_fixture(
+        self,
+        name: str,
+        destination_name: str | None = None,
+        *,
+        include_provenance: bool = True,
+    ) -> Path:
         destination = self.temp_root / (destination_name or name)
         shutil.copytree(FIXTURES / name, destination)
+        if include_provenance:
+            facts = [
+                json.loads(line)
+                for line in (destination / "normalized" / "facts.jsonl").read_text("utf-8").splitlines()
+            ]
+            contexts = [
+                json.loads(line)
+                for line in (destination / "context.jsonl").read_text("utf-8").splitlines()
+            ]
+            contexts.extend(
+                {
+                    "kind": "fact-provenance",
+                    "fact_id": fact["fact_id"],
+                    "source_ids": fact["source_ids"],
+                    "year": 2026,
+                    "extraction_method": "manual-structured",
+                    "locator": f"fixture[{name}]/fact[{fact['fact_id']}]",
+                }
+                for fact in facts
+            )
+            self.write_contexts(destination, contexts)
+            self.rewrite_manifest_hash(destination)
         return destination
 
     @staticmethod
@@ -103,14 +131,88 @@ class ValidateEvidenceCliTest(unittest.TestCase):
             newline="\n",
         )
 
+    @staticmethod
+    def write_contexts(bundle: Path, contexts) -> None:
+        (bundle / "context.jsonl").write_text(
+            "".join(
+                json.dumps(item, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
+                for item in contexts
+            ),
+            encoding="utf-8",
+            newline="\n",
+        )
+
+    @staticmethod
+    def provenance(**overrides):
+        return {
+            "kind": "fact-provenance",
+            "fact_id": "score-001",
+            "source_ids": ["s1", "s2", "s3"],
+            "year": 2026,
+            "extraction_method": "manual-structured",
+            "locator": "fixture[three-source-consensus]/fact[score-001]",
+            **overrides,
+        }
+
+    def provenance_fixture(self, name="three-source-consensus") -> Path:
+        return self.copy_fixture(name)
+
     def test_consensus_fixture_passes_with_machine_readable_summary(self):
-        result, summary = self.run_cli(FIXTURES / "three-source-consensus")
+        result, summary = self.run_cli(self.provenance_fixture())
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(summary["valid"], True)
         self.assertEqual(summary["errors"], [])
         self.assertEqual(summary["candidate_count"], 3)
         self.assertEqual(summary["fact_count"], 1)
+
+    def test_validator_requires_exactly_one_hash_bound_provenance_per_fact(self):
+        cases = {
+            "missing": [],
+            "duplicate": [self.provenance(), self.provenance()],
+            "wrong-fact": [self.provenance(fact_id="other-fact")],
+            "wrong-sources": [self.provenance(source_ids=["s1", "s2"])],
+        }
+        for name, records in cases.items():
+            with self.subTest(name=name):
+                bundle = self.copy_fixture(
+                    "three-source-consensus", f"provenance-{name}", include_provenance=False
+                )
+                self.write_contexts(bundle, records)
+                self.rewrite_manifest_hash(bundle)
+
+                result = validate_bundle_snapshot(bundle)
+
+                self.assertIsNone(result.snapshot)
+                self.assertIn("provenance", {issue[0] for issue in result.issues})
+
+    def test_validator_rejects_invalid_provenance_values_before_snapshot(self):
+        mutations = (
+            {"year": True},
+            {"year": 2026.0},
+            {"year": 2026.5},
+            {"year": "2026"},
+            {"extraction_method": "unknown-parser"},
+            {"locator": "C:\\private\\scores.xlsx"},
+            {"locator": "../private/scores.xlsx"},
+            {"locator": "sheet[C:/private/scores.xlsx]"},
+            {"locator": "source[/home/user/scores.html]"},
+            {"locator": "source[https://private.example.test/item]"},
+            {"locator": "student[name@example.test]"},
+            {"locator": "student-138-0013-8000"},
+        )
+        for index, mutation in enumerate(mutations):
+            with self.subTest(index=index):
+                bundle = self.copy_fixture(
+                    "three-source-consensus", f"bad-provenance-{index}", include_provenance=False
+                )
+                self.write_contexts(bundle, [self.provenance(**mutation)])
+                self.rewrite_manifest_hash(bundle)
+
+                result = validate_bundle_snapshot(bundle)
+
+                self.assertIsNone(result.snapshot)
+                self.assertIn("provenance", {issue[0] for issue in result.issues})
 
     def test_replay_rejects_non_machine_session_and_malformed_manifest_hash(self):
         cases = (
@@ -233,7 +335,7 @@ class ValidateEvidenceCliTest(unittest.TestCase):
                 )
 
     def test_public_snapshot_is_factory_only_deep_frozen_and_hash_bound(self):
-        result = validate_bundle_snapshot(FIXTURES / "three-source-consensus")
+        result = validate_bundle_snapshot(self.provenance_fixture())
 
         self.assertEqual(result.issues, ())
         self.assertIsInstance(result.snapshot, ValidatedEvidenceSnapshot)
@@ -360,6 +462,14 @@ class ValidateEvidenceCliTest(unittest.TestCase):
 
         self.rewrite_candidates(bundle, make_b_sources)
         self.rewrite_facts(bundle, make_b_fact)
+        contexts = [
+            json.loads(line)
+            for line in (bundle / "context.jsonl").read_text("utf-8").splitlines()
+        ]
+        for context in contexts:
+            if context.get("kind") == "fact-provenance":
+                context["source_ids"] = ["s1", "s2"]
+        self.write_contexts(bundle, contexts)
         self.rewrite_manifest_hash(bundle)
 
     def test_opaque_b_roots_fail_cli_provenance_validation(self):
@@ -602,6 +712,14 @@ class ValidateEvidenceCliTest(unittest.TestCase):
                     return fact
 
                 self.rewrite_facts(bundle, retain_supported_boundary)
+                contexts = [
+                    json.loads(line)
+                    for line in (bundle / "context.jsonl").read_text("utf-8").splitlines()
+                ]
+                for context in contexts:
+                    if context.get("kind") == "fact-provenance":
+                        context["source_ids"] = ["s1"]
+                self.write_contexts(bundle, contexts)
                 self.rewrite_manifest_hash(bundle)
 
                 result, summary = self.run_cli(bundle)

@@ -65,11 +65,86 @@ class EvidenceStoreTest(unittest.TestCase):
             notes="",
         )
 
+    @staticmethod
+    def persist_fact(store, fact, *, year=2026, extraction_method="manual-structured", locator=None):
+        store.add_fact(
+            fact,
+            year=year,
+            extraction_method=extraction_method,
+            locator=locator or f"fact[{fact.fact_id}]",
+        )
+
+    def test_add_fact_requires_and_persists_one_canonical_provenance_record(self):
+        store = EvidenceStore.create(self.root, self.report)
+        store.add_candidate(self.candidate("s1"))
+        fact = self.fact("score-001", ("s1",))
+
+        with self.assertRaises(TypeError):
+            store.add_fact(fact)
+        self.persist_fact(
+            store,
+            fact,
+            year=2026.0,
+            extraction_method="html-table",
+            locator="table[score]/row[12]",
+        )
+        store.finalize()
+
+        contexts = [
+            json.loads(line)
+            for line in (store.session_path / "context.jsonl").read_text("utf-8").splitlines()
+        ]
+        self.assertEqual(
+            contexts,
+            [{
+                "kind": "fact-provenance",
+                "fact_id": "score-001",
+                "source_ids": ["s1"],
+                "year": 2026,
+                "extraction_method": "html-table",
+                "locator": "table[score]/row[12]",
+            }],
+        )
+
+    def test_fact_provenance_rejects_unknown_or_unsafe_values_without_partial_state(self):
+        invalid = (
+            {"year": True},
+            {"year": 2026.5},
+            {"year": "2026"},
+            {"extraction_method": "unknown-parser"},
+            {"locator": "C:\\private\\scores.xlsx"},
+            {"locator": "../private/scores.xlsx"},
+            {"locator": "sheet[C:/private/scores.xlsx]"},
+            {"locator": "source[/home/user/scores.html]"},
+            {"locator": "source[https://private.example.test/item]"},
+            {"locator": "student[name@example.test]"},
+            {"locator": "student-138-0013-8000"},
+        )
+        for index, overrides in enumerate(invalid):
+            with self.subTest(index=index):
+                store = EvidenceStore.create(self.root, self.report)
+                store.add_candidate(self.candidate("s1"))
+                values = {
+                    "year": 2026,
+                    "extraction_method": "manual-structured",
+                    "locator": "record[score-001]",
+                    **overrides,
+                }
+                with self.assertRaises((TypeError, ValueError, EvidencePrivacyError, EvidencePathError)):
+                    store.add_fact(self.fact("score-001", ("s1",)), **values)
+                self.assertEqual(store._facts, {})
+                self.assertEqual(store._contexts, [])
+
+    def test_generic_context_cannot_forge_reserved_fact_provenance(self):
+        store = EvidenceStore.create(self.root, self.report)
+        with self.assertRaises(EvidenceStateError):
+            store.add_context({"kind": "fact-provenance", "fact_id": "forged"})
+
     def build_bundle(self, order):
         store = EvidenceStore.create(self.root, self.report)
         for source_id in order:
             store.add_candidate(self.candidate(source_id))
-        store.add_fact(self.fact("score-001", tuple(reversed(order))))
+        self.persist_fact(store, self.fact("score-001", tuple(reversed(order))))
         store.add_context({"query": {"province": "示例省", "school_name": "示例中学"}})
         return store.finalize()
 
@@ -84,8 +159,8 @@ class EvidenceStoreTest(unittest.TestCase):
         store = EvidenceStore.create(self.root, self.report)
         store.add_candidate(self.candidate("s2"))
         store.add_candidate(self.candidate("s1"))
-        store.add_fact(self.fact("score-002", ("s2",)))
-        store.add_fact(self.fact("score-001", ("s1",)))
+        self.persist_fact(store, self.fact("score-002", ("s2",)))
+        self.persist_fact(store, self.fact("score-001", ("s1",)))
         store.reject_candidate("s3", "same-publisher-or-citation-root")
         store.add_context({"publisher": "Example", "school_name": "Example School"})
 
@@ -150,7 +225,7 @@ class EvidenceStoreTest(unittest.TestCase):
                     notes="",
                 )
                 with self.assertRaises(EvidencePrivacyError) as raised:
-                    store.add_fact(fact)
+                    self.persist_fact(store, fact)
                 self.assertNotIn(value, str(raised.exception))
 
     def test_pii_shaped_evidence_identifiers_are_rejected_at_ingestion(self):
@@ -169,7 +244,7 @@ class EvidenceStoreTest(unittest.TestCase):
                 store = EvidenceStore.create(self.root, self.report)
                 store.add_candidate(self.candidate("cli-s1"))
                 with self.assertRaises(EvidencePrivacyError):
-                    store.add_fact(self.fact(identifier, ("cli-s1",)))
+                    self.persist_fact(store, self.fact(identifier, ("cli-s1",)))
             with self.subTest(kind="rejection_id", identifier=identifier):
                 store = EvidenceStore.create(self.root, self.report)
                 with self.assertRaises(EvidencePrivacyError):
@@ -178,7 +253,7 @@ class EvidenceStoreTest(unittest.TestCase):
                 store = EvidenceStore.create(self.root, self.report)
                 store.add_candidate(self.candidate("cli-s1"))
                 try:
-                    store.add_fact(self.fact("school-policy-2026", (identifier,)))
+                    self.persist_fact(store, self.fact("school-policy-2026", (identifier,)))
                 except Exception as error:  # The assertion below identifies the boundary class.
                     raised = error
                 else:
@@ -188,7 +263,7 @@ class EvidenceStoreTest(unittest.TestCase):
     def test_ordinary_semantic_evidence_identifiers_remain_valid(self):
         store = EvidenceStore.create(self.root, self.report)
         store.add_candidate(self.candidate("cli-s1"))
-        store.add_fact(self.fact("school-policy-2026", ("cli-s1",)))
+        self.persist_fact(store, self.fact("school-policy-2026", ("cli-s1",)))
         store.reject_candidate("cli-rejected", "synthetic rejection")
 
         manifest = store.finalize()
@@ -200,7 +275,7 @@ class EvidenceStoreTest(unittest.TestCase):
         def populated_store():
             store = EvidenceStore.create(self.root, self.report)
             store.add_candidate(self.candidate("cli-s1"))
-            store.add_fact(self.fact("school-policy-2026", ("cli-s1",)))
+            self.persist_fact(store, self.fact("school-policy-2026", ("cli-s1",)))
             store.reject_candidate("cli-rejected", "synthetic rejection")
             return store
 
@@ -241,7 +316,7 @@ class EvidenceStoreTest(unittest.TestCase):
             notes="",
         )
 
-        store.add_fact(fact)
+        self.persist_fact(store, fact)
         store.add_context(context)
         fact_value["scores"].append(999)
         fact_value["student_name"] = "不应写入"
@@ -260,7 +335,7 @@ class EvidenceStoreTest(unittest.TestCase):
 
         baseline = EvidenceStore.create(self.root, self.report)
         baseline.add_candidate(self.candidate("s1"))
-        baseline.add_fact(
+        self.persist_fact(baseline,
             EvidenceFact(
                 fact_id="fact-001",
                 field="min_score",
@@ -294,14 +369,14 @@ class EvidenceStoreTest(unittest.TestCase):
         with self.assertRaises(EvidenceStateError):
             store.reject_candidate("s1", "duplicate")
 
-        store.add_fact(self.fact("score-001", ("s1",)))
+        self.persist_fact(store, self.fact("score-001", ("s1",)))
         with self.assertRaises(EvidenceStateError):
-            store.add_fact(self.fact("score-001", ("s1",)))
+            self.persist_fact(store, self.fact("score-001", ("s1",)))
 
     def test_fact_cannot_reference_an_unregistered_source(self):
         store = EvidenceStore.create(self.root, self.report)
         with self.assertRaises(EvidenceStateError):
-            store.add_fact(self.fact("score-001", ("unknown",)))
+            self.persist_fact(store, self.fact("score-001", ("unknown",)))
 
     def test_generated_raw_path_requires_a_registered_safe_source_id(self):
         store = EvidenceStore.create(self.root, self.report)
@@ -406,7 +481,7 @@ class EvidenceStoreTest(unittest.TestCase):
     def test_finalize_rejects_normalized_directory_swap_before_write(self):
         store = EvidenceStore.create(self.root, self.report)
         store.add_candidate(self.candidate("s1"))
-        store.add_fact(self.fact("score-001", ("s1",)))
+        self.persist_fact(store, self.fact("score-001", ("s1",)))
         outside = self.root / "outside"
         outside.mkdir()
         normalized = store.session_path / "normalized"
@@ -429,7 +504,7 @@ class EvidenceStoreTest(unittest.TestCase):
     def test_finalize_rejects_normalized_directory_swap_before_replace(self):
         store = EvidenceStore.create(self.root, self.report)
         store.add_candidate(self.candidate("s1"))
-        store.add_fact(self.fact("score-001", ("s1",)))
+        self.persist_fact(store, self.fact("score-001", ("s1",)))
         outside = self.root / "outside"
         outside.mkdir()
         normalized = store.session_path / "normalized"
@@ -513,7 +588,7 @@ class EvidenceStoreTest(unittest.TestCase):
         with self.assertRaises(EvidenceStateError):
             store.add_candidate(self.candidate("s2"))
         with self.assertRaises(EvidenceStateError):
-            store.add_fact(self.fact("score-001", ("s1",)))
+            self.persist_fact(store, self.fact("score-001", ("s1",)))
         with self.assertRaises(EvidenceStateError):
             store.reject_candidate("s3", "later")
 

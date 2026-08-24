@@ -15,6 +15,21 @@
       "type": "array",
       "items": {"$ref": "#/$defs/evidenceFact"}
     },
+    "contexts": {
+      "type": "array",
+      "items": {
+        "anyOf": [
+          {"$ref": "#/$defs/factProvenance"},
+          {
+            "type": "object",
+            "not": {
+              "required": ["kind"],
+              "properties": {"kind": {"const": "fact-provenance"}}
+            }
+          }
+        ]
+      }
+    },
     "claims": {
       "type": "array",
       "items": {"$ref": "#/$defs/factClaim"}
@@ -114,6 +129,39 @@
         "unit": {"type": ["string", "null"]},
         "source_id": {"type": "string"},
         "method": {"type": "string"}
+      }
+    },
+    "factProvenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "fact_id",
+        "source_ids",
+        "year",
+        "extraction_method",
+        "locator"
+      ],
+      "properties": {
+        "kind": {"const": "fact-provenance"},
+        "fact_id": {"type": "string", "minLength": 1},
+        "source_ids": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1}
+        },
+        "year": {"type": "integer", "minimum": 1, "maximum": 9999},
+        "extraction_method": {
+          "type": "string",
+          "enum": [
+            "html-table",
+            "spreadsheet",
+            "pdfplumber-text",
+            "host-ocr-rows",
+            "qr",
+            "manual-structured"
+          ]
+        },
+        "locator": {"type": "string", "minLength": 1, "maxLength": 512}
       }
     },
     "manifest": {

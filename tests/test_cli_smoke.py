@@ -157,7 +157,10 @@ Path(os.environ["SHENGXUE_SENTINEL_ACTIVE"]).write_text("active", encoding="utf-
                 source_ids=("cli-s1", "cli-s2", "cli-s3"),
                 method="three-source-consensus",
                 notes="",
-            )
+            ),
+            year=2026,
+            extraction_method="manual-structured",
+            locator="dataset[demo-312]/admission[row-1]",
         )
         store.add_fact(
             EvidenceFact(
@@ -182,7 +185,10 @@ Path(os.environ["SHENGXUE_SENTINEL_ACTIVE"]).write_text("active", encoding="utf-
                 source_ids=("cli-s1", "cli-s2", "cli-s3"),
                 method="three-source-consensus",
                 notes="",
-            )
+            ),
+            year=2026,
+            extraction_method="manual-structured",
+            locator="dataset[demo-33]/admission[row-1]",
         )
         store.finalize()
         cls.replay_evidence = store.session_path
@@ -412,7 +418,7 @@ Path(os.environ["SHENGXUE_SENTINEL_ACTIVE"]).write_text("active", encoding="utf-
     def test_evidence_validation_uses_native_success_and_policy_failure_codes(self):
         """Catches a validator that accepts repost conflicts or stops emitting JSON."""
         accepted = self._script(
-            "validate_evidence.py", EVIDENCE / "three-source-consensus"
+            "validate_evidence.py", self.replay_evidence
         )
         self.assertEqual(accepted.returncode, 0, accepted.stdout + accepted.stderr)
         accepted_payload = json.loads(accepted.stdout)

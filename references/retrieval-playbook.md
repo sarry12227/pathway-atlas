@@ -14,19 +14,25 @@ $ python -m scripts.validate_evidence --help
 
 ## 1. 能力预检
 
-在任何 discovery 前调用 `scripts.preflight`，根据实际 search、browse/read、download、XLSX、PDF、OCR 与 Python capability 选择 `complete`、`standard` 或 `offline`。把缺失 capability 与 degradation 写入机器可读 report；档位只决定可执行分支，不改变证据规则。
+在任何 discovery 前调用 `scripts.preflight`。只传入运行时声明的 host capability，并让 preflight 探测有限的 optional modules；使用返回的机器档位，不另造能力名或档位别名。
+
+| 类型 | 有限值 |
+|---|---|
+| host_capabilities | search,browse,vision |
+| optional_modules | docx,openpyxl,pdfplumber |
+| capability_tier | full,standard,offline |
 
 完成标准：机器 capability report 已存在，档位与每项 degradation 都有显式值。
 
 ## 2. 构建并读取确定性查询计划
 
-调用 `scripts.query_plan` 生成 deterministic query plan。逐个独立处理 `task_id`，读取并保持它声明的 `province`、`mode`、`canonical_subjects`、`year`、`kind`、`required_fields` 与 `max_candidates`；不合并不同事实、年份、省份或 subject context。当前年份 availability 以计划结果为准。
+先加载经过验证的 `ProvinceConfig.mode`，再调用 `scripts.query_plan` 生成 deterministic query plan。逐个独立处理 `task_id`，读取并保持任务声明的 `province`、`subject_group`、`year`、`kind`、`required_extraction_fields` 与 `max_candidates`；不合并不同事实、年份、省份或 subject context。当前年份 availability 以计划结果为准。
 
 完成标准：每个 task_id 已排入独立队列，或以明确 unavailable reason 结束。
 
 ## 3. 开始检索并枚举候选
 
-只在步骤 1–2 完成后开始 discovery。先查 province catalog roots 和可确认的 A origin，再查可追溯 B，最后查 C 线索。枚举实际可访问候选直到任务上限；首个看似可信页面只进入候选集，不结束枚举。每次失败的 network action 执行一次初始尝试，最多再 retry 一次，然后该 branch 降级或停止。
+只在步骤 1–2 完成后开始 discovery。依照统一规范入口给出的检索优先级枚举实际可访问候选直到任务上限；首个看似可信页面只进入候选集，不结束枚举。每次失败的 network action 执行一次初始尝试，最多再 retry 一次，然后该 branch 降级或停止。
 
 | 控制项 | 值 | 完成记录 |
 |---|---:|---|
@@ -38,7 +44,11 @@ $ python -m scripts.validate_evidence --help
 
 ## 4. 分类并去重
 
-按统一规范入口的身份维度分类候选，并调用 `scripts.source_policy.py` 的 canonicalization 与 `deduplicate_candidates`。先形成 independence components，再进行任何 corroboration 或数量判断；同一 component 只保留确定性代表。
+调用 `scripts.source_policy.py` 的 canonicalization 与 `deduplicate_candidates`；本流程不重述或重算规范中的独立性判定。
+
+| 输入状态 | 动作 | 输出状态 |
+|---|---|---|
+| candidates-enumerated | deduplicate_candidates | independence-components |
 
 完成标准：每个候选恰好处于 kept-once 或 rejected-with-stable-reason 状态。
 
@@ -50,13 +60,21 @@ $ python -m scripts.validate_evidence --help
 
 ## 6. 证据采纳
 
-先用 `scripts.source_policy.py` 完成独立性与 `evaluate_claims`，再把 candidates、rejections 与 facts 写入 `EvidenceStore`。value 与 unit 必须按统一规范入口完全一致；保留 conflict claims 和来源，不取平均。逐个处理 query-plan 的 required field。
+调用 `scripts.source_policy.py` 得到规范结果，并把该结果连同 candidates 与 rejections 通过 `EvidenceStore` 持久化；本流程不解释或改写采纳判定。
+
+| 输入状态 | 动作 | 输出状态 |
+|---|---|---|
+| extraction-results | persist-source-policy-result | EvidenceStore-persisted |
 
 完成标准：每个 required field 恰好具有 accepted、partial/masked、conflict 或 missing 状态。
 
 ## 7. 最终化并验证证据
 
 最终化 `EvidenceStore`，然后运行 `scripts.validate_evidence`。validator 成功后才接受 authenticated immutable evidence snapshot；任何 validation failure 都停止依赖该事实的 calculation，并把 dependent output 标成 unavailable。
+
+| 输入状态 | 动作 | 输出状态 |
+|---|---|---|
+| EvidenceStore-persisted | finalize-then-validate | authenticated-snapshot |
 
 完成标准：authenticated immutable evidence snapshot 已存在，或 dependent output 已显式 unavailable；不存在未验证的计算输入。
 
@@ -81,10 +99,10 @@ $ python -m scripts.validate_evidence --help
 
 ## 能力降级分支
 
-| 档位 | 可用能力与动作 | 证据规范 | 实时声明 |
-|---|---|---|---|
-| complete | web/read/download/XLSX/PDF/OCR 可用；执行全部适用步骤 | [同一信源规范](source-policy.md) | 只声明 snapshot 实际验证的年份与 coverage |
-| standard | web 与 text/structured file 可用，无可靠 OCR；寻找 machine-readable 或 official alternative，否则 image-only fact 为 missing | [同一信源规范](source-policy.md) | 只声明实际验证的 text/structured coverage |
-| offline | 只使用用户提供且 authenticated 的 local fixtures/evidence；跳过 live discovery | [同一信源规范](source-policy.md) | 禁止声称当前或实时验证 |
+| 机器档位 | 人类标签 | 可用能力与动作 | 证据规范 | 实时声明 |
+|---|---|---|---|---|
+| full | 完整档 | 执行当前 capability report 允许的所有步骤 | [同一信源规范](source-policy.md) | 只声明 snapshot 实际验证的年份与 coverage |
+| standard | 标准档 | 只执行 capability report 允许的分支，其余记录 degradation | [同一信源规范](source-policy.md) | 只声明实际验证的 coverage |
+| offline | 离线档 | 只使用用户提供且 authenticated 的 local fixtures/evidence；跳过 live discovery | [同一信源规范](source-policy.md) | 禁止声称当前或实时验证 |
 
-三种分支执行相同 admission thresholds、conflict handling 与 independence counting。capability loss 只能减少 coverage；它不能放宽门槛或把 missing 变成 exact。
+三种分支都只调用同一规范入口；capability loss 只能减少 coverage。

@@ -32,9 +32,11 @@ from scripts.contracts import (  # noqa: E402
     SourceTier,
 )
 from scripts.evidence import (  # noqa: E402
+    FACT_PROVENANCE_KIND,
     EvidencePathError,
     EvidencePrivacyError,
     EvidenceStore,
+    _canonical_fact_provenance,
     _PII_KEYS,
     _normalize_key,
     _reject_pii_identifier,
@@ -59,6 +61,9 @@ _MAX_ARTIFACT_BYTES = 8 * 1024 * 1024
 _MAX_BUNDLE_BYTES = 24 * 1024 * 1024
 _REPARSE_POINT = 0x0400
 _SOURCE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
+_PROVENANCE_FIELDS = {
+    "kind", "fact_id", "source_ids", "year", "extraction_method", "locator"
+}
 
 
 @dataclass(frozen=True)
@@ -521,6 +526,96 @@ def _validate_shapes(
         if manifest["rejected_count"] != len(rejections):
             errors.append(_error("schema", "rejected_count does not match records", "manifest.json"))
     errors.extend(_validate_rejection_links(candidates, facts, rejections))
+    errors.extend(_validate_fact_provenance(candidates, facts, contexts))
+    return errors
+
+
+def _validate_fact_provenance(
+    candidates: list[Any], facts: list[Any], contexts: list[Any]
+) -> list[dict[str, str]]:
+    errors: list[dict[str, str]] = []
+    candidate_by_id = {
+        item.get("source_id"): item
+        for item in candidates
+        if isinstance(item, dict) and isinstance(item.get("source_id"), str)
+    }
+    fact_by_id = {
+        item.get("fact_id"): item
+        for item in facts
+        if isinstance(item, dict) and isinstance(item.get("fact_id"), str)
+    }
+    provenance_by_fact: dict[str, list[tuple[int, dict[str, Any]]]] = {}
+    for index, context in enumerate(contexts, 1):
+        if not isinstance(context, dict) or context.get("kind") != FACT_PROVENANCE_KIND:
+            continue
+        location = f"context.jsonl:{index}"
+        if set(context) != _PROVENANCE_FIELDS:
+            errors.append(_error("provenance", "fact provenance shape is not canonical", location))
+            continue
+        fact_id = context.get("fact_id")
+        if not isinstance(fact_id, str):
+            errors.append(_error("provenance", "fact provenance fact_id is invalid", location))
+            continue
+        if type(context.get("year")) is not int:
+            errors.append(_error("provenance", "fact provenance year is not canonical", location))
+            continue
+        try:
+            canonical = _canonical_fact_provenance(
+                {
+                    "fact_id": fact_id,
+                    "source_ids": context.get("source_ids"),
+                },
+                year=context.get("year"),
+                extraction_method=context.get("extraction_method"),
+                locator=context.get("locator"),
+            )
+        except (KeyError, TypeError, ValueError, EvidencePathError, EvidencePrivacyError):
+            errors.append(_error("provenance", "fact provenance values are invalid", location))
+            continue
+        if context != canonical:
+            errors.append(_error("provenance", "fact provenance is not canonical", location))
+            continue
+        provenance_by_fact.setdefault(fact_id, []).append((index, context))
+
+    for fact_id, fact in fact_by_id.items():
+        records = provenance_by_fact.get(fact_id, [])
+        if len(records) != 1:
+            errors.append(
+                _error(
+                    "provenance",
+                    "every fact requires exactly one provenance record",
+                    "context.jsonl",
+                )
+            )
+            continue
+        index, provenance = records[0]
+        location = f"context.jsonl:{index}"
+        if provenance["source_ids"] != fact.get("source_ids"):
+            errors.append(_error("provenance", "fact provenance source_ids do not match", location))
+            continue
+        for source_id in provenance["source_ids"]:
+            candidate = candidate_by_id.get(source_id)
+            if (
+                not isinstance(candidate, dict)
+                or not isinstance(candidate.get("url"), str)
+                or not _valid_public_document_url(candidate["url"])
+                or not isinstance(candidate.get("citation_root"), str)
+                or not canonicalize_provenance_url(candidate["citation_root"])
+            ):
+                errors.append(
+                    _error("provenance", "linked source lacks a validated citation chain", location)
+                )
+                break
+    for fact_id, records in provenance_by_fact.items():
+        if fact_id not in fact_by_id:
+            for index, _record in records:
+                errors.append(
+                    _error("provenance", "fact provenance references an unknown fact", f"context.jsonl:{index}")
+                )
+        elif len(records) > 1:
+            errors.append(
+                _error("provenance", "fact provenance is duplicated", "context.jsonl")
+            )
     return errors
 
 

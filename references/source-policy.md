@@ -90,10 +90,12 @@
 | extraction_method | 保存 HTML/XLSX/PDF/OCR/QR 或人工结构化方法 |
 | locator | 保存 page/sheet/table/row 或 page/image/bbox 的字段级位置 |
 
+持久化事实时必须调用 `EvidenceStore.add_fact(..., year=, extraction_method=, locator=)`。该入口在 `context.jsonl` 写入与 fact ID 和 source IDs 精确绑定的 canonical `fact-provenance` 记录；每个 fact 恰好 1 条。year 必须是数学整数年，extraction_method 必须来自有限词汇，locator 必须是不含本地路径或个人数据的逻辑位置。所有 linked source 都必须保留 validated URL 与 citation root。记录纳入 manifest hash，并在形成 authenticated snapshot 前验证；缺失、重复、错配或伪造都 fail closed。
+
 当前年份是否可用由 deterministic query plan 决定。“not yet expected” 不是上一年事实；上一年或更早材料只能按实际 `year` 标为历史。当前年份无法验证时保留 `missing`，不替换成未标注的历史值。
 
 引用只保留最小支持摘录，同时保存足够 locator context 以便重放。下载和 QR redirect chain 必须经过 secure downloader 与相应 adapter。推断只能输出区间，并同时保存 `method/source/bounds`；任何无法重放的推断保持 `missing`。
 
 ## 流程序列入口
 
-按[检索流程](retrieval-playbook.md)执行 preflight、query-plan、候选枚举、去重、提取、采纳、验证和 handoff。每一步达到其完成标准后再进入下一步；本文件的门槛在 complete、standard 与 offline 三种能力档位中保持不变。
+按[检索流程](retrieval-playbook.md)执行 preflight、query-plan、候选枚举、去重、提取、采纳、验证和 handoff。每一步达到其完成标准后再进入下一步；本文件的门槛在 full（完整档）、standard 与 offline 三种能力档位中保持不变。

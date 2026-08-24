@@ -1,16 +1,23 @@
+import json
 import re
 import subprocess
 import sys
 import unittest
+from dataclasses import fields
 from pathlib import Path
 
-from scripts.contracts import EvidenceStatus, FactClaim, SourceCandidate, SourceTier
+from scripts.contracts import CapabilityTier, EvidenceStatus, FactClaim, SourceCandidate, SourceTier
+from scripts.preflight import HOST_CAPABILITIES, OPTIONAL_MODULES
+from scripts.evidence import FACT_EXTRACTION_METHODS
+from scripts.province_registry import ProvinceConfig
+from scripts.query_plan import QueryPlan, QueryTask
 from scripts.source_policy import evaluate_claims
 
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE_POLICY = ROOT / "references" / "source-policy.md"
 RETRIEVAL_PLAYBOOK = ROOT / "references" / "retrieval-playbook.md"
+EVIDENCE_SCHEMA = ROOT / "schemas" / "evidence-bundle.schema.json"
 
 SOURCE_HEADINGS = (
     "# 信源与证据采纳规范",
@@ -164,12 +171,33 @@ class InstructionContractTest(unittest.TestCase):
         )
         self.assertEqual(len(stops), 4)
 
-        degradation = {row["档位"]: row for row in table_in(text, "## 能力降级分支")}
-        self.assertEqual(set(degradation), {"complete", "standard", "offline"})
+        degradation = {row["机器档位"]: row for row in table_in(text, "## 能力降级分支")}
+        self.assertEqual(set(degradation), {item.value for item in CapabilityTier})
+        self.assertEqual(degradation[CapabilityTier.FULL.value]["人类标签"], "完整档")
         self.assertTrue(
             all(row["证据规范"] == "[同一信源规范](source-policy.md)" for row in degradation.values())
         )
         self.assertEqual(degradation["offline"]["实时声明"], "禁止声称当前或实时验证")
+
+        operations = {}
+        for heading in (
+            "## 4. 分类并去重",
+            "## 6. 证据采纳",
+            "## 7. 最终化并验证证据",
+        ):
+            rows = table_in(text, heading)
+            self.assertEqual(len(rows), 1)
+            operations[heading] = (
+                rows[0]["输入状态"], rows[0]["动作"], rows[0]["输出状态"]
+            )
+        self.assertEqual(
+            operations,
+            {
+                "## 4. 分类并去重": ("candidates-enumerated", "deduplicate_candidates", "independence-components"),
+                "## 6. 证据采纳": ("extraction-results", "persist-source-policy-result", "EvidenceStore-persisted"),
+                "## 7. 最终化并验证证据": ("EvidenceStore-persisted", "finalize-then-validate", "authenticated-snapshot"),
+            },
+        )
 
         dedup = text.index("## 4. 分类并去重")
         admission = text.index("## 6. 证据采纳")
@@ -243,6 +271,10 @@ class InstructionContractTest(unittest.TestCase):
         self.assertIn("区间", citation)
         self.assertIn("method/source/bounds", citation)
         self.assertIn("secure downloader", citation)
+        self.assertIn("EvidenceStore.add_fact(..., year=, extraction_method=, locator=)", citation)
+        self.assertIn("fact-provenance", citation)
+        self.assertIn("恰好 1 条", citation)
+        self.assertIn("manifest hash", citation)
 
     def test_playbook_steps_are_bounded_and_use_current_public_seams(self):
         required = (
@@ -257,22 +289,54 @@ class InstructionContractTest(unittest.TestCase):
         for seam in required:
             self.assertIn(seam, self.playbook)
         query_step = section(self.playbook, "## 2. 构建并读取确定性查询计划")
+        query_task_fields = {item.name for item in fields(QueryTask)}
         for field in (
-            "task_id",
-            "province",
-            "mode",
-            "canonical_subjects",
-            "year",
-            "kind",
-            "required_fields",
-            "max_candidates",
+            "task_id", "province", "subject_group", "year", "kind",
+            "required_extraction_fields", "max_candidates",
         ):
+            self.assertIn(field, query_task_fields)
             self.assertIn(field, query_step)
+        self.assertIn("subject_group", {item.name for item in fields(QueryPlan)})
+        self.assertIn("mode", {item.name for item in fields(ProvinceConfig)})
+        self.assertIn("ProvinceConfig.mode", query_step)
+        for invented in ("canonical_subjects", "required_fields"):
+            self.assertNotIn(invented, query_step)
         extraction = section(self.playbook, "## 5. 通过匹配适配器提取")
         self.assertIn("page/sheet/table/row", extraction)
         self.assertIn("page/image/bbox", extraction)
         self.assertIn("decoded text", extraction)
         self.assertIn("secure downloader", extraction)
+
+    def test_capability_document_contract_matches_runtime_machine_vocabulary(self):
+        preflight = section(self.playbook, "## 1. 能力预检")
+        rows = table_in(self.playbook, "## 1. 能力预检")
+        declared = {row["类型"]: tuple(item.strip() for item in row["有限值"].split(",")) for row in rows}
+        self.assertEqual(declared["host_capabilities"], HOST_CAPABILITIES)
+        self.assertEqual(declared["optional_modules"], OPTIONAL_MODULES)
+        self.assertEqual(declared["capability_tier"], tuple(item.value for item in CapabilityTier))
+        self.assertNotIn("complete", preflight)
+        self.assertIn("full（完整档）", self.source)
+        self.assertNotIn("complete、standard", self.source)
+
+    def test_evidence_schema_defines_the_canonical_fact_provenance_record(self):
+        schema = json.loads(EVIDENCE_SCHEMA.read_text("utf-8"))
+        provenance = schema["$defs"]["factProvenance"]
+        self.assertFalse(provenance["additionalProperties"])
+        self.assertEqual(
+            set(provenance["required"]),
+            {"kind", "fact_id", "source_ids", "year", "extraction_method", "locator"},
+        )
+        self.assertEqual(provenance["properties"]["kind"], {"const": "fact-provenance"})
+        self.assertEqual(
+            tuple(provenance["properties"]["extraction_method"]["enum"]),
+            FACT_EXTRACTION_METHODS,
+        )
+        self.assertEqual(provenance["properties"]["year"]["type"], "integer")
+        contexts = schema["properties"]["contexts"]
+        self.assertEqual(contexts["type"], "array")
+        self.assertEqual(
+            contexts["items"]["anyOf"][0], {"$ref": "#/$defs/factProvenance"}
+        )
 
     def test_relative_links_exist_and_legacy_migration_inputs_are_not_normative(self):
         links = []
@@ -342,12 +406,18 @@ class InstructionContractTest(unittest.TestCase):
 
         playbook_mutations = (
             self.playbook.replace("| candidate-cap | 10 |", "| candidate-cap | 11 |", 1),
-            self.playbook.replace("## 4. 分类并去重", "## SWAP-DEDUP", 1)
-            .replace("## 6. 证据采纳", "## 4. 分类并去重", 1)
-            .replace("## SWAP-DEDUP", "## 6. 证据采纳", 1),
-            self.playbook.replace("## 7. 最终化并验证证据", "## SWAP-VALIDATE", 1)
-            .replace("## 9. 交接确定性引擎与报告", "## 7. 最终化并验证证据", 1)
-            .replace("## SWAP-VALIDATE", "## 9. 交接确定性引擎与报告", 1),
+            self.playbook.replace(
+                "| candidates-enumerated | deduplicate_candidates | independence-components |",
+                "| candidates-enumerated | count-before-dedup | independence-components |", 1,
+            ),
+            self.playbook.replace(
+                "| extraction-results | persist-source-policy-result | EvidenceStore-persisted |",
+                "| extraction-results | average-conflict | EvidenceStore-persisted |", 1,
+            ),
+            self.playbook.replace(
+                "| EvidenceStore-persisted | finalize-then-validate | authenticated-snapshot |",
+                "| EvidenceStore-persisted | calculate-before-validate | authenticated-snapshot |", 1,
+            ),
             self.playbook.replace("禁止声称当前或实时验证", "允许声称实时数据已验证", 1),
         )
         for mutated in playbook_mutations:

@@ -43,6 +43,19 @@ _SOURCE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 _PHONE_IDENTIFIER = re.compile(r"1[3-9][0-9]{9}")
 _IDENTITY_IDENTIFIER = re.compile(r"[0-9]{17}[0-9Xx]")
 _REPARSE_POINT = 0x0400
+FACT_PROVENANCE_KIND = "fact-provenance"
+FACT_EXTRACTION_METHODS = (
+    "html-table",
+    "spreadsheet",
+    "pdfplumber-text",
+    "host-ocr-rows",
+    "qr",
+    "manual-structured",
+)
+_FACT_EXTRACTION_METHODS = frozenset(FACT_EXTRACTION_METHODS)
+_LOCAL_PATH_FRAGMENT = re.compile(
+    r"(?i)(?:[a-z]:[\\/]|//|/(?:home|users|tmp|var|etc|private|mnt)(?:/|\]))"
+)
 _PII_KEYS = frozenset(
     {
         "name", "student_name", "phone", "mobile", "id_card", "address",
@@ -90,6 +103,54 @@ def _reject_pii_identifier(value: Any) -> None:
     compact = re.sub(r"[._:-]+", "", value)
     if _PHONE_IDENTIFIER.search(compact) or _IDENTITY_IDENTIFIER.search(compact):
         raise EvidencePrivacyError("Personal-data-shaped evidence identifiers are not allowed")
+
+
+def _normalize_provenance_year(value: Any) -> int:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise TypeError("Fact provenance year must be a mathematical integer")
+    if not (float(value).is_integer() and 1 <= value <= 9999):
+        raise ValueError("Fact provenance year must be a mathematical year")
+    return int(value)
+
+
+def _validate_extraction_method(value: Any) -> str:
+    if not isinstance(value, str) or value not in _FACT_EXTRACTION_METHODS:
+        raise ValueError("Fact provenance extraction method is unknown")
+    return value
+
+
+def _validate_locator(value: Any) -> str:
+    if not isinstance(value, str):
+        raise TypeError("Fact provenance locator must be a string")
+    if value != value.strip() or not value or len(value) > 512:
+        raise ValueError("Fact provenance locator is unsafe")
+    if any(ord(character) < 32 or ord(character) == 127 for character in value):
+        raise ValueError("Fact provenance locator is unsafe")
+    _reject_pii_identifier(value)
+    if (
+        _LOCAL_PATH_FRAGMENT.search(value)
+        or "\\" in value
+        or "://" in value
+        or "@" in value
+        or value.startswith("/")
+        or value.startswith("~/")
+        or any(component in {".", ".."} for component in value.split("/"))
+    ):
+        raise EvidencePathError("Fact provenance locator must not contain a local path")
+    return value
+
+
+def _canonical_fact_provenance(
+    fact: Mapping[str, Any], *, year: Any, extraction_method: Any, locator: Any
+) -> dict[str, Any]:
+    return {
+        "kind": FACT_PROVENANCE_KIND,
+        "fact_id": fact["fact_id"],
+        "source_ids": list(fact["source_ids"]),
+        "year": _normalize_provenance_year(year),
+        "extraction_method": _validate_extraction_method(extraction_method),
+        "locator": _validate_locator(locator),
+    }
 
 
 def _is_below(path: Path, parent: Path) -> bool:
@@ -281,7 +342,14 @@ class EvidenceStore:
             raise EvidenceStateError("Duplicate evidence source id")
         self._candidates[source_id] = snapshot
 
-    def add_fact(self, fact: EvidenceFact) -> None:
+    def add_fact(
+        self,
+        fact: EvidenceFact,
+        *,
+        year: int | float,
+        extraction_method: str,
+        locator: str,
+    ) -> None:
         self._require_open()
         if not isinstance(fact, EvidenceFact):
             raise TypeError("fact must be an EvidenceFact")
@@ -296,7 +364,17 @@ class EvidenceStore:
             raise EvidenceStateError("Duplicate evidence fact id")
         if set(snapshot["source_ids"]).difference(self._candidates):
             raise EvidenceStateError("Evidence fact references an unregistered source")
+        snapshot["source_ids"] = sorted(snapshot["source_ids"])
+        provenance = _snapshot(
+            _canonical_fact_provenance(
+                snapshot,
+                year=year,
+                extraction_method=extraction_method,
+                locator=locator,
+            )
+        )
         self._facts[fact_id] = snapshot
+        self._contexts.append(provenance)
 
     def reject_candidate(self, candidate: SourceCandidate | str, reason: str) -> None:
         self._require_open()
@@ -318,7 +396,10 @@ class EvidenceStore:
         self._require_open()
         if not isinstance(context, Mapping):
             raise TypeError("context must be a mapping")
-        self._contexts.append(_snapshot(context))
+        snapshot = _snapshot(context)
+        if snapshot.get("kind") == FACT_PROVENANCE_KIND:
+            raise EvidenceStateError("Fact provenance can only be created with add_fact")
+        self._contexts.append(snapshot)
 
     def raw_path_for(self, source_id: str) -> Path:
         self._require_open()
@@ -418,6 +499,28 @@ class EvidenceStore:
                 _reject_pii_identifier(source_id)
         for source_id in self._rejections:
             _reject_pii_identifier(source_id)
+        provenance_by_fact: dict[str, list[dict[str, Any]]] = {}
+        for context in self._contexts:
+            if context.get("kind") != FACT_PROVENANCE_KIND:
+                continue
+            fact_id = context.get("fact_id")
+            if not isinstance(fact_id, str):
+                raise EvidenceStateError("Fact provenance is malformed")
+            provenance_by_fact.setdefault(fact_id, []).append(context)
+        if set(provenance_by_fact) != set(self._facts) or any(
+            len(records) != 1 for records in provenance_by_fact.values()
+        ):
+            raise EvidenceStateError("Every fact requires exactly one provenance record")
+        for fact_id, fact in self._facts.items():
+            record = provenance_by_fact[fact_id][0]
+            expected = _canonical_fact_provenance(
+                fact,
+                year=record.get("year"),
+                extraction_method=record.get("extraction_method"),
+                locator=record.get("locator"),
+            )
+            if record != expected:
+                raise EvidenceStateError("Fact provenance does not match its fact")
 
     @staticmethod
     def _jsonl(records: list[dict[str, Any]]) -> str:
