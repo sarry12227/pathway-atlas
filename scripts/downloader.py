@@ -513,6 +513,8 @@ def _open_pinned_request(
             connection.close()
             raise
         except (OSError, http.client.HTTPException) as exc:
+            if watchdog is None:
+                watchdog = getattr(connection, "deadline_watchdog", None)
             expired = (
                 watchdog is not None and watchdog.expired.is_set()
             ) or time.monotonic() >= deadline

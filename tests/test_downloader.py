@@ -13,6 +13,7 @@ from scripts import downloader
 from scripts.downloader import (
     DownloadHttpError,
     DownloadMediaTypeError,
+    DownloadNetworkError,
     DownloadRedirectError,
     DownloadSecurityError,
     DownloadStorageError,
@@ -547,6 +548,41 @@ class DownloaderHardDeadlineTest(unittest.TestCase):
         self.assertLess(elapsed, 0.18)
         self.assertFalse(context.do_handshake_on_connect)
         self.assertTrue(context.wrapped_socket.closed)
+
+    @patch("scripts.downloader._PinnedHTTPSConnection")
+    def test_connect_error_uses_expired_connection_watchdog(self, connection_class):
+        connection = connection_class.return_value
+        connection.deadline_watchdog.expired = threading.Event()
+        connection.deadline_watchdog.expired.set()
+        connection.connect.side_effect = ssl.SSLError("synthetic expired connect")
+
+        with self.assertRaises(DownloadTimeout):
+            downloader._open_pinned_request(
+                "https://public.example.test/data.csv",
+                ("93.184.216.34",),
+                1.0,
+            )
+
+        connection.deadline_watchdog.cancel.assert_called_once_with()
+        connection.close.assert_called_once_with()
+
+    @patch("scripts.downloader._PinnedHTTPSConnection")
+    def test_connect_error_keeps_nonexpired_connection_watchdog_as_network_error(
+        self, connection_class
+    ):
+        connection = connection_class.return_value
+        connection.deadline_watchdog.expired = threading.Event()
+        connection.connect.side_effect = ssl.SSLError("synthetic live connect")
+
+        with self.assertRaises(DownloadNetworkError):
+            downloader._open_pinned_request(
+                "https://public.example.test/data.csv",
+                ("93.184.216.34",),
+                1.0,
+            )
+
+        connection.deadline_watchdog.cancel.assert_called_once_with()
+        connection.close.assert_called_once_with()
 
     @patch("scripts.downloader._PinnedHTTPSConnection", SlowBodyConnection)
     @patch("scripts.downloader.socket.getaddrinfo")
