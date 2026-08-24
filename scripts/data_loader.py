@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""数据加载层：按省份+科目组+年份加载随包 CSV，含数据完整性自检。
+"""数据加载层：按显式省份目录、科目组和年份加载 CSV，并做完整性自检。
 
 自检原则（spec §4.5 / 任务票 AC）：行数为 0、缺科目组/年份、缺文件
 一律明确报错并指明缺哪份数据，绝不静默返回空推荐。
@@ -44,7 +44,7 @@ FLOAT_FIELDS = {
     "gangao": ("estimated_score",),
 }
 
-# M5 多元路径三表（无科目组维度，样本按物理类整理，见 data/hubei/README.md）
+# 可选的多元升学路径数据表；具体覆盖范围由调用方提供的数据集声明。
 PATH_TABLES = ("qiangji", "zongping", "gangao")
 
 MAX_CSV_BYTES = 16 * 1024 * 1024
@@ -230,7 +230,7 @@ def get_province_dir(province: str, root: os.PathLike[str] | str = DEFAULT_DATA_
 
 
 def _province_dir(province: str, root: os.PathLike[str] | str) -> str:
-    """One-release compatibility alias for the legacy verification script."""
+    """Compatibility alias for callers that still resolve by province name."""
 
     return os.fspath(get_province_dir(province, root))
 
@@ -296,8 +296,8 @@ def load_province_config(province: str | None = None, root: os.PathLike[str] | s
     """加载省份配置（province.json）：科目组、锚点线集合、当年判定与展示参数。
 
     锚点线名称/数量/列映射全部来自配置，代码不假定具体锚点（spec §4.1）。
-    require_anchors=True（默认，M3 估分路径）时 anchors 缺失/不完整明确报错；
-    不需要估分的调用方（M4/M5、verify 脚本）传 False，只要求配置文件本身存在可解析。
+    require_anchors=True 时 anchors 缺失或不完整会明确报错；传 False
+    时只要求配置文件本身存在且可解析。
     """
     directory = _resolved_data_dir(province, root, province_dir)
     label = province or directory.name
@@ -335,8 +335,7 @@ def load_xibao(province: str | None, config: dict,
 
 def load_schools(province: str | None = None, root: os.PathLike[str] | str = DEFAULT_DATA_ROOT, *,
                  province_dir: os.PathLike[str] | str | None = None) -> list[dict]:
-    """加载高中名录（降级链"同城同档代理"定位用）；文件缺失时返回空表，
-    不阻断折算（代理级会自动落到拒绝级）。"""
+    """加载可选高中名录；文件缺失时返回空表。"""
     directory = _resolved_data_dir(province, root, province_dir)
     return _load_csv(directory, "schools", province or directory.name, required=False)
 
@@ -379,8 +378,7 @@ def load_yifenyiduan(province: str | None = None, subject_group: str | None = No
 def load_path_table(province: str | None, table: str,
                     root: os.PathLike[str] | str = DEFAULT_DATA_ROOT, *,
                     province_dir: os.PathLike[str] | str | None = None) -> list[dict]:
-    """加载 M5 路径表（qiangji/zongping/gangao）：返回全部年份行，
-    最新年份选取在 path_recommend 内完成（口径同现有系统 MAX(year)）。"""
+    """加载指定路径表（qiangji/zongping/gangao）的全部可用行。"""
     if table not in PATH_TABLES:
         raise DataError(f"未知路径表「{table}」，应为：{'、'.join(PATH_TABLES)}")
     directory = _resolved_data_dir(province, root, province_dir)
@@ -390,7 +388,7 @@ def load_path_table(province: str | None, table: str,
 def score_to_rank(province: str | None, subject_group: str, score: int,
                   root: os.PathLike[str] | str = DEFAULT_DATA_ROOT, *,
                   province_dir: os.PathLike[str] | str | None = None) -> dict:
-    """分数→省排反查（口径同现有系统 import 推导）：
+    """分数→省排反查：
     精确命中取该分累计人数；分数在表中缺档时取相邻低分的累计；
     低于表中最低分 → 明确报错。"""
     year, rows = load_yifenyiduan(province, subject_group, root=root,
@@ -404,6 +402,6 @@ def score_to_rank(province: str | None, subject_group: str, score: int,
             Path(province_dir).name if province_dir is not None else "该省"
         )
         raise DataError(f"分数 {score} 低于{label}{subject_group}组{year}年"
-                        f"一分一段表最低分，无法反查省排名，请改用 --rank 直接输入省排名")
+                        f"一分一段表最低分，无法反查省排名，请直接提供已验证省排名")
     nearest = max(lower)
     return {"score": score, "rank": by_score[nearest], "year": year}

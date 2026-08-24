@@ -2,6 +2,7 @@ import ast
 import csv
 import contextlib
 import importlib
+import inspect
 import io
 import json
 import os
@@ -55,6 +56,27 @@ _PATH_JOIN_CALLS = frozenset({"os.path.join", "posixpath.join", "ntpath.join"})
 _DYNAMIC_IMPORT_CALLS = frozenset(
     {"importlib.import_module", "import_module", "__import__"}
 )
+
+_RECOMMENDATION_RUNTIME_PATHS = frozenset({
+    "scripts/generate_report.py",
+    "scripts/path_recommend.py",
+    "scripts/rank_calc.py",
+    "scripts/school_recommend.py",
+})
+_FORBIDDEN_RECOMMENDATION_SYMBOLS = frozenset({
+    "EQUIV_RANK_ADJUST",
+    "_tier_threshold_labels",
+    "equiv_adjust_from_config",
+    "params_from_config",
+    "recommend_paths",
+})
+_FORBIDDEN_REPORT_DATA_CALLS = frozenset({
+    "load_path_table",
+    "load_province_config",
+    "load_toudang",
+    "load_yifenyiduan",
+    "score_to_rank",
+})
 
 
 def _dotted_name(node: ast.AST) -> str | None:
@@ -117,6 +139,147 @@ def _fold_static_text(node: ast.AST, depth: int = 0) -> str | None:
             return None
         return _join_static_path(tuple(part for part in parts if part is not None))
     return None
+
+
+def _fold_static_int(node: ast.AST, depth: int = 0) -> int | None:
+    """Fold only signed integer literals needed by the mutation boundary."""
+
+    if depth > _MAX_STATIC_AST_DEPTH:
+        return None
+    if isinstance(node, ast.Constant):
+        if isinstance(node.value, int) and not isinstance(node.value, bool):
+            return node.value
+        return None
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.USub, ast.UAdd)):
+        value = _fold_static_int(node.operand, depth + 1)
+        if value is None:
+            return None
+        return -value if isinstance(node.op, ast.USub) else value
+    return None
+
+
+def _contains_rank_reference(node: ast.AST) -> bool:
+    return any(
+        "rank" in candidate.casefold()
+        for candidate in (
+            child.id
+            if isinstance(child, ast.Name)
+            else child.attr
+            for child in ast.walk(node)
+            if isinstance(child, (ast.Name, ast.Attribute))
+        )
+    )
+
+
+def _recommendation_boundary_findings(
+    source: str,
+    relative: str = "scripts/generate_report.py",
+) -> tuple[str, ...]:
+    """Inspect a finite AST subset for removed recommendation surfaces."""
+
+    tree = ast.parse(source, filename=relative)
+    findings: list[str] = []
+    module_aliases: dict[str, str] = {}
+    call_aliases: dict[str, str] = {}
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.asname:
+                    module_aliases[alias.asname] = alias.name
+        elif isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            for alias in node.names:
+                local = alias.asname or alias.name
+                if module.casefold() in {"scripts", ""} and (
+                    alias.name.casefold() == "data_loader"
+                ):
+                    module_aliases[local] = "data_loader"
+                elif module.casefold().endswith("data_loader"):
+                    call_aliases[local] = alias.name
+                if alias.name in _FORBIDDEN_RECOMMENDATION_SYMBOLS:
+                    findings.append(f"forbidden-import:{alias.name}")
+
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            if node.name in _FORBIDDEN_RECOMMENDATION_SYMBOLS:
+                findings.append(f"forbidden-symbol:{node.name}")
+
+        if isinstance(node, (ast.Assign, ast.AnnAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            for target in targets:
+                for child in ast.walk(target):
+                    if (
+                        isinstance(child, ast.Name)
+                        and child.id in _FORBIDDEN_RECOMMENDATION_SYMBOLS
+                    ):
+                        findings.append(f"forbidden-symbol:{child.id}")
+                if isinstance(target, ast.Name) and target.id == "__all__":
+                    value = node.value
+                    elements = (
+                        value.elts
+                        if isinstance(value, (ast.List, ast.Tuple, ast.Set))
+                        else (value,)
+                    )
+                    for element in elements:
+                        exported = _fold_static_text(element)
+                        if exported in _FORBIDDEN_RECOMMENDATION_SYMBOLS:
+                            findings.append(f"forbidden-export:{exported}")
+
+        if isinstance(node, ast.BinOp) and relative in _RECOMMENDATION_RUNTIME_PATHS:
+            fixed_adjustment = (
+                isinstance(node.op, ast.Sub)
+                and _contains_rank_reference(node.left)
+                and _fold_static_int(node.right) == 4000
+            ) or (
+                isinstance(node.op, ast.Add)
+                and (
+                    (
+                        _contains_rank_reference(node.left)
+                        and _fold_static_int(node.right) == -4000
+                    )
+                    or (
+                        _contains_rank_reference(node.right)
+                        and _fold_static_int(node.left) == -4000
+                    )
+                )
+            )
+            if fixed_adjustment:
+                findings.append("fixed-rank-adjustment:4000")
+
+        if isinstance(node, ast.Subscript):
+            owner = node.value
+            if (
+                isinstance(owner, ast.Call)
+                and _dotted_name(owner.func) in {"globals", "locals", "vars"}
+                and not owner.args
+                and not owner.keywords
+            ):
+                accessed = _fold_static_text(node.slice)
+                if accessed in _FORBIDDEN_RECOMMENDATION_SYMBOLS:
+                    findings.append(f"dynamic-access:{accessed}")
+
+        if isinstance(node, ast.Call):
+            function_name = _dotted_name(node.func)
+            canonical = None
+            if isinstance(node.func, ast.Name):
+                canonical = call_aliases.get(node.func.id, node.func.id)
+            elif isinstance(node.func, ast.Attribute):
+                owner = _dotted_name(node.func.value) or ""
+                root = owner.split(".", 1)[0]
+                canonical_owner = module_aliases.get(root, owner)
+                if canonical_owner.casefold().endswith("data_loader"):
+                    canonical = node.func.attr
+                elif owner.casefold().endswith("data_loader"):
+                    canonical = node.func.attr
+            if canonical in _FORBIDDEN_REPORT_DATA_CALLS:
+                findings.append(f"old-data-call:{canonical}")
+            if function_name in {"getattr", "hasattr"} and len(node.args) >= 2:
+                accessed = _fold_static_text(node.args[1])
+                if accessed in _FORBIDDEN_RECOMMENDATION_SYMBOLS:
+                    findings.append(f"dynamic-access:{accessed}")
+
+    return tuple(dict.fromkeys(findings))
 
 
 def _is_forbidden_path_reference(value: str) -> bool:
@@ -619,16 +782,50 @@ class PublicPackageBoundaryTest(unittest.TestCase):
         self.assertNotIn("estimate_rank", function_names)
 
     def test_public_runtime_has_only_evidence_aware_recommendation_surfaces(self):
+        from scripts.contracts import (
+            EvidenceStatus,
+            RecommendationProfile,
+            RecommendationResult,
+        )
+
         school_module = importlib.import_module("scripts.school_recommend")
         path_module = importlib.import_module("scripts.path_recommend")
         school_tree = ast.parse((ROOT / "scripts/school_recommend.py").read_text("utf-8"))
         path_tree = ast.parse((ROOT / "scripts/path_recommend.py").read_text("utf-8"))
         report_tree = ast.parse((ROOT / "scripts/generate_report.py").read_text("utf-8"))
 
-        signature = list(importlib.import_module("inspect").signature(
-            school_module.recommend_schools
-        ).parameters)
-        self.assertEqual(signature, ["rows", "profile"])
+        signature = inspect.signature(school_module.recommend_schools)
+        self.assertEqual(list(signature.parameters), ["rows", "profile"])
+        for parameter in signature.parameters.values():
+            self.assertIs(parameter.kind, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+            self.assertIs(parameter.default, inspect.Parameter.empty)
+        self.assertFalse(hasattr(school_module, "params_from_config"))
+        self.assertFalse(hasattr(school_module, "_tier_threshold_labels"))
+
+        result = school_module.recommend_schools(
+            [{
+                "year": 2025,
+                "province": "演示甲省",
+                "school_name": "虚构甲大学",
+                "school_province": "演示甲省",
+                "subject_group": "物理",
+                "major_group_name": "虚构专业组",
+                "min_score": 645,
+                "min_rank": 1100,
+                "evidence_status": EvidenceStatus.OFFICIAL.value,
+                "source_ids": ("official-example",),
+                "coverage_min_rank": 1,
+                "coverage_max_rank": 5000,
+            }],
+            RecommendationProfile(
+                rank=1100,
+                target_province="演示甲省",
+                subject_group="物理",
+            ),
+        )
+        self.assertIsInstance(result, RecommendationResult)
+        with self.assertRaises(AttributeError):
+            result.items = ()
 
         path_functions = {
             node.name for node in ast.walk(path_tree) if isinstance(node, ast.FunctionDef)
@@ -637,6 +834,17 @@ class PublicPackageBoundaryTest(unittest.TestCase):
         self.assertNotIn("recommend_paths", path_functions)
         self.assertFalse(hasattr(path_module, "EQUIV_RANK_ADJUST"))
         self.assertFalse(hasattr(path_module, "recommend_paths"))
+
+        recommendation_findings = {
+            relative: findings
+            for relative in sorted(_RECOMMENDATION_RUNTIME_PATHS)
+            if (
+                findings := _recommendation_boundary_findings(
+                    (ROOT / relative).read_text("utf-8"), relative
+                )
+            )
+        }
+        self.assertEqual(recommendation_findings, {})
 
         tracked_scripts = subprocess.run(
             ["git", "ls-files", "--", "scripts/*.py"],
@@ -707,6 +915,47 @@ class PublicPackageBoundaryTest(unittest.TestCase):
         self.assertEqual(evaluate.args.args[-1].arg, "model")
         self.assertIsInstance(evaluate.args.defaults[-1], ast.Constant)
         self.assertIsNone(evaluate.args.defaults[-1].value)
+
+    def test_recommendation_boundary_mutation_canaries_are_semantic_and_finite(self):
+        bad_sources = {
+            "fixed subtract": "def f(rank):\n    return rank - 4000\n",
+            "fixed negative add": "def f(rank):\n    return rank + (-4000)\n",
+            "dynamic export": "__all__ = ['recommend_' + 'paths']\n",
+            "dynamic globals access": (
+                "legacy = globals()['recommend_' + 'paths']\n"
+            ),
+            "direct flat data call": (
+                "from data_loader import load_toudang\nload_toudang()\n"
+            ),
+            "aliased flat data call": (
+                "import data_loader as dl\ndl.load_yifenyiduan()\n"
+            ),
+            "module-aliased package data call": (
+                "from scripts import data_loader as dl\ndl.load_toudang()\n"
+            ),
+            "direct relative data call": (
+                "from .data_loader import score_to_rank as lookup\nlookup()\n"
+            ),
+            "old function": "def recommend_paths():\n    pass\n",
+            "old config function": "def params_from_config():\n    pass\n",
+            "old constant": "EQUIV_RANK_ADJUST = 1\n",
+        }
+        for name, source in bad_sources.items():
+            with self.subTest(name=name):
+                self.assertTrue(
+                    _recommendation_boundary_findings(source),
+                    f"mutation escaped: {name}",
+                )
+
+        safe_source = """
+page_limit = 4000
+model = RankAdjustmentModel(rank_delta=-4000)
+def evaluate(rank, model):
+    return rank + model.rank_delta
+from data_loader import load_admission_rows
+labels = {'recommend_paths': 'historical prose only'}
+"""
+        self.assertEqual(_recommendation_boundary_findings(safe_source), ())
 
     def test_ast_boundary_folds_path_division(self):
         cases = {

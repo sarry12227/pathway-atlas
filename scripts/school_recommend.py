@@ -96,27 +96,15 @@ class SchoolRecommendError(Exception):
         self.message = message
 
 
-def params_from_config(config: Optional[dict] = None) -> dict:
-    """Translate optional province parameters to deterministic engine limits."""
+def _default_parameters() -> dict:
+    """Return fresh deterministic limits for the evidence-aware engine."""
 
-    config = config or {}
-    thresholds = config.get("tier_thresholds") or {}
-    caps = config.get("tier_caps") or {}
-    delta_range = config.get("delta_range") or []
     return {
-        "chong_lt": int(thresholds.get("chong_lt", CHONG_LT)),
-        "wen_le": int(thresholds.get("wen_le", WEN_LE)),
-        "delta_lo": int(delta_range[0]) if len(delta_range) >= 2 else DELTA_LO,
-        "delta_hi": int(delta_range[1]) if len(delta_range) >= 2 else DELTA_HI,
-        "tier_caps": {**TIER_CAPS, **{key: int(value) for key, value in caps.items()}},
-    }
-
-
-def _tier_threshold_labels(parameters: dict) -> dict:
-    return {
-        "冲": f"Δ<{parameters['chong_lt']}",
-        "稳": f"{parameters['chong_lt']}≤Δ≤+{parameters['wen_le']}",
-        "保": f"Δ>+{parameters['wen_le']}",
+        "chong_lt": CHONG_LT,
+        "wen_le": WEN_LE,
+        "delta_lo": DELTA_LO,
+        "delta_hi": DELTA_HI,
+        "tier_caps": dict(TIER_CAPS),
     }
 
 
@@ -583,13 +571,12 @@ def recommend_schools(
 ) -> RecommendationResult:
     """Return evidence-aware recommendations for normalized rows and profile."""
 
-    return _recommend_core(rows, _profile(profile), params_from_config())
+    return _recommend_core(rows, _profile(profile), _default_parameters())
 
 
 __all__ = [
     "SchoolRecommendError",
     "is_in_province",
-    "params_from_config",
     "parse_secondary_subjects",
     "recommend_schools",
 ]
