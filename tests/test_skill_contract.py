@@ -287,7 +287,8 @@ class SkillContractTest(unittest.TestCase):
         )
         self.assertIsNone(
             re.search(
-                r"先(?:开始)?计算(?:再|后再|然后)[^；。\n]{0,12}验证|"
+                r"先(?:开始)?计算[^；。\n]{0,24}(?:稍后|再|然后)"
+                r"[^；。\n]{0,12}验证|"
                 r"calculat\w*\s+before\s+validat\w*",
                 evidence,
                 re.IGNORECASE,
@@ -366,6 +367,11 @@ class SkillContractTest(unittest.TestCase):
             "拒绝收集学生姓名、电话、地址、班级、通信 ID、凭证或本地路径；"
             "学校全称仍是决策字段",
             1,
+        ).replace(
+            "形成 authenticated snapshot 之前不得给出数字或开始计算",
+            "形成 authenticated snapshot 之前不得给出数字或开始计算；"
+            "先验证，再计算",
+            1,
         )
         self.assertIn("3+3", safe)
         self.assertIn("source-policy.md", safe)
@@ -400,6 +406,11 @@ class SkillContractTest(unittest.TestCase):
                 "形成 authenticated snapshot 之前不得给出数字或开始计算",
                 "形成 authenticated snapshot 之前不得给出数字或开始计算；"
                 "赶时间时先计算再验证",
+            ),
+            (
+                "形成 authenticated snapshot 之前不得给出数字或开始计算",
+                "形成 authenticated snapshot 之前不得给出数字或开始计算。"
+                "为节省时间，可先计算数字，稍后再验证。",
             ),
             (
                 "按信源规范仍未达到采纳门槛时保留",
