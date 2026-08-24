@@ -183,13 +183,61 @@ def _mapping_snapshot(mapping: ColumnMapping) -> dict[str, Any]:
     }
 
 
+def _derive_complete_role_coverage(
+    rows: list[ExtractedRow], mapping: ColumnMapping
+) -> tuple[ExtractedCoverage, list[str]]:
+    bounds: dict[str, int | None] = {
+        "lower_score": None,
+        "upper_score": None,
+        "lower_rank": None,
+        "upper_rank": None,
+    }
+    warnings: list[str] = []
+    for role in ("score", "rank"):
+        fields = [field for field, declared_role in mapping.roles.items() if declared_role == role]
+        if not fields:
+            continue
+        projected = [
+            ExtractedRow(
+                {field: row.values[field] for field in fields},
+                {field: row.cell_status[field] for field in fields},
+                row.location,
+                row.confidence,
+                row.warnings,
+            )
+            for row in rows
+        ]
+        role_mapping = ColumnMapping(
+            {field: mapping[field] for field in fields},
+            roles={field: role for field in fields},
+            score_scale=mapping.score_scale,
+        )
+        role_coverage, role_warnings = derive_coverage(projected, role_mapping)
+        boundary_exact = all(
+            row.cell_status[field] is CellStatus.EXACT
+            for row in (rows[0], rows[-1])
+            for field in fields
+        )
+        if boundary_exact:
+            bounds[f"lower_{role}"] = getattr(role_coverage, f"lower_{role}")
+            bounds[f"upper_{role}"] = getattr(role_coverage, f"upper_{role}")
+        elif f"coverage-{role}-unavailable" not in role_warnings:
+            role_warnings.append(f"coverage-{role}-unavailable")
+        for warning in role_warnings:
+            if warning not in warnings:
+                warnings.append(warning)
+    return ExtractedCoverage(**bounds), warnings
+
+
 def _validate_anchors(payload: dict[str, Any], rows: list[dict[str, Any]]) -> None:
     anchors = payload["anchors"]
     if not isinstance(anchors, list) or len(anchors) < 2:
         raise OcrValidationError("at least two verification anchors are required")
     references: set[tuple[int, str]] = set()
     row_positions: set[int] = set()
-    spatial_positions: set[tuple[int | float, int | float, int | float, int | float]] = set()
+    spatial_positions: list[
+        tuple[str, tuple[int | float, int | float, int | float, int | float]]
+    ] = []
     for raw_anchor in anchors:
         anchor = _require_keys(raw_anchor, _ANCHOR_KEYS, "verification anchor")
         row_index = _integer(anchor["row_index"], "anchor row_index")
@@ -215,8 +263,21 @@ def _validate_anchors(payload: dict[str, Any], rows: list[dict[str, Any]]) -> No
             or anchor["normalized_value"] != cell["normalized_value"]
         ):
             raise OcrValidationError("verification anchor does not reproduce its cell")
-        spatial_positions.add(anchor_bbox)
-    if len(row_positions) < 2 or len(spatial_positions) < 2:
+        image_key = f"{rows[row_index - 1]['page_number']}:{rows[row_index - 1]['image_id']}"
+        for prior_image, prior_bbox in spatial_positions:
+            if prior_image != image_key:
+                continue
+            left = max(anchor_bbox[0], prior_bbox[0])
+            top = max(anchor_bbox[1], prior_bbox[1])
+            right = min(anchor_bbox[2], prior_bbox[2])
+            bottom = min(anchor_bbox[3], prior_bbox[3])
+            intersection = max(0, right - left) * max(0, bottom - top)
+            anchor_area = (anchor_bbox[2] - anchor_bbox[0]) * (anchor_bbox[3] - anchor_bbox[1])
+            prior_area = (prior_bbox[2] - prior_bbox[0]) * (prior_bbox[3] - prior_bbox[1])
+            if intersection / min(anchor_area, prior_area) >= 0.9:
+                raise OcrValidationError("verification anchors must be spatially distributed")
+        spatial_positions.append((image_key, anchor_bbox))
+    if len(row_positions) < 2:
         raise OcrValidationError("verification anchors must be spatially distributed")
 
 
@@ -376,7 +437,7 @@ def normalize_ocr_rows(
         validate_monotonicity(extracted, column_mapping)
     except StructuredValidationError:
         raise OcrValidationError("OCR rows violate duplicate or monotonicity rules") from None
-    coverage, coverage_warnings = derive_coverage(extracted, column_mapping)
+    coverage, coverage_warnings = _derive_complete_role_coverage(extracted, column_mapping)
     if partial:
         coverage = ExtractedCoverage()
         coverage_warnings = [

@@ -75,7 +75,7 @@ class PdfTextAdapterTest(unittest.TestCase):
             "sha256:" + "a" * 64,
             2,
             [text_page, second],
-            (),
+            ("empty-pages-present",),
         )
         with self.assertRaises(Exception):
             document.pages += (text_page,)
@@ -90,6 +90,45 @@ class PdfTextAdapterTest(unittest.TestCase):
             with self.subTest(changed=changed):
                 with self.assertRaises((TypeError, ValueError)):
                     replace(document, **changed)
+
+    def test_page_and_document_warnings_exactly_match_derived_state(self):
+        from scripts.adapters.pdf_text import PdfTextDocument, PdfTextPage
+
+        document_id = "sha256:" + "b" * 64
+        for constructor in (
+            lambda: PdfTextPage(1, "", "none", ("image-only", "empty-page"), True),
+            lambda: PdfTextPage(1, "", "none", ("empty-page", "image-only"), False),
+        ):
+            with self.subTest(constructor=constructor):
+                with self.assertRaises(ValueError):
+                    constructor()
+
+        text = PdfTextPage(1, "text", "pdfplumber-text")
+        image = PdfTextPage(1, "", "none", ("image-only",), True)
+        empty = PdfTextPage(2, "", "none", ("empty-page",), False)
+        invalid_documents = (
+            lambda: PdfTextDocument(document_id, 1, (image,), ()),
+            lambda: PdfTextDocument(document_id, 1, (text,), ("image-only-pages-present",)),
+            lambda: PdfTextDocument(
+                document_id,
+                2,
+                (image, empty),
+                ("empty-pages-present", "image-only-pages-present"),
+            ),
+        )
+        for constructor in invalid_documents:
+            with self.subTest(constructor=constructor):
+                with self.assertRaises(ValueError):
+                    constructor()
+
+        document = PdfTextDocument(
+            document_id,
+            2,
+            (image, empty),
+            ("image-only-pages-present", "empty-pages-present"),
+        )
+        with self.assertRaises(ValueError):
+            replace(document, warnings=("image-only-pages-present",))
 
     def test_malformed_truncated_and_encrypted_fail_without_path_leak(self):
         from scripts.adapters.pdf_text import PdfParseError, extract_pdf_text
@@ -329,6 +368,60 @@ class OcrRowsAdapterTest(unittest.TestCase):
             )
             self.assertIn("partial-page-coverage", partial_table.warnings)
 
+    def test_role_coverage_requires_exact_first_and_last_boundaries(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary).resolve()
+
+            masked_score = self.payload()
+            masked_score["rows"][0]["cells"][1].update(
+                raw_text="580分以上",
+                normalized_value=580,
+            )
+            masked_table = self.extract(
+                self.write_payload(directory, masked_score, "masked-score-boundary.json")
+            )
+            self.assertEqual(
+                masked_table.coverage.to_dict(),
+                {"lower_score": None, "upper_score": None, "lower_rank": 100, "upper_rank": 420},
+            )
+            self.assertIn("coverage-score-unavailable", masked_table.warnings)
+
+            cropped_last = self.payload()
+            cropped_last["rows"][-1]["cropped"] = True
+            cropped_table = self.extract(
+                self.write_payload(directory, cropped_last, "cropped-last-boundary.json")
+            )
+            self.assertEqual(
+                cropped_table.coverage.to_dict(),
+                {"lower_score": None, "upper_score": None, "lower_rank": None, "upper_rank": None},
+            )
+            self.assertEqual(
+                cropped_table.warnings,
+                (
+                    "masked-cells-present",
+                    "uncertain-cells-present",
+                    "coverage-score-unavailable",
+                    "coverage-rank-unavailable",
+                ),
+            )
+
+            boundary_states = {
+                "low-confidence-rank": lambda item: item["rows"][-1]["cells"][2].update(confidence=0.5),
+                "unverified-score": lambda item: item["rows"][0]["cells"][1].update(verified=False),
+                "missing-rank": lambda item: item["rows"][0]["cells"][2].update(
+                    raw_text="", normalized_value=None
+                ),
+            }
+            for name, mutate in boundary_states.items():
+                payload = self.payload()
+                mutate(payload)
+                table = self.extract(self.write_payload(directory, payload, f"{name}.json"))
+                affected_role = "score" if "score" in name else "rank"
+                with self.subTest(name=name):
+                    self.assertIsNone(getattr(table.coverage, f"lower_{affected_role}"))
+                    self.assertIsNone(getattr(table.coverage, f"upper_{affected_role}"))
+                    self.assertIn(f"coverage-{affected_role}-unavailable", table.warnings)
+
     def test_strict_json_schema_ids_geometry_counts_and_anchors_fail_closed(self):
         from scripts.adapters.ocr_rows import OcrValidationError
 
@@ -375,6 +468,42 @@ class OcrRowsAdapterTest(unittest.TestCase):
                 with self.subTest(name=name):
                     with self.assertRaises(OcrValidationError):
                         self.extract(path)
+
+    def test_anchors_reject_near_overlap_on_one_image_but_allow_same_bbox_across_images(self):
+        from scripts.adapters.ocr_rows import OcrValidationError
+
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary).resolve()
+            overlapping = self.payload()
+            overlapping_last = overlapping["rows"][-1]
+            overlapping_last["bbox"] = [10, 20, 500, 60]
+            overlapping_last["cells"][0]["bbox"] = [210, 20, 330, 60]
+            overlapping_last["cells"][1]["bbox"] = [340, 20, 500, 60]
+            overlapping_last["cells"][2]["bbox"] = [11, 20, 201, 60]
+            overlapping["anchors"][1] = {
+                "row_index": 3,
+                "label": "Rank",
+                "bbox": [11, 20, 201, 60],
+                "raw_text": "420",
+                "normalized_value": 420,
+            }
+            with self.assertRaises(OcrValidationError):
+                self.extract(self.write_payload(directory, overlapping, "near-overlap.json"))
+
+            separate_images = self.payload()
+            separate_images["total_pages"] = 2
+            separate_images["covered_pages"] = [1, 2]
+            separate_images["images"].append({"page_number": 2, "image_id": "page-2"})
+            last_row = separate_images["rows"][-1]
+            last_row.update(page_number=2, image_id="page-2", bbox=[10, 20, 500, 60])
+            last_row["cells"][0]["bbox"] = [10, 20, 200, 60]
+            last_row["cells"][1]["bbox"] = [210, 20, 330, 60]
+            last_row["cells"][2]["bbox"] = [10, 20, 200, 60]
+            separate_images["anchors"][1]["bbox"] = [10, 20, 200, 60]
+            table = self.extract(
+                self.write_payload(directory, separate_images, "same-bbox-separate-images.json")
+            )
+            self.assertEqual(len(table.rows), 3)
 
     def test_numeric_scale_integer_duplicate_and_monotonic_rules_fail_closed(self):
         from scripts.adapters.ocr_rows import OcrValidationError
@@ -470,6 +599,30 @@ class QrPayloadAdapterTest(unittest.TestCase):
     def tearDown(self):
         self.temporary_directory.cleanup()
 
+    def make_resolution(self, *, final_url="https://final.example.test/table.pdf", media_type="application/pdf"):
+        from scripts.adapters.qr import resolve_qr_payload
+        from scripts.downloader import DownloadResult
+
+        destination = self.workspace / "downloaded.pdf"
+        destination.write_bytes(b"PDF!")
+        result = DownloadResult(
+            destination,
+            final_url,
+            media_type,
+            4,
+            (self.original_url, final_url),
+        )
+        with mock.patch("scripts.adapters.qr.validate_public_url"), mock.patch(
+            "scripts.adapters.qr.download_public_file", return_value=result
+        ):
+            return resolve_qr_payload(
+                self.original_url,
+                self.workspace,
+                qr_image_source_id="qr-page-1",
+                max_bytes=4096,
+                timeout=7,
+            )
+
     @mock.patch("scripts.adapters.qr.download_public_file")
     @mock.patch("scripts.adapters.qr.validate_public_url")
     def test_decoded_public_url_delegates_only_to_downloader_and_records_safe_provenance(
@@ -527,18 +680,7 @@ class QrPayloadAdapterTest(unittest.TestCase):
     def test_resolution_contract_rejects_forged_endpoints_ids_urls_and_metadata(self):
         from scripts.adapters.qr import QrResolution
 
-        resolution = QrResolution(
-            "qr-page-1",
-            "https://public.example.test/start",
-            (
-                "https://public.example.test/start",
-                "https://public.example.test/final.pdf",
-            ),
-            "https://public.example.test/final.pdf",
-            "application/pdf",
-            4,
-            "downloaded.pdf",
-        )
+        resolution = self.make_resolution()
         for changed in (
             {"qr_image_source_id": "C:/private/qr.png"},
             {"qr_image_source_id": "person@example.test"},
@@ -554,6 +696,61 @@ class QrPayloadAdapterTest(unittest.TestCase):
             with self.subTest(changed=changed):
                 with self.assertRaises((TypeError, ValueError)):
                     replace(resolution, **changed)
+
+    def test_resolution_is_factory_only_and_rejects_local_names_or_extension_mismatch_without_dns(self):
+        from scripts.adapters.qr import QrResolution, QrResolutionError
+        from scripts.downloader import DownloadResult
+
+        direct_arguments = (
+            "qr-page-1",
+            "https://public.example.test/start",
+            ("https://public.example.test/start", "https://public.example.test/final.pdf"),
+            "https://public.example.test/final.pdf",
+            "application/pdf",
+            4,
+            "downloaded.pdf",
+        )
+        with mock.patch("socket.getaddrinfo", side_effect=AssertionError("DNS is forbidden")) as dns:
+            with self.assertRaises(QrResolutionError):
+                QrResolution(*direct_arguments)
+            dns.assert_not_called()
+
+        destination = self.workspace / "downloaded.pdf"
+        destination.write_bytes(b"PDF!")
+        forged_results = (
+            DownloadResult(
+                destination,
+                "https://localhost/final.pdf",
+                "application/pdf",
+                4,
+                (self.original_url, "https://localhost/final.pdf"),
+            ),
+            DownloadResult(
+                destination,
+                "https://service.localhost/final.pdf",
+                "application/pdf",
+                4,
+                (self.original_url, "https://service.localhost/final.pdf"),
+            ),
+            DownloadResult(destination, self.original_url, "image/png", 4),
+        )
+        from scripts.adapters.qr import resolve_qr_payload
+
+        for result in forged_results:
+            with self.subTest(result=result), mock.patch(
+                "scripts.adapters.qr.validate_public_url"
+            ), mock.patch("scripts.adapters.qr.download_public_file", return_value=result), mock.patch(
+                "socket.getaddrinfo", side_effect=AssertionError("DNS is forbidden")
+            ) as dns:
+                with self.assertRaises(QrResolutionError):
+                    resolve_qr_payload(
+                        self.original_url,
+                        self.workspace,
+                        qr_image_source_id="qr-page-1",
+                        max_bytes=100,
+                        timeout=1,
+                    )
+                dns.assert_not_called()
 
     @mock.patch("scripts.adapters.qr.download_public_file")
     def test_private_initial_and_downloader_redirect_failures_never_produce_resolution(self, download):
@@ -606,6 +803,26 @@ class QrPayloadAdapterTest(unittest.TestCase):
                 with self.assertRaises(QrPayloadError):
                     resolve_qr_payload(
                         payload,
+                        self.workspace,
+                        qr_image_source_id=source_id,
+                        max_bytes=100,
+                        timeout=1,
+                    )
+        validate_url.assert_not_called()
+        download.assert_not_called()
+
+    @mock.patch("scripts.adapters.qr.download_public_file")
+    @mock.patch("scripts.adapters.qr.validate_public_url")
+    def test_structured_phone_and_secret_source_ids_fail_before_network_seams(
+        self, validate_url, download
+    ):
+        from scripts.adapters.qr import QrPayloadError, resolve_qr_payload
+
+        for source_id in ("phone-138-0013-8000", "sk-live"):
+            with self.subTest(source_id=source_id):
+                with self.assertRaises(QrPayloadError):
+                    resolve_qr_payload(
+                        self.original_url,
                         self.workspace,
                         qr_image_source_id=source_id,
                         max_bytes=100,

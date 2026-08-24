@@ -79,11 +79,9 @@ class PdfTextPage:
             raise ValueError("text page extraction state is contradictory")
         if not text and self.extraction_method != "none":
             raise ValueError("empty text requires the none extraction method")
-        expected_warning = "image-only" if self.image_only else "empty-page"
-        if not text and expected_warning not in warnings:
-            raise ValueError("empty page state requires its exact warning")
-        if text and warnings:
-            raise ValueError("text pages cannot carry empty-page warnings")
+        expected_warnings = () if text else (("image-only",) if self.image_only else ("empty-page",))
+        if warnings != expected_warnings:
+            raise ValueError("page warnings must exactly match page state")
         object.__setattr__(self, "text", text)
         object.__setattr__(self, "warnings", warnings)
 
@@ -123,8 +121,16 @@ class PdfTextDocument:
             raise ValueError("page_count contradicts pages")
         if tuple(page.page_number for page in pages) != tuple(range(1, self.page_count + 1)):
             raise ValueError("page numbers must be unique and contiguous")
+        warnings = _warnings(self.warnings, allowed=_DOCUMENT_WARNINGS)
+        expected_warnings: list[str] = []
+        if any(page.image_only for page in pages):
+            expected_warnings.append("image-only-pages-present")
+        if any(not page.text and not page.image_only for page in pages):
+            expected_warnings.append("empty-pages-present")
+        if warnings != tuple(expected_warnings):
+            raise ValueError("document warnings must exactly match page states")
         object.__setattr__(self, "pages", pages)
-        object.__setattr__(self, "warnings", _warnings(self.warnings, allowed=_DOCUMENT_WARNINGS))
+        object.__setattr__(self, "warnings", warnings)
 
     def to_dict(self) -> dict[str, Any]:
         return {

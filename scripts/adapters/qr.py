@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import InitVar, dataclass
 import ipaddress
 from pathlib import Path
 import re
@@ -10,9 +10,14 @@ from typing import Any
 from urllib.parse import urlsplit
 
 try:
-    from scripts.downloader import DownloadResult, download_public_file, validate_public_url
+    from scripts.downloader import (
+        DownloadResult,
+        _MEDIA_TYPE_EXTENSIONS,
+        download_public_file,
+        validate_public_url,
+    )
 except ImportError:  # Flat ``adapters`` import with ``scripts`` on sys.path.
-    from downloader import DownloadResult, download_public_file, validate_public_url
+    from downloader import DownloadResult, _MEDIA_TYPE_EXTENSIONS, download_public_file, validate_public_url
 
 
 class QrPayloadError(ValueError):
@@ -25,6 +30,7 @@ class QrResolutionError(ValueError):
 
 _SAFE_ID = re.compile(r"^[A-Za-z][A-Za-z0-9._-]{0,127}$")
 _MEDIA_TYPE = re.compile(r"^[a-z0-9][a-z0-9.+-]*/[a-z0-9][a-z0-9.+-]*$")
+_RESOLUTION_AUTH = object()
 
 
 def _safe_id(value: object, name: str) -> str:
@@ -35,8 +41,17 @@ def _safe_id(value: object, name: str) -> str:
 
 def _safe_source_id(value: object) -> str:
     source_id = _safe_id(value, "qr_image_source_id")
-    if re.search(r"\d{7,}", source_id) or re.search(
-        r"(?:api[._-]?key|token|secret|password)", source_id, flags=re.IGNORECASE
+    normalized = source_id.casefold()
+    compact_digits = re.sub(r"[._-]", "", normalized)
+    segments = tuple(segment for segment in re.split(r"[._-]+", normalized) if segment)
+    structured_secret = (
+        any(segment in {"token", "secret", "password"} for segment in segments)
+        or any(pair in {("api", "key"), ("sk", "live"), ("sk", "test")} for pair in zip(segments, segments[1:]))
+    )
+    if (
+        re.search(r"\d{7,}", source_id)
+        or re.search(r"(?<!\d)1[3-9]\d{9}(?!\d)", compact_digits)
+        or structured_secret
     ):
         raise QrPayloadError("qr_image_source_id cannot contain PII or secret material")
     return source_id
@@ -57,6 +72,9 @@ def _safe_url(value: object, *, require_public_literal: bool = True) -> str:
         raise ValueError("URL must use HTTP or HTTPS and include a host")
     if parsed.username is not None or parsed.password is not None:
         raise ValueError("URL userinfo is not allowed")
+    normalized_hostname = hostname.casefold().rstrip(".")
+    if normalized_hostname == "localhost" or normalized_hostname.endswith(".localhost"):
+        raise ValueError("URL host is not public")
     try:
         literal = ipaddress.ip_address(hostname)
     except ValueError:
@@ -76,8 +94,11 @@ class QrResolution:
     media_type: str
     size_bytes: int
     downloaded_file_id: str
+    _auth: InitVar[object] = None
 
-    def __post_init__(self) -> None:
+    def __post_init__(self, _auth: object) -> None:
+        if _auth is not _RESOLUTION_AUTH:
+            raise QrResolutionError("QrResolution must be created from an authenticated download")
         source_id = _safe_source_id(self.qr_image_source_id)
         original = _safe_url(self.original_url)
         final = _safe_url(self.final_url)
@@ -96,11 +117,38 @@ class QrResolution:
         if self.size_bytes < 0:
             raise ValueError("size_bytes cannot be negative")
         file_id = _safe_id(self.downloaded_file_id, "downloaded_file_id")
+        expected_extension = _MEDIA_TYPE_EXTENSIONS.get(self.media_type)
+        if expected_extension is None or Path(file_id).suffix != expected_extension:
+            raise ValueError("downloaded_file_id extension must match media_type")
         object.__setattr__(self, "qr_image_source_id", source_id)
         object.__setattr__(self, "original_url", original)
         object.__setattr__(self, "redirect_chain", chain)
         object.__setattr__(self, "final_url", final)
         object.__setattr__(self, "downloaded_file_id", file_id)
+
+    @classmethod
+    def _from_download(
+        cls,
+        qr_image_source_id: str,
+        original_url: str,
+        result: DownloadResult,
+        downloaded_file_id: str,
+    ) -> QrResolution:
+        try:
+            return cls(
+                qr_image_source_id,
+                original_url,
+                result.redirect_chain,
+                result.source_url,
+                result.media_type,
+                result.size_bytes,
+                downloaded_file_id,
+                _auth=_RESOLUTION_AUTH,
+            )
+        except QrResolutionError:
+            raise
+        except (TypeError, ValueError):
+            raise QrResolutionError("secure downloader returned inconsistent provenance") from None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -168,15 +216,7 @@ def resolve_qr_payload(
         timeout=timeout,
     )
     destination = _validate_result(result, workspace)
-    return QrResolution(
-        source_id,
-        original_url,
-        result.redirect_chain,
-        result.source_url,
-        result.media_type,
-        result.size_bytes,
-        destination.name,
-    )
+    return QrResolution._from_download(source_id, original_url, result, destination.name)
 
 
 __all__ = [
