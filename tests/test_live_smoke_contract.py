@@ -8,6 +8,8 @@ import json
 import os
 import stat
 import ast
+import subprocess
+import sys
 import tempfile
 import unittest
 from dataclasses import replace
@@ -88,7 +90,7 @@ class LiveSmokeContractTest(unittest.TestCase):
         review = check_official_root(
             "黑龙江", self.roots,
             downloader=lambda _url, workspace, **kwargs: self._result(
-                workspace, "https://www.hljea.org.cn/", "https://publisher.example.test/a"
+                workspace, "https://www.hljea.org.cn/", "https://publisher.example.com/a"
             ),
             clock=self.clock,
         )
@@ -288,6 +290,35 @@ class LiveSmokeContractTest(unittest.TestCase):
             self.assertEqual(0, main(["--province", "黑龙江"]))
         self.assertEqual("", stderr.getvalue())
         self.assertEqual("unavailable", json.loads(stdout.getvalue())["status"])
+
+    def test_special_use_hosts_and_impossible_timestamps_fail_closed(self) -> None:
+        for host in ("a.invalid", "a.test", "a.example", "a.localhost", "a.local", "a.internal", "home.arpa", "a.onion"):
+            with self.subTest(host=host):
+                result = check_official_root(
+                    "黑龙江", self.roots,
+                    downloader=lambda _url, workspace, host=host, **kwargs: self._result(workspace, "https://www.hljea.org.cn/", f"https://{host}/x"),
+                    clock=self.clock,
+                )
+                self.assertEqual(("unavailable", "security_rejection"), (result.status, result.reason_code))
+        valid = LiveSmokeResult("黑龙江", "healthy", "www.hljea.org.cn", "hljea.org.cn", ("www.hljea.org.cn", "hljea.org.cn"), "2026-08-24T00:00:00Z", "text/html", 0, None)
+        with self.assertRaises(ValueError): replace(valid, checked_at="2026-99-99T29:66:99Z")
+
+    def test_fresh_child_arms_network_sentinel_before_target_import(self) -> None:
+        code = """import socket
+from unittest.mock import patch
+blocked=lambda *a,**k: (_ for _ in ()).throw(AssertionError('armed'))
+patches=[patch.object(socket,'getaddrinfo',blocked),patch.object(socket,'gethostbyname',blocked),patch.object(socket,'gethostbyaddr',blocked),patch.object(socket,'create_connection',blocked),patch.object(socket.socket,'connect',blocked),patch.object(socket.socket,'connect_ex',blocked),patch.object(socket.socket,'sendto',blocked)]
+[p.start() for p in patches]
+import scripts.live_smoke as target
+assert target.main(['--help']) == 0
+for action in (lambda:socket.getaddrinfo('example.com',443),lambda:socket.gethostbyaddr('127.0.0.1'),lambda:socket.create_connection(('example.com',443)),lambda:socket.socket(socket.AF_INET,socket.SOCK_DGRAM).sendto(b'x',('8.8.8.8',53))):
+    try: action()
+    except AssertionError: pass
+    else: raise AssertionError('canary not armed')
+print('sentinel-ok')"""
+        completed = subprocess.run([sys.executable, "-c", code], text=True, capture_output=True, check=False)
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertIn("sentinel-ok", completed.stdout)
 
 
 if __name__ == "__main__":

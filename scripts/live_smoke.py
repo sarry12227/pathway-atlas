@@ -58,7 +58,8 @@ def _domain(url: str) -> str:
     if part.scheme.casefold() not in {"http", "https"} or not part.hostname or part.username is not None or part.password is not None:
         return ""
     host = part.hostname.rstrip(".").casefold()
-    if not host or host == "localhost" or host.endswith((".localhost", ".internal", ".local")) or host == "home.arpa" or host.endswith(".home.arpa"):
+    blocked_suffixes = (".invalid", ".test", ".example", ".localhost", ".local", ".internal", ".home.arpa", ".onion")
+    if not host or host in {"localhost", "home.arpa"} or host.endswith(blocked_suffixes):
         return ""
     try:
         ipaddress.ip_address(host)
@@ -117,6 +118,11 @@ class LiveSmokeResult:
             raise ValueError("invalid live smoke result")
         if not isinstance(self.checked_at, str) or not _UTC.fullmatch(self.checked_at):
             raise ValueError("invalid checked time")
+        try:
+            if datetime.strptime(self.checked_at, "%Y-%m-%dT%H:%M:%SZ").strftime("%Y-%m-%dT%H:%M:%SZ") != self.checked_at:
+                raise ValueError("invalid checked time")
+        except ValueError as error:
+            raise ValueError("invalid checked time") from error
         if (not isinstance(self.redirect_domains, tuple) or not self.redirect_domains or len(set(self.redirect_domains)) != len(self.redirect_domains)
                 or any(not isinstance(item, str) or _domain(f"https://{item}") != item for item in self.redirect_domains)
                 or _domain(f"https://{self.requested_domain}") != self.requested_domain):
