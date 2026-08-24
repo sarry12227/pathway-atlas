@@ -2,15 +2,19 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://example.invalid/shengxue-skill/schemas/query-plan.schema.json",
   "title": "Deterministic research query plan",
-  "$comment": "Structure is validated here; task ID, context, explicit-year, and availability semantics also require the declared pure runtime validator.",
+  "$comment": "Structure is validated here; per-task ID, context, target, availability, candidate, tier, and extraction semantics also require the declared pure runtime validator.",
   "x-semantic-validator": {
     "locator": "scripts.query_plan.validate_query_plan_payload",
     "flat_locator": "query_plan.validate_query_plan_payload",
     "checks": [
       "task_id_digest",
       "task_context",
+      "structured_target",
       "explicit_three_year_window",
-      "availability_expectation"
+      "availability_expectation",
+      "candidate_limit",
+      "source_tiers",
+      "extraction_fields"
     ]
   },
   "type": "object",
@@ -67,6 +71,7 @@
         "province",
         "year",
         "subject_group",
+        "target_name",
         "query_variants",
         "preferred_source_tiers",
         "max_candidates",
@@ -99,6 +104,12 @@
         "subject_group": {
           "$ref": "#/$defs/publicText"
         },
+        "target_name": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "maxLength": 512,
+          "pattern": "^(?!\\s)(?!.*\\s$)(?!.*[\\u0000-\\u001F\\u007F])[\\s\\S]+$"
+        },
         "query_variants": {
           "type": "array",
           "minItems": 1,
@@ -125,8 +136,8 @@
         "freshness_rule": {
           "type": "string",
           "enum": [
-            "query_exact_year_and_record_unpublished",
-            "query_exact_historical_year_no_silent_substitution"
+            "verify_exact_current_year_availability",
+            "query_exact_expected_available_year"
           ]
         },
         "required_extraction_fields": {
@@ -140,8 +151,8 @@
         "availability_expectation": {
           "type": "string",
           "enum": [
-            "current_year_not_yet_expected",
-            "explicit_older_year"
+            "current_year_availability_must_be_checked",
+            "expected_available"
           ]
         }
       }

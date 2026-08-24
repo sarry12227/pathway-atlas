@@ -18,35 +18,84 @@ import re
 import stat
 import sys
 from typing import Any
+import unicodedata
+
+_MISSING_LOCAL_CAPABILITY: str | None = None
 
 if __package__:
-    from .contracts import RecommendationProfile
-    from .path_recommend import validate_public_output_text
-    from .province_registry import (
-        ProvinceConfig,
-        _parse_config,
-        canonical_subject_selection_key,
-    )
+    try:
+        from .contracts import OrdinaryBatchPolicy, RecommendationProfile
+    except ModuleNotFoundError as error:
+        if error.name != f"{__package__}.contracts":
+            raise
+        _MISSING_LOCAL_CAPABILITY = "contracts"
+    if _MISSING_LOCAL_CAPABILITY is None:
+        try:
+            from .path_recommend import validate_public_output_text
+        except ModuleNotFoundError as error:
+            if error.name != f"{__package__}.path_recommend":
+                raise
+            _MISSING_LOCAL_CAPABILITY = "path_recommend"
+    if _MISSING_LOCAL_CAPABILITY is None:
+        try:
+            from .province_registry import (
+                ProvinceConfig,
+                _parse_config,
+                canonical_subject_selection_key,
+            )
+        except ModuleNotFoundError as error:
+            if error.name != f"{__package__}.province_registry":
+                raise
+            _MISSING_LOCAL_CAPABILITY = "province_registry"
 else:  # pragma: no cover - exercised by the real CLI and flat-import tests
-    from contracts import RecommendationProfile
-    from path_recommend import validate_public_output_text
-    from province_registry import (
-        ProvinceConfig,
-        _parse_config,
-        canonical_subject_selection_key,
-    )
+    try:
+        from contracts import OrdinaryBatchPolicy, RecommendationProfile
+    except ModuleNotFoundError as error:
+        if error.name != "contracts":
+            raise
+        _MISSING_LOCAL_CAPABILITY = "contracts"
+    if _MISSING_LOCAL_CAPABILITY is None:
+        try:
+            from path_recommend import validate_public_output_text
+        except ModuleNotFoundError as error:
+            if error.name != "path_recommend":
+                raise
+            _MISSING_LOCAL_CAPABILITY = "path_recommend"
+    if _MISSING_LOCAL_CAPABILITY is None:
+        try:
+            from province_registry import (
+                ProvinceConfig,
+                _parse_config,
+                canonical_subject_selection_key,
+            )
+        except ModuleNotFoundError as error:
+            if error.name != "province_registry":
+                raise
+            _MISSING_LOCAL_CAPABILITY = "province_registry"
+
+if _MISSING_LOCAL_CAPABILITY is not None:
+    OrdinaryBatchPolicy = RecommendationProfile = ProvinceConfig = None
+    validate_public_output_text = _parse_config = canonical_subject_selection_key = None
 
 
 _SCHEMA_VERSION = "1.0"
 _KINDS = frozenset({"score_table", "admission", "joy_report", "pathway_policy"})
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _FIELD_ID = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+_ENV_REFERENCE = re.compile(
+    r"(?i)(?:%[A-Z_][A-Z0-9_]*%|\$[A-Z_][A-Z0-9_]*)"
+)
+_DRIVE_REFERENCE = re.compile(r"(?i)(?:^|[\s(])[A-Z]:")
 _EXPECTATIONS = frozenset(
-    {"current_year_not_yet_expected", "explicit_older_year"}
+    {"current_year_availability_must_be_checked", "expected_available"}
 )
 _FRESHNESS_BY_EXPECTATION = {
-    "current_year_not_yet_expected": "query_exact_year_and_record_unpublished",
-    "explicit_older_year": "query_exact_historical_year_no_silent_substitution",
+    "current_year_availability_must_be_checked": "verify_exact_current_year_availability",
+    "expected_available": "query_exact_expected_available_year",
+}
+_GENERIC_KIND_SYNONYMS = {
+    "joy_report": ("高中喜报", "高考光荣榜", "高中升学成果"),
+    "pathway_policy": ("多元升学", "特殊招生", "升学路径政策"),
 }
 _TASK_FIELDS = frozenset(
     {
@@ -55,6 +104,7 @@ _TASK_FIELDS = frozenset(
         "province",
         "year",
         "subject_group",
+        "target_name",
         "query_variants",
         "preferred_source_tiers",
         "max_candidates",
@@ -89,19 +139,108 @@ class QueryPlanCapabilityError(RuntimeError):
     """A capability required to emit the plan is unavailable."""
 
 
-def _normalize_exam_year(value: Any) -> int:
+class QueryPlanInputError(ValueError):
+    """The CLI received an invalid argument shape."""
+
+
+class _SafeArgumentParser(argparse.ArgumentParser):
+    def error(self, _message: str) -> None:
+        raise QueryPlanInputError("invalid command-line arguments")
+
+    def exit(self, status: int = 0, message: str | None = None) -> None:
+        if status:
+            raise QueryPlanInputError("invalid command-line arguments")
+        super().exit(status, message)
+
+
+class _SingleUseAction(argparse.Action):
+    def __call__(
+        self,
+        parser: argparse.ArgumentParser,
+        namespace: argparse.Namespace,
+        values: Any,
+        option_string: str | None = None,
+    ) -> None:
+        if getattr(namespace, self.dest, None) is not None:
+            parser.error("duplicate non-repeatable option")
+        setattr(namespace, self.dest, values)
+
+
+def _normalize_mathematical_integer(
+    value: Any, name: str, *, minimum: int, maximum: int
+) -> int:
     if isinstance(value, (bool, str, bytes, bytearray)):
-        raise TypeError("exam_year must be a finite mathematical integer")
+        raise TypeError(f"{name} must be a finite mathematical integer")
     try:
         finite = math.isfinite(value)
         normalized = int(value)
     except (OverflowError, TypeError, ValueError) as error:
-        raise TypeError("exam_year must be a finite mathematical integer") from error
+        raise TypeError(f"{name} must be a finite mathematical integer") from error
     if not finite or value != normalized:
-        raise ValueError("exam_year must be a finite mathematical integer")
-    if not 2000 <= normalized <= 2100:
-        raise ValueError("exam_year must be between 2000 and 2100")
+        raise ValueError(f"{name} must be a finite mathematical integer")
+    if not minimum <= normalized <= maximum:
+        raise ValueError(f"{name} is outside the supported range")
     return normalized
+
+
+def _normalize_exam_year(value: Any) -> int:
+    return _normalize_mathematical_integer(
+        value, "exam_year", minimum=2000, maximum=2100
+    )
+
+
+def _validate_province_config(value: Any) -> ProvinceConfig:
+    """Recheck a Plan02 config snapshot without reopening its source file."""
+
+    if type(value) is not ProvinceConfig:
+        raise TypeError("province must be a strict ProvinceConfig")
+    if value.schema_version != "1.0":
+        raise ValueError("province schema version is invalid")
+    if value.mode not in {"3+1+2", "3+3"}:
+        raise ValueError("province mode is invalid")
+    for name in ("primary_subjects", "secondary_subjects"):
+        subjects = getattr(value, name)
+        if type(subjects) is not tuple or not subjects:
+            raise TypeError(f"province {name} must be a non-empty tuple")
+        normalized = tuple(_public_text(item, f"province {name} item") for item in subjects)
+        if len(normalized) != len(set(normalized)):
+            raise ValueError(f"province {name} contains duplicate subjects")
+    if value.mode == "3+1+2" and len(value.secondary_subjects) < 2:
+        raise ValueError("3+1+2 province requires configurable secondary subjects")
+    if value.mode == "3+3" and len(set(value.primary_subjects) | set(value.secondary_subjects)) < 3:
+        raise ValueError("3+3 province requires at least three configured subjects")
+    if (
+        isinstance(value.score_scale, bool)
+        or not isinstance(value.score_scale, (int, float))
+        or not math.isfinite(value.score_scale)
+        or not 100 <= value.score_scale <= 1000
+    ):
+        raise ValueError("province score scale is invalid")
+    if not isinstance(value.directory, Path) or not value.directory.is_absolute():
+        raise TypeError("province directory must be an absolute Path snapshot")
+    policy = value.ordinary_batch_policy
+    if type(policy) is not OrdinaryBatchPolicy:
+        raise TypeError("province ordinary-batch policy is invalid")
+    policy_payload = policy.to_dict()
+    expected_policy_fields = {
+        "schema_version",
+        "policy_id",
+        "basis_id",
+        "search_delta_min",
+        "search_delta_max",
+        "challenge_delta_lt",
+        "stable_delta_le",
+        "tier_caps",
+    }
+    if not isinstance(policy_payload, dict) or set(policy_payload) != expected_policy_fields:
+        raise ValueError("province ordinary-batch policy serialization is invalid")
+    try:
+        reconstructed = OrdinaryBatchPolicy(**policy_payload)
+    except (TypeError, ValueError) as error:
+        raise ValueError("province ordinary-batch policy semantics are invalid") from error
+    if reconstructed.to_dict() != policy_payload:
+        raise ValueError("province ordinary-batch policy snapshot is unstable")
+    return value
 
 
 def _public_text(value: Any, name: str, *, maximum: int = 256) -> str:
@@ -109,13 +248,33 @@ def _public_text(value: Any, name: str, *, maximum: int = 256) -> str:
         raise TypeError(f"{name} must be a string")
     if not value or value != value.strip():
         raise ValueError(f"{name} must be a non-empty trimmed string")
-    if len(value) > maximum or any(ord(character) < 32 or ord(character) == 127 for character in value):
+    if any(unicodedata.category(character) == "Cf" for character in value):
+        raise ValueError(f"{name} must not contain Unicode format controls")
+    normalized = unicodedata.normalize("NFKC", value)
+    if not normalized or normalized != normalized.strip():
+        raise ValueError(f"{name} must be a non-empty trimmed string")
+    if (
+        len(normalized) > maximum
+        or any(
+            ord(character) < 32
+            or ord(character) == 127
+            or unicodedata.category(character) == "Cf"
+            for character in normalized
+        )
+    ):
         raise ValueError(f"{name} must be bounded single-line public text")
+    if (
+        "/" in normalized
+        or "\\" in normalized
+        or _ENV_REFERENCE.search(normalized) is not None
+        or _DRIVE_REFERENCE.search(normalized) is not None
+    ):
+        raise ValueError(f"{name} contains path-like text")
     try:
-        validate_public_output_text(value)
+        validate_public_output_text(normalized)
     except ValueError as error:
         raise ValueError(f"{name} contains private or non-public text") from error
-    return value
+    return normalized
 
 
 def _text_collection(
@@ -155,6 +314,7 @@ def _task_identity_payload(task: "QueryTask") -> dict[str, Any]:
         "province": task.province,
         "year": task.year,
         "subject_group": task.subject_group,
+        "target_name": task.target_name,
         "query_variants": list(task.query_variants),
         "preferred_source_tiers": list(task.preferred_source_tiers),
         "max_candidates": task.max_candidates,
@@ -182,6 +342,7 @@ class QueryTask:
     province: str
     year: int
     subject_group: str
+    target_name: str | None
     query_variants: tuple[str, ...]
     preferred_source_tiers: tuple[str, ...]
     max_candidates: int
@@ -193,13 +354,22 @@ class QueryTask:
         if not isinstance(self.kind, str) or self.kind not in _KINDS:
             raise ValueError("unsupported query kind")
         object.__setattr__(self, "province", _public_text(self.province, "province"))
-        if not isinstance(self.year, int) or isinstance(self.year, bool):
-            raise TypeError("task year must be an integer")
-        if not 1998 <= self.year <= 2100:
-            raise ValueError("task year is outside the supported query window")
+        object.__setattr__(
+            self,
+            "year",
+            _normalize_mathematical_integer(
+                self.year, "task year", minimum=1998, maximum=2100
+            ),
+        )
         object.__setattr__(
             self, "subject_group", _public_text(self.subject_group, "subject_group")
         )
+        if self.target_name is not None:
+            object.__setattr__(
+                self, "target_name", _public_text(self.target_name, "target_name")
+            )
+        if self.kind in {"score_table", "admission"} and self.target_name is not None:
+            raise ValueError("score-table and admission tasks cannot carry a target")
         object.__setattr__(
             self,
             "query_variants",
@@ -213,8 +383,13 @@ class QueryTask:
         if tiers != ("A", "B", "C"):
             raise ValueError("preferred_source_tiers must be exactly A, B, C")
         object.__setattr__(self, "preferred_source_tiers", tiers)
-        if self.max_candidates != 10 or isinstance(self.max_candidates, bool):
-            raise ValueError("max_candidates must be exactly 10")
+        object.__setattr__(
+            self,
+            "max_candidates",
+            _normalize_mathematical_integer(
+                self.max_candidates, "max_candidates", minimum=10, maximum=10
+            ),
+        )
         if self.availability_expectation not in _EXPECTATIONS:
             raise ValueError("unsupported availability expectation")
         expected_freshness = _FRESHNESS_BY_EXPECTATION[self.availability_expectation]
@@ -230,6 +405,20 @@ class QueryTask:
                 public=False,
             ),
         )
+        if self.required_extraction_fields != _EXTRACTION_FIELDS[self.kind]:
+            raise ValueError("required extraction fields do not match query kind")
+        query_text = " ".join(self.query_variants)
+        for context in (self.province, str(self.year), self.subject_group):
+            if context not in query_text:
+                raise ValueError("query variants do not carry the task context")
+        if self.target_name is not None and self.target_name not in query_text:
+            raise ValueError("query variants do not carry the structured target")
+        if self.target_name is None and self.kind in _GENERIC_KIND_SYNONYMS:
+            if any(
+                synonym not in query_text
+                for synonym in _GENERIC_KIND_SYNONYMS[self.kind]
+            ):
+                raise ValueError("generic query task is missing fixed kind synonyms")
         if not isinstance(self.task_id, str) or _SAFE_ID.fullmatch(self.task_id) is None:
             raise ValueError("task_id must use the evidence safe-ID syntax")
         if self.task_id != _expected_task_id(self):
@@ -242,6 +431,7 @@ class QueryTask:
             "province": self.province,
             "year": self.year,
             "subject_group": self.subject_group,
+            "target_name": self.target_name,
             "query_variants": list(self.query_variants),
             "preferred_source_tiers": list(self.preferred_source_tiers),
             "max_candidates": self.max_candidates,
@@ -263,10 +453,7 @@ class QueryPlan:
         if self.schema_version != _SCHEMA_VERSION:
             raise ValueError("unsupported query-plan schema version")
         object.__setattr__(self, "province", _public_text(self.province, "province"))
-        if not isinstance(self.exam_year, int) or isinstance(self.exam_year, bool):
-            raise TypeError("exam_year must be a normalized integer")
-        if not 2000 <= self.exam_year <= 2100:
-            raise ValueError("exam_year must be between 2000 and 2100")
+        object.__setattr__(self, "exam_year", _normalize_exam_year(self.exam_year))
         object.__setattr__(
             self, "subject_group", _public_text(self.subject_group, "subject_group")
         )
@@ -288,9 +475,9 @@ class QueryPlan:
             if task.year not in window:
                 raise ValueError("task year is outside the explicit three-year window")
             expectation = (
-                "current_year_not_yet_expected"
+                "current_year_availability_must_be_checked"
                 if task.year == self.exam_year
-                else "explicit_older_year"
+                else "expected_available"
             )
             if task.availability_expectation != expectation:
                 raise ValueError("task availability does not match its explicit year")
@@ -370,13 +557,14 @@ def _make_task(
     province: str,
     year: int,
     subject_group: str,
+    target_name: str | None,
     query_variants: tuple[str, ...],
     exam_year: int,
 ) -> QueryTask:
     expectation = (
-        "current_year_not_yet_expected"
+        "current_year_availability_must_be_checked"
         if year == exam_year
-        else "explicit_older_year"
+        else "expected_available"
     )
     values = {
         "task_id": "temporary",
@@ -384,6 +572,7 @@ def _make_task(
         "province": province,
         "year": year,
         "subject_group": subject_group,
+        "target_name": target_name,
         "query_variants": query_variants,
         "preferred_source_tiers": ("A", "B", "C"),
         "max_candidates": 10,
@@ -410,11 +599,11 @@ def build_query_plan(
 
     if not isinstance(profile, RecommendationProfile):
         raise TypeError("profile must be a RecommendationProfile")
-    if not isinstance(province, ProvinceConfig):
-        raise TypeError("province must be a strict ProvinceConfig")
+    province = _validate_province_config(province)
     year = _normalize_exam_year(exam_year)
     province_name = _public_text(province.province, "province")
-    if profile.target_province != province_name:
+    profile_province = _public_text(profile.target_province, "profile target_province")
+    if profile_province != province_name:
         raise ValueError("profile and province configuration do not match")
     primary = _public_text(profile.subject_group, "profile subject_group")
     secondary = tuple(
@@ -443,6 +632,7 @@ def build_query_plan(
                 province=province_name,
                 year=task_year,
                 subject_group=subject_group,
+                target_name=None,
                 exam_year=year,
                 query_variants=(
                     f"{authority} {task_year} {subject_group} 一分一段表",
@@ -457,6 +647,7 @@ def build_query_plan(
                 province=province_name,
                 year=task_year,
                 subject_group=subject_group,
+                target_name=None,
                 exam_year=year,
                 query_variants=(
                     f"{authority} {task_year} {subject_group} 普通批 投档线",
@@ -464,33 +655,59 @@ def build_query_plan(
                 ),
             )
         )
-    if school is not None:
-        for task_year in years:
+    for task_year in years:
+        if school is None:
+            joy_queries = (
+                f"{province_name} {task_year} {subject_group} 高中喜报",
+                f"{authority} {task_year} {subject_group} 高考光荣榜",
+                f"{province_name} {task_year} {subject_group} 高中升学成果",
+            )
+        else:
+            joy_queries = (
+                f"{province_name} {school} {task_year} {subject_group} 高考喜报",
+                f"{school} {task_year} {subject_group} 高考成绩 光荣榜",
+                f"{authority} {school} {task_year} {subject_group} 升学成果",
+            )
+        tasks.append(
+            _make_task(
+                kind="joy_report",
+                province=province_name,
+                year=task_year,
+                subject_group=subject_group,
+                target_name=school,
+                exam_year=year,
+                query_variants=joy_queries,
+            )
+        )
+    if pathways:
+        for pathway in pathways:
             tasks.append(
                 _make_task(
-                    kind="joy_report",
+                    kind="pathway_policy",
                     province=province_name,
-                    year=task_year,
+                    year=year,
                     subject_group=subject_group,
+                    target_name=pathway,
                     exam_year=year,
                     query_variants=(
-                        f"{province_name} {school} {task_year} {subject_group} 高考喜报",
-                        f"{school} {task_year} {subject_group} 高考成绩 光荣榜",
-                        f"{authority} {school} {task_year} {subject_group} 升学成果",
+                        f"{authority} {year} {subject_group} {pathway} 政策",
+                        f"{province_name} {year} {subject_group} {pathway} 招生",
                     ),
                 )
             )
-    for pathway in pathways:
+    else:
         tasks.append(
             _make_task(
                 kind="pathway_policy",
                 province=province_name,
                 year=year,
                 subject_group=subject_group,
+                target_name=None,
                 exam_year=year,
                 query_variants=(
-                    f"{authority} {year} {pathway} 政策",
-                    f"{province_name} {year} {subject_group} {pathway} 招生",
+                    f"{province_name} {year} {subject_group} 多元升学",
+                    f"{authority} {year} {subject_group} 特殊招生",
+                    f"{province_name} {year} {subject_group} 升学路径政策",
                 ),
             )
         )
@@ -615,16 +832,19 @@ def _load_province(path: Any) -> ProvinceConfig:
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Build a deterministic research query plan")
-    parser.add_argument("--profile", required=True)
-    parser.add_argument("--province", required=True)
-    parser.add_argument("--exam-year", required=True)
+    parser = _SafeArgumentParser(description="Build a deterministic research query plan")
+    parser.add_argument("--profile", required=True, action=_SingleUseAction)
+    parser.add_argument("--province", required=True, action=_SingleUseAction)
+    parser.add_argument("--exam-year", required=True, action=_SingleUseAction)
     parser.add_argument("--pathway", action="append", default=[])
-    parser.add_argument("--high-school")
+    parser.add_argument("--high-school", action=_SingleUseAction)
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
+    if sys.version_info < (3, 10) or _MISSING_LOCAL_CAPABILITY is not None:
+        sys.stderr.write("query-plan: missing capability\n")
+        return 3
     try:
         arguments = _parser().parse_args(argv)
         try:
