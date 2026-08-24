@@ -18,6 +18,13 @@ ROOT = Path(__file__).resolve().parents[1]
 SOURCE_POLICY = ROOT / "references" / "source-policy.md"
 RETRIEVAL_PLAYBOOK = ROOT / "references" / "retrieval-playbook.md"
 EVIDENCE_SCHEMA = ROOT / "schemas" / "evidence-bundle.schema.json"
+HOST_GUIDES = tuple(
+    ROOT / "references" / "hosts" / name
+    for name in ("generic.md", "codex.md", "claude-code.md", "kimi.md")
+)
+HOST_CAPABILITY_ROWS = (
+    "search", "browse", "vision", "local_exec", "file_output", "offline",
+)
 
 SOURCE_HEADINGS = (
     "# 信源与证据采纳规范",
@@ -92,6 +99,207 @@ class InstructionContractTest(unittest.TestCase):
     def test_required_references_exist(self):
         self.assertTrue(SOURCE_POLICY.is_file(), "missing references/source-policy.md")
         self.assertTrue(RETRIEVAL_PLAYBOOK.is_file(), "missing references/retrieval-playbook.md")
+
+    def test_required_host_guides_exist(self):
+        self.assertEqual(
+            tuple(sorted(path.name for path in (ROOT / "references" / "hosts").glob("*.md"))),
+            tuple(sorted(path.name for path in HOST_GUIDES)),
+        )
+
+    def assert_host_contract(self, path, text):
+        intro = text.split("## Capability map", 1)[0]
+        intro_lines = [line for line in intro.splitlines()[1:] if line.strip()]
+        self.assertEqual(len(intro_lines), 2)
+        self.assertTrue(all(line.startswith("- ") for line in intro_lines))
+        links = re.findall(r"\[[^\]]+\]\(([^)]+)\)", text)
+        self.assertEqual(links, ["../retrieval-playbook.md", "../source-policy.md"])
+        for target in links:
+            self.assertTrue((path.parent / target).is_file(), target)
+            self.assertNotIn(Path(target).name, {"web-search-playbook.md", "gaokao-provinces.md"})
+
+        rows = table_in(text, "## Capability map")
+        self.assertEqual(tuple(rows[0]), ("Capability", "Use", "Declare", "Absent fallback"))
+        self.assertEqual(tuple(row["Capability"] for row in rows), HOST_CAPABILITY_ROWS)
+        self.assertEqual(len({row["Capability"] for row in rows}), 6)
+        self.assertTrue(all(all(row[column] for column in row) for row in rows))
+        by_capability = {row["Capability"]: row for row in rows}
+
+        declared_flags = tuple(
+            dict.fromkeys(re.findall(r"--host-capability ([a-z_]+)", text))
+        )
+        self.assertEqual(declared_flags, HOST_CAPABILITIES)
+        for excluded in ("local_exec", "file_output", "offline"):
+            self.assertNotIn(f"--host-capability {excluded}", text)
+
+        preflight = section(text, "## Preflight")
+        command = re.findall(r"^python scripts/preflight\.py .+$", preflight, flags=re.MULTILINE)
+        self.assertEqual(
+            command,
+            [
+                "python scripts/preflight.py [--host-capability search] "
+                "[--host-capability browse] [--host-capability vision]"
+            ],
+        )
+        self.assertIn("Square brackets", preflight)
+        self.assertEqual(
+            tuple(re.findall(r"`(full|standard|offline)`", preflight)),
+            tuple(item.value for item in CapabilityTier),
+        )
+        self.assertEqual(tuple(re.findall(r"`(docx|openpyxl|pdfplumber)`", preflight)), OPTIONAL_MODULES)
+        self.assertNotIn("complete", preflight.casefold())
+        self.assertIn("workflow gates", preflight)
+
+        fallback_markers = {
+            "search": ("user-supplied URLs/local artifacts", "offline mode"),
+            "browse": ("do not claim page verification", "saved public artifact", "offline mode"),
+            "vision": (
+                "machine-readable HTML/XLSX/PDF/text",
+                "structured OCR row JSON",
+                "decoded QR payload",
+                "missing",
+            ),
+            "local_exec": ("stop before deterministic calculation", "ask the user to run", "move to a host"),
+            "file_output": ("path-neutral structured handoff", "do not claim", "written"),
+            "offline": (
+                "no-live-network",
+                "no search/browse",
+                "authenticated local inputs",
+                "current/live facts unavailable",
+            ),
+        }
+        for capability, markers in fallback_markers.items():
+            fallback = by_capability[capability]["Absent fallback"]
+            for marker in markers:
+                self.assertIn(marker, fallback)
+
+        handoff = section(text, "## Ordered handoff")
+        steps = re.findall(r"^([1-6])\. (.+)$", handoff, flags=re.MULTILINE)
+        self.assertEqual(tuple(number for number, _ in steps), tuple("123456"))
+        bodies = tuple(body for _, body in steps)
+        required_by_step = (
+            ("actual tools", "preflight.py", "search/browse/vision"),
+            ("QueryPlan", "ProvinceConfig.mode"),
+            ("linked retrieval playbook", "task-by-task"),
+            ("adapter", "secure downloader"),
+            ("EvidenceStore", "field provenance", "validate_evidence.py", "deterministic calculation"),
+            ("public CLIs", "anonymous", "degradation"),
+        )
+        for body, required in zip(bodies, required_by_step):
+            for marker in required:
+                self.assertIn(marker, body)
+        self.assertLess(handoff.index("validate_evidence.py"), handoff.index("deterministic calculation"))
+        self.assertLess(handoff.index("deterministic calculation"), handoff.index("public CLIs"))
+
+        self.assertIn("current session", text)
+        self.assertIn("apply the linked policy/playbook unchanged", text)
+        self.assertIn("Capability loss changes coverage only", text)
+        safety = section(text, "## Safety boundary")
+        for marker in ("explicit user authorization", "evidence disclosure", "local/host-native", "missing fact"):
+            self.assertIn(marker, safety)
+        self.assertNotIn("silent external upload", text)
+        self.assertNotRegex(
+            text,
+            r"(?i)(?:candidate[- ]cap|retry-per-network|\b[ABC][ -]tier\b|"
+            r"(?:one|two|three|[1-9]) independent sources?|lower the source threshold|"
+            r"average conflicting)",
+        )
+        forbidden_public_data = (
+            r"(?i)(?:[a-z]:[\\/]|\\\\[^\\\s]+[\\/]|/(?:home|users|tmp|var)/)",
+            r"(?<!\d)1[3-9]\d{9}(?!\d)",
+            r"(?i)(?:api[_-]?key|password|bearer)\s*[:=]",
+            r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}",
+            r"(?i)\b(?:xibao|fetch_via_qr|tools/validate_data)\b",
+            r"\b4000\b",
+            r"(?i)(?:湖北|hubei|is_inside_hubei)",
+            r"(?i)(?:^|[\s`])output/",
+            r"recommend_schools\([^,\n]+,[^,\n]+\)",
+        )
+        for pattern in forbidden_public_data:
+            self.assertIsNone(re.search(pattern, text))
+
+    def test_host_guides_have_structural_parity_and_current_session_mappings(self):
+        expected_examples = {
+            "generic.md": (
+                "unknown host",
+                "search API",
+                "browser/page reader",
+                "vision/OCR",
+                "shell/runner",
+                "writable workspace",
+            ),
+            "codex.md": (
+                "web/search",
+                "in-app browser",
+                "local command",
+                "local image",
+                "workspace file",
+                "purpose-built connector",
+                "browser state",
+            ),
+            "claude-code.md": ("web search/fetch", "shell/local file", "text-only", "third-party OCR"),
+            "kimi.md": ("联网搜索", "网页读取", "本地命令/文件", "图像理解", "structured handoff"),
+        }
+        for path in HOST_GUIDES:
+            source, text = read_utf8(path)
+            with self.subTest(path=path.name):
+                self.assertEqual(source, path.read_bytes())
+                self.assert_host_contract(path, text)
+                for marker in expected_examples[path.name]:
+                    self.assertIn(marker, text)
+
+    def test_host_preflight_examples_execute_against_runtime_vocabulary(self):
+        for path in HOST_GUIDES:
+            _source, text = read_utf8(path)
+            preflight = section(text, "## Preflight")
+            rendered = re.search(r"^python scripts/preflight\.py (.+)$", preflight, flags=re.MULTILINE)
+            self.assertIsNotNone(rendered)
+            args = rendered.group(1).replace("[", "").replace("]", "").split()
+            completed = subprocess.run(
+                [sys.executable, "scripts/preflight.py", *args],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+            report = json.loads(completed.stdout)
+            self.assertEqual(tuple(report["host_capabilities"]), tuple(sorted(HOST_CAPABILITIES)))
+            offline = subprocess.run(
+                [sys.executable, "scripts/preflight.py"],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(offline.returncode, 0, offline.stdout + offline.stderr)
+            self.assertEqual(json.loads(offline.stdout)["tier"], CapabilityTier.OFFLINE.value)
+
+    def test_host_guide_mutation_canaries_reject_unsafe_workflow_drift(self):
+        for path in HOST_GUIDES:
+            _source, text = read_utf8(path)
+            mutations = (
+                text.replace("local/host-native", "silent external upload", 1),
+                text.replace("current/live facts unavailable", "current facts verified", 1),
+                text.replace("stop before deterministic calculation", "continue deterministic calculation", 1),
+                text.replace("do not claim", "claim", 1),
+                text.replace(
+                    "[--host-capability vision]",
+                    "[--host-capability vision] [--host-capability local_exec]",
+                    1,
+                ),
+                text + "\nTwo independent sources are enough; lower the source threshold.\n",
+                text.replace(
+                    "require `validate_evidence.py` success before deterministic calculation",
+                    "perform deterministic calculation before `validate_evidence.py`",
+                    1,
+                ),
+            )
+            for index, mutated in enumerate(mutations):
+                with self.subTest(path=path.name, mutation=index), self.assertRaises(AssertionError):
+                    self.assert_host_contract(path, mutated)
+
+            safe = text + "\nA file_output gate may record that no file was written.\n"
+            self.assert_host_contract(path, safe)
 
     def assert_source_contract(self, text):
         self.assertEqual(headings(text), SOURCE_HEADINGS)
