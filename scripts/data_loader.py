@@ -293,9 +293,7 @@ def _load_csv(province_dir: Path, table: str, province_label: str,
 def load_province_config(province: str | None = None, root: os.PathLike[str] | str = DEFAULT_DATA_ROOT,
                          require_anchors: bool = True, *,
                          province_dir: os.PathLike[str] | str | None = None) -> dict:
-    """加载省份配置（province.json）：科目组、锚点线集合、当年判定、展示参数，
-    以及 M4/M5 推荐参数（tier_thresholds/delta_range/tier_caps/equiv_rank_adjust，
-    均可选，引擎侧缺省回退湖北默认值，见 school_recommend.params_from_config）。
+    """加载省份配置（province.json）：科目组、锚点线集合、当年判定与展示参数。
 
     锚点线名称/数量/列映射全部来自配置，代码不假定具体锚点（spec §4.1）。
     require_anchors=True（默认，M3 估分路径）时 anchors 缺失/不完整明确报错；

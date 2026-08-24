@@ -1,10 +1,9 @@
 # -*- coding: utf-8 -*-
 """Province-neutral, evidence-aware ordinary-batch school matching.
 
-The public API returns immutable contracts. A one-release compatibility
-dispatch preserves the legacy ``year=`` / ``estimated_prov_rank=`` callers;
-both paths execute the same filtering, ranking, de-duplication, and tiering
-core.
+The public API accepts normalized rows plus an explicit profile and always
+returns an immutable recommendation result. Evidence coverage and provenance
+must already be present on the rows; this module never fabricates either.
 """
 
 from __future__ import annotations
@@ -12,19 +11,18 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
 from typing import Any, Optional
 
-try:
-    from contracts import (
+if __package__:
+    from .contracts import (
         EvidenceStatus,
         RecommendationItem,
         RecommendationMajorGroup,
         RecommendationProfile,
         RecommendationResult,
     )
-except ModuleNotFoundError:  # Package import compatibility.
-    from scripts.contracts import (  # type: ignore
+else:
+    from contracts import (
         EvidenceStatus,
         RecommendationItem,
         RecommendationMajorGroup,
@@ -38,7 +36,6 @@ WEN_LE = 2000
 TIER_CAPS = {"冲": 3, "稳": 4, "保": 5}
 DELTA_LO, DELTA_HI = -8000, 6000
 LEVEL_ORDER = {"985": 0, "211": 1, "双一流": 2}
-_UNSET = object()
 
 _ACCEPTED_EXACT_STATUSES = {
     EvidenceStatus.OFFICIAL,
@@ -308,13 +305,6 @@ def _profile(value: RecommendationProfile | Mapping[str, Any]) -> Recommendation
         raise SchoolRecommendError("REC_001", "推荐输入格式无效") from error
 
 
-@dataclass(frozen=True)
-class _CoreMetrics:
-    total_985: int
-    total_211: int
-    total_in_province: int
-
-
 def _coverage_status(statuses: set[EvidenceStatus]) -> EvidenceStatus:
     for status in _ISSUE_PRECEDENCE:
         if status in statuses:
@@ -338,7 +328,7 @@ def _recommend_core(
     rows: Sequence[Mapping[str, Any]],
     profile: RecommendationProfile,
     parameters: dict,
-) -> tuple[RecommendationResult, _CoreMetrics]:
+) -> RecommendationResult:
     rank = _strict_int(profile.rank)
     if rank is None or rank < 1:
         raise SchoolRecommendError("REC_001", "参考位次缺失或超出合理范围，请先完成折算")
@@ -584,151 +574,16 @@ def _recommend_core(
         empty_reason=empty_reason,
         warnings=tuple(dict.fromkeys(warnings)),
     )
-    metrics = _CoreMetrics(
-        total_985=sum(item.school_level == "985" for item in all_items),
-        total_211=sum(item.school_level == "211" for item in all_items),
-        total_in_province=sum(item.province_match for item in all_items),
-    )
-    return result, metrics
-
-
-def _legacy_rows(
-    rows: Sequence[Mapping[str, Any]], *, year: int, target_province: str,
-) -> list[dict[str, Any]]:
-    adapted: list[dict[str, Any]] = []
-    for original in rows:
-        row = dict(original)
-        row.setdefault("year", year)
-        if not row.get("province"):
-            row["province"] = target_province
-        if not row.get("school_province") and not row.get("province_location"):
-            row["school_province"] = target_province if bool(row.get("is_inside_hubei")) else ""
-        row.setdefault("evidence_status", EvidenceStatus.REFERENCE.value)
-        row.setdefault("source_ids", ("legacy-local-dataset",))
-        row.setdefault("coverage_min_rank", 1)
-        row.setdefault("coverage_max_rank", 2_147_483_647)
-        adapted.append(row)
-    return adapted
-
-
-def _legacy_dict(
-    result: RecommendationResult,
-    metrics: _CoreMetrics,
-    *,
-    profile: RecommendationProfile,
-    year: int,
-    parameters: dict,
-) -> dict[str, Any]:
-    recommendations: dict[str, list[dict[str, Any]]] = {"冲": [], "稳": [], "保": []}
-    for item in result.items:
-        recommendations[item.strategy].append({
-            "school_name": item.school_name,
-            "school_level": item.school_level,
-            "city": item.city,
-            "is_in_province": item.province_match,
-            "min_score": item.min_score,
-            "min_rank": item.min_rank,
-            "delta": item.delta,
-            "related_majors": item.related_majors,
-            "remark": item.remarks,
-            "major_groups": [group.to_dict() for group in item.major_groups],
-            "match_reason": item.match_reason,
-            "recommend_level": item.recommend_level,
-            "strategy": item.strategy,
-        })
-    return {
-        "recommendations": recommendations,
-        "statistics": {
-            "total_985_in_range": metrics.total_985,
-            "total_211_in_range": metrics.total_211,
-            "total_in_province_in_range": metrics.total_in_province,
-            "zero_score_excluded_count": result.zero_score_excluded_count,
-        },
-        "meta": {
-            "reference_rank": profile.rank,
-            "data_year": year,
-            "subject_group": profile.subject_group,
-            "delta_range": [parameters["delta_lo"], parameters["delta_hi"]],
-            "tier_thresholds": _tier_threshold_labels(parameters),
-            "tier_caps": parameters["tier_caps"],
-            "target_city": list(profile.target_cities),
-            "secondary_subjects": sorted(profile.secondary_subjects),
-            "filtered_by_subject": result.excluded_by_subject_count,
-        },
-    }
+    return result
 
 
 def recommend_schools(
     rows: Sequence[Mapping[str, Any]],
-    profile: RecommendationProfile | Mapping[str, Any] | None | object = _UNSET,
-    *,
-    year: int | None | object = _UNSET,
-    estimated_prov_rank: object = _UNSET,
-    subject_group: str | object = _UNSET,
-    target_province: str | None | object = _UNSET,
-    target_major_category: Optional[list[str]] | object = _UNSET,
-    target_city: Optional[list[str]] | object = _UNSET,
-    target_schools_preference: Optional[list[str]] | object = _UNSET,
-    secondary_subjects: Optional[list[str]] | object = _UNSET,
-    params: Optional[dict] | object = _UNSET,
-) -> RecommendationResult | dict[str, Any]:
-    """Run the immutable API, or dispatch old keywords to a one-release bridge."""
+    profile: RecommendationProfile | Mapping[str, Any],
+) -> RecommendationResult:
+    """Return evidence-aware recommendations for normalized rows and profile."""
 
-    legacy_only_values = (
-        year, estimated_prov_rank, subject_group, target_province,
-        target_major_category, target_city, target_schools_preference,
-        secondary_subjects, params,
-    )
-    if profile is not _UNSET:
-        if any(value is not _UNSET for value in legacy_only_values):
-            raise SchoolRecommendError("REC_003", "新接口不能混用旧接口关键字")
-        result, _metrics = _recommend_core(
-            rows, _profile(profile), params_from_config()
-        )
-        return result
-
-    if year is _UNSET or estimated_prov_rank is _UNSET or _strict_int(year) is None:
-        raise SchoolRecommendError("REC_001", "旧接口缺少有效数据年份")
-    parameters = (
-        params_from_config()
-        if params is _UNSET or params is None
-        else params
-    )
-    target = None if target_province is _UNSET else target_province
-    if not target:
-        target = next((
-            str(row.get("province")) for row in rows
-            if isinstance(row, Mapping) and _canonical_province(row.get("province"))
-        ), "湖北")
-    try:
-        normalized_profile = RecommendationProfile(
-            rank=estimated_prov_rank,
-            target_province=target,
-            subject_group=(
-                "物理" if subject_group is _UNSET or not subject_group else subject_group
-            ),
-            secondary_subjects=(
-                () if secondary_subjects is _UNSET or secondary_subjects is None
-                else secondary_subjects
-            ),
-            target_major_categories=(
-                () if target_major_category is _UNSET or target_major_category is None
-                else target_major_category
-            ),
-            target_cities=(
-                () if target_city is _UNSET or target_city is None else target_city
-            ),
-            target_schools=(
-                () if target_schools_preference is _UNSET or target_schools_preference is None
-                else target_schools_preference
-            ),
-        )
-    except (TypeError, ValueError) as error:
-        raise SchoolRecommendError("REC_001", "旧接口推荐参数无效") from error
-    adapted = _legacy_rows(rows, year=year, target_province=target)
-    result, metrics = _recommend_core(adapted, normalized_profile, parameters)
-    return _legacy_dict(result, metrics, profile=normalized_profile,
-                        year=year, parameters=parameters)
+    return _recommend_core(rows, _profile(profile), params_from_config())
 
 
 __all__ = [

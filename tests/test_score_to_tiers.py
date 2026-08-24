@@ -15,6 +15,7 @@ SKILL_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(SKILL_ROOT, "scripts"))
 
 from data_loader import DataError, load_toudang, load_yifenyiduan, score_to_rank  # noqa: E402
+from contracts import RecommendationProfile  # noqa: E402
 from school_recommend import SchoolRecommendError, recommend_schools  # noqa: E402
 
 TOUDANG_COLUMNS = ["year", "province", "school_name", "school_code", "subject_group",
@@ -38,6 +39,38 @@ def td_row(school, group, min_score, min_rank, level="", city="", in_hubei=0,
 def yfd_row(year, score, rank, subject="物理"):
     return {"year": year, "score": score, "rank": rank,
             "cumulative_count": rank, "subject_group": subject}
+
+
+def evidence_recommend(rows, rank, *, majors=(), schools=(), secondary=()):
+    bounded = []
+    for original in rows:
+        row = dict(original)
+        row.update({
+            "school_province": (
+                "湖北" if bool(row.get("is_inside_hubei"))
+                else (row.get("province_location") or "江苏")
+            ),
+            "evidence_status": "official",
+            "source_ids": ("synthetic-tier-source",),
+            "coverage_min_rank": 1,
+            "coverage_max_rank": 100000,
+        })
+        bounded.append(row)
+    return recommend_schools(
+        bounded,
+        RecommendationProfile(
+            rank=rank,
+            target_province="湖北",
+            subject_group="物理",
+            secondary_subjects=secondary,
+            target_major_categories=majors,
+            target_schools=schools,
+        ),
+    )
+
+
+def tier_items(result, tier):
+    return tuple(item for item in result.items if item.strategy == tier)
 
 
 class FixtureMixin:
@@ -92,12 +125,12 @@ class TierBoundaryTest(FixtureMixin, unittest.TestCase):
 
     def test_boundary_tiers(self):
         year, rows = load_toudang("湖北", "物理", root=self.root)
-        out = recommend_schools(rows, year=year, estimated_prov_rank=10000)
-        self.assertEqual([e["school_name"] for e in out["recommendations"]["冲"]],
+        out = evidence_recommend(rows, 10000)
+        self.assertEqual([e.school_name for e in tier_items(out, "冲")],
                          ["边界冲校"])
-        self.assertEqual([e["school_name"] for e in out["recommendations"]["稳"]],
+        self.assertEqual([e.school_name for e in tier_items(out, "稳")],
                          ["边界稳校A", "边界稳校B"])
-        self.assertEqual([e["school_name"] for e in out["recommendations"]["保"]],
+        self.assertEqual([e.school_name for e in tier_items(out, "保")],
                          ["边界保校"])
 
 
@@ -113,13 +146,12 @@ class IntentAndLevelSortTest(FixtureMixin, unittest.TestCase):
 
     def test_intent_first_then_level(self):
         year, rows = load_toudang("湖北", "物理", root=self.root)
-        out = recommend_schools(rows, year=year, estimated_prov_rank=10000,
-                                target_schools_preference=["意向双非"])
-        names = [e["school_name"] for e in out["recommendations"]["稳"]]
+        out = evidence_recommend(rows, 10000, schools=("意向双非",))
+        names = [e.school_name for e in tier_items(out, "稳")]
         self.assertEqual(names, ["意向双非", "普通985", "普通211"])
-        entry = out["recommendations"]["稳"][0]
-        self.assertEqual(entry["recommend_level"], "★★★")
-        self.assertIn("用户意向院校", entry["match_reason"])
+        entry = tier_items(out, "稳")[0]
+        self.assertEqual(entry.recommend_level, "★★★")
+        self.assertIn("用户意向院校", entry.match_reason)
 
 
 class MultiGroupDedupTest(FixtureMixin, unittest.TestCase):
@@ -135,20 +167,19 @@ class MultiGroupDedupTest(FixtureMixin, unittest.TestCase):
 
     def test_rep_is_lowest_score_group_and_matched_group_shown(self):
         year, rows = load_toudang("湖北", "物理", root=self.root)
-        out = recommend_schools(rows, year=year, estimated_prov_rank=10000,
-                                target_major_category=["计算机"])
-        recs = out["recommendations"]["稳"]
+        out = evidence_recommend(rows, 10000, majors=("计算机",))
+        recs = tier_items(out, "稳")
         self.assertEqual(len(recs), 1)
         e = recs[0]
         # 代表组 = 最低分组（第01组，min_score 600），定档 Δ 按代表组位次
-        self.assertEqual(e["min_score"], 600)
-        self.assertEqual(e["min_rank"], 9500)
-        self.assertEqual(e["delta"], -500)
+        self.assertEqual(e.min_score, 600)
+        self.assertEqual(e.min_rank, 9500)
+        self.assertEqual(e.delta, -500)
         # 展示 = 代表组 + 含目标专业组（第02组），不含第03组
-        groups = [g["major_group_name"] for g in e["major_groups"]]
+        groups = [g.major_group_name for g in e.major_groups]
         self.assertEqual(groups, ["第01组", "第02组"])
-        self.assertEqual(e["recommend_level"], "★★★")
-        self.assertIn("计算机", e["match_reason"])
+        self.assertEqual(e.recommend_level, "★★★")
+        self.assertIn("计算机", e.match_reason)
 
 
 class EmptyTierTest(FixtureMixin, unittest.TestCase):
@@ -159,10 +190,10 @@ class EmptyTierTest(FixtureMixin, unittest.TestCase):
 
     def test_empty_tiers_stay_empty(self):
         year, rows = load_toudang("湖北", "物理", root=self.root)
-        out = recommend_schools(rows, year=year, estimated_prov_rank=10000)
-        self.assertEqual(len(out["recommendations"]["冲"]), 1)
-        self.assertEqual(out["recommendations"]["稳"], [])
-        self.assertEqual(out["recommendations"]["保"], [])
+        out = evidence_recommend(rows, 10000)
+        self.assertEqual(len(tier_items(out, "冲")), 1)
+        self.assertEqual(tier_items(out, "稳"), ())
+        self.assertEqual(tier_items(out, "保"), ())
 
 
 class ExtremeRankTest(FixtureMixin, unittest.TestCase):
@@ -174,13 +205,13 @@ class ExtremeRankTest(FixtureMixin, unittest.TestCase):
     def test_rank_outside_search_window(self):
         year, rows = load_toudang("湖北", "物理", root=self.root)
         # ref=20000：搜索区间 [12000, 26000]，院校 min_rank=10000 在区间外
-        out = recommend_schools(rows, year=year, estimated_prov_rank=20000)
-        self.assertEqual(out["recommendations"], {"冲": [], "稳": [], "保": []})
+        out = evidence_recommend(rows, 20000)
+        self.assertEqual(out.items, ())
 
     def test_invalid_rank_raises(self):
         year, rows = load_toudang("湖北", "物理", root=self.root)
         with self.assertRaises(SchoolRecommendError) as ctx:
-            recommend_schools(rows, year=year, estimated_prov_rank=0)
+            recommend_schools(rows, {"rank": 0, "target_province": "湖北"})
         self.assertEqual(ctx.exception.code, "REC_001")
 
 
@@ -193,11 +224,11 @@ class TierCapTest(FixtureMixin, unittest.TestCase):
 
     def test_cap_5(self):
         year, rows = load_toudang("湖北", "物理", root=self.root)
-        out = recommend_schools(rows, year=year, estimated_prov_rank=10000)
-        bao = out["recommendations"]["保"]
+        out = evidence_recommend(rows, 10000)
+        bao = tier_items(out, "保")
         self.assertEqual(len(bao), 5)
         # 同层次按最低位次升序，截断后保留前 5
-        self.assertEqual([e["min_rank"] for e in bao],
+        self.assertEqual([e.min_rank for e in bao],
                          [12100, 12110, 12120, 12130, 12140])
 
 
@@ -278,10 +309,9 @@ class SecondarySubjectFilterTest(FixtureMixin, unittest.TestCase):
         return rows
 
     def _run(self, secondary=None):
-        from school_recommend import recommend_schools
-        return recommend_schools(
-            self.load_rows(), year=2024, estimated_prov_rank=5200,
-            secondary_subjects=secondary)
+        return evidence_recommend(
+            self.load_rows(), 5200, secondary=secondary or ()
+        )
 
     def load_rows(self):
         from data_loader import load_toudang
@@ -291,24 +321,21 @@ class SecondarySubjectFilterTest(FixtureMixin, unittest.TestCase):
     def test_filter_drops_uneligible_groups(self):
         # 7 行全落稳档、帽 4：过滤后政治/特殊让位给化学/化生/不限/无注
         out = self._run(["化学", "生物"])
-        names = {e["school_name"]
-                 for tier in out["recommendations"].values() for e in tier}
+        names = {item.school_name for item in out.items}
         self.assertIn("化学大学", names)
         self.assertIn("化生大学", names)      # 化学和生物 ⊆ 物化生
         self.assertIn("不限大学", names)      # 不限保留
         self.assertIn("无注大学", names)      # 无要求信息保留
         self.assertNotIn("政治大学", names)   # 思想政治不可报 → 过滤
         self.assertNotIn("特殊大学", names)   # 地理不可报 → 过滤
-        self.assertEqual(out["meta"]["filtered_by_subject"], 2)
-        self.assertEqual(out["meta"]["secondary_subjects"], ["化学", "生物"])
+        self.assertEqual(out.excluded_by_subject_count, 2)
 
     def test_default_no_filter(self):
         out = self._run(None)
-        names = {e["school_name"]
-                 for tier in out["recommendations"].values() for e in tier}
+        names = {item.school_name for item in out.items}
         self.assertIn("政治大学", names)
         self.assertIn("特殊大学", names)
-        self.assertEqual(out["meta"]["filtered_by_subject"], 0)
+        self.assertEqual(out.excluded_by_subject_count, 0)
 
     def test_subject_required_parsing(self):
         from school_recommend import _subject_required

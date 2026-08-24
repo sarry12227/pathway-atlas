@@ -200,25 +200,13 @@ class EvidenceAndCoverageTest(unittest.TestCase):
                 self.assertEqual(result.zero_score_excluded_count, 0)
                 self.assertEqual(result.coverage_status, EvidenceStatus.MASKED)
 
-    def test_mixed_zero_placeholder_keeps_only_valid_items_and_legacy_count(self):
+    def test_mixed_zero_placeholder_keeps_only_valid_items_and_count(self):
         zero = admission_row(school_name="占位大学", min_score=0)
         valid = admission_row(school_name="有效大学", school_code="D002")
         result = recommend_schools([zero, valid], profile())
         self.assertEqual(tuple(item.school_name for item in result.items), ("有效大学",))
         self.assertEqual(result.zero_score_excluded_count, 1)
         self.assertEqual(result.coverage_status, EvidenceStatus.PARTIAL)
-
-        legacy = recommend_schools(
-            [zero, valid], year=2025, estimated_prov_rank=8000,
-            target_province="上海",
-        )
-        self.assertEqual(legacy["statistics"]["zero_score_excluded_count"], 1)
-        names = {
-            item["school_name"]
-            for values in legacy["recommendations"].values()
-            for item in values
-        }
-        self.assertEqual(names, {"有效大学"})
 
     def test_subject_filter_runs_before_invalid_numeric_fields(self):
         row = admission_row(
@@ -485,7 +473,7 @@ class ResultContractTest(unittest.TestCase):
             recommend_schools([admission_row()], {"rank": True, "target_province": "上海"})
         self.assertEqual(caught.exception.code, "REC_001")
 
-    def test_mapping_and_legacy_adapters_do_not_bypass_collection_validation(self):
+    def test_mapping_profile_does_not_bypass_collection_validation(self):
         with self.assertRaises(SchoolRecommendError) as mapping_error:
             recommend_schools(
                 [admission_row()],
@@ -498,46 +486,6 @@ class ResultContractTest(unittest.TestCase):
             )
         self.assertEqual(mapping_error.exception.code, "REC_001")
 
-        with self.assertRaises(SchoolRecommendError) as legacy_error:
-            recommend_schools(
-                [admission_row()],
-                year=2025,
-                estimated_prov_rank=8000,
-                target_city="上海",
-            )
-        self.assertEqual(legacy_error.exception.code, "REC_001")
-
-
-class DispatchContractTest(unittest.TestCase):
-    def test_profile_mode_rejects_every_explicit_legacy_keyword_even_default_values(self):
-        legacy_keywords = (
-            {"year": None},
-            {"estimated_prov_rank": None},
-            {"subject_group": "物理"},
-            {"target_province": None},
-            {"target_major_category": None},
-            {"target_city": None},
-            {"target_schools_preference": None},
-            {"secondary_subjects": None},
-            {"params": None},
-        )
-        for legacy_kwargs in legacy_keywords:
-            with self.subTest(keyword=next(iter(legacy_kwargs))):
-                with self.assertRaises(SchoolRecommendError) as caught:
-                    recommend_schools([admission_row()], profile(), **legacy_kwargs)
-                self.assertEqual(caught.exception.code, "REC_003")
-
-    def test_legacy_mode_requires_both_year_and_estimated_rank(self):
-        cases = (
-            {},
-            {"year": 2025},
-            {"estimated_prov_rank": 8000},
-        )
-        for legacy_kwargs in cases:
-            with self.subTest(legacy_kwargs=legacy_kwargs):
-                with self.assertRaises(SchoolRecommendError) as caught:
-                    recommend_schools([admission_row()], **legacy_kwargs)
-                self.assertEqual(caught.exception.code, "REC_001")
 
 
 if __name__ == "__main__":

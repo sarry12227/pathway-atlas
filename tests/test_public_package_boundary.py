@@ -33,6 +33,9 @@ PRIVATE_OR_UNREVIEWED_PATHS = (
     "scripts/estimate_rank.py",
     "tests/test_rank_estimation.py",
     "tests/test_generate_report.py",
+    "scripts/recommend.py",
+    "scripts/recommend_paths.py",
+    "tests/test_path_recommend.py",
 )
 
 FORBIDDEN_MODULE_BASENAMES = frozenset(
@@ -540,36 +543,63 @@ class PublicPackageBoundaryTest(unittest.TestCase):
                     self.assertNotIn("PRIVATE", stderr)
                     self.assertNotIn("Traceback", stderr)
 
-    def test_legacy_school_cli_fails_closed_before_default_rank_estimator(self):
-        from scripts import generate_report
+    def test_legacy_school_keyword_adapter_is_not_reachable(self):
+        from scripts.school_recommend import recommend_schools
 
-        legacy_estimator = mock.Mock(
-            return_value={"normal_estimate": {"prov_rank": 1}}
-        )
-        stderr = io.StringIO()
-        with mock.patch.object(
-            generate_report, "estimate_rank", legacy_estimator, create=True
-        ), contextlib.redirect_stderr(stderr):
-            exit_code = generate_report.main(
-                [
-                    "--province",
-                    "演示甲省",
-                    "--subject-group",
-                    "物理",
-                    "--grade",
-                    "高三",
-                    "--school",
-                    "虚构高中",
-                    "--exam-rank",
-                    "10",
-                ]
+        row = {
+            "year": 2025,
+            "province": "演示甲省",
+            "school_name": "虚构甲大学",
+            "school_code": "SYN-A01",
+            "subject_group": "物理",
+            "major_group_name": "虚构专业组",
+            "min_score": 645,
+            "min_rank": 1100,
+        }
+        with self.assertRaises(TypeError):
+            recommend_schools(
+                [row],
+                year=2025,
+                estimated_prov_rank=1100,
             )
 
-        self.assertEqual(exit_code, 2)
-        legacy_estimator.assert_not_called()
-        self.assertIn("--dataset", stderr.getvalue())
-        self.assertIn("--profile", stderr.getvalue())
-        self.assertIn("--evidence", stderr.getvalue())
+    def test_fixed_default_pathway_adapter_is_not_reachable(self):
+        from scripts import path_recommend
+
+        legacy = getattr(path_recommend, "recommend_paths", None)
+        if legacy is not None:
+            result = legacy([], [], None, estimated_prov_rank=5000)
+            self.fail(
+                "legacy pathway adapter remains reachable with equivalent rank "
+                f"{result['meta']['equivalent_rank']}"
+            )
+
+    def test_old_report_arguments_are_rejected_by_evidence_parser(self):
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(ROOT / "scripts/generate_report.py"),
+                "--province",
+                "演示甲省",
+                "--subject-group",
+                "物理",
+                "--grade",
+                "高三",
+                "--rank",
+                "4000",
+            ],
+            cwd=ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        self.assertEqual(completed.returncode, 2)
+        self.assertEqual(completed.stdout, "")
+        self.assertIn("--dataset", completed.stderr)
+        self.assertIn("--profile", completed.stderr)
+        self.assertIn("--evidence", completed.stderr)
+        self.assertNotIn("Traceback", completed.stderr)
 
     def test_rank_module_has_no_public_default_xibao_estimator(self):
         rank_module = importlib.import_module("scripts.rank_calc")
@@ -587,6 +617,96 @@ class PublicPackageBoundaryTest(unittest.TestCase):
         }
         self.assertNotIn("load_xibao", imported_names)
         self.assertNotIn("estimate_rank", function_names)
+
+    def test_public_runtime_has_only_evidence_aware_recommendation_surfaces(self):
+        school_module = importlib.import_module("scripts.school_recommend")
+        path_module = importlib.import_module("scripts.path_recommend")
+        school_tree = ast.parse((ROOT / "scripts/school_recommend.py").read_text("utf-8"))
+        path_tree = ast.parse((ROOT / "scripts/path_recommend.py").read_text("utf-8"))
+        report_tree = ast.parse((ROOT / "scripts/generate_report.py").read_text("utf-8"))
+
+        signature = list(importlib.import_module("inspect").signature(
+            school_module.recommend_schools
+        ).parameters)
+        self.assertEqual(signature, ["rows", "profile"])
+
+        path_functions = {
+            node.name for node in ast.walk(path_tree) if isinstance(node, ast.FunctionDef)
+        }
+        self.assertNotIn("equiv_adjust_from_config", path_functions)
+        self.assertNotIn("recommend_paths", path_functions)
+        self.assertFalse(hasattr(path_module, "EQUIV_RANK_ADJUST"))
+        self.assertFalse(hasattr(path_module, "recommend_paths"))
+
+        tracked_scripts = subprocess.run(
+            ["git", "ls-files", "--", "scripts/*.py"],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        ).stdout.splitlines()
+        runtime_trees = {
+            relative: ast.parse((ROOT / relative).read_text("utf-8"))
+            for relative in tracked_scripts
+        }
+        forbidden_strings = {"legacy-local-dataset", "equiv_rank_adjust"}
+        forbidden_symbols = {
+            "equiv_adjust_from_config",
+            "EQUIV_RANK_ADJUST",
+            "recommend_paths",
+        }
+        for relative, tree in runtime_trees.items():
+            strings = {
+                node.value
+                for node in ast.walk(tree)
+                if isinstance(node, ast.Constant) and isinstance(node.value, str)
+            }
+            symbols = {
+                node.name
+                for node in ast.walk(tree)
+                if isinstance(node, (ast.FunctionDef, ast.ClassDef))
+            }
+            symbols.update(
+                target.id
+                for node in ast.walk(tree)
+                if isinstance(node, ast.Assign)
+                for target in node.targets
+                if isinstance(target, ast.Name)
+            )
+            self.assertTrue(
+                forbidden_strings.isdisjoint(strings),
+                f"{relative}: {forbidden_strings & strings}",
+            )
+            self.assertTrue(
+                forbidden_symbols.isdisjoint(symbols),
+                f"{relative}: {forbidden_symbols & symbols}",
+            )
+
+        report_imports = {
+            alias.name
+            for node in ast.walk(report_tree)
+            if isinstance(node, (ast.Import, ast.ImportFrom))
+            for alias in node.names
+        }
+        self.assertTrue({
+            "load_path_table",
+            "load_province_config",
+            "load_toudang",
+            "load_yifenyiduan",
+            "score_to_rank",
+            "equiv_adjust_from_config",
+            "recommend_paths",
+            "params_from_config",
+        }.isdisjoint(report_imports), report_imports)
+
+        evaluate = next(
+            node for node in path_tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == "evaluate_pathways"
+        )
+        self.assertEqual(evaluate.args.args[-1].arg, "model")
+        self.assertIsInstance(evaluate.args.defaults[-1], ast.Constant)
+        self.assertIsNone(evaluate.args.defaults[-1].value)
 
     def test_ast_boundary_folds_path_division(self):
         cases = {
