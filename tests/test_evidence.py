@@ -116,6 +116,7 @@ class EvidenceStoreTest(unittest.TestCase):
             {"locator": "C:relative-sheet"},
             {"locator": "z:logical-row"},
             {"locator": "sheet[C:relative-sheet]"},
+            {"locator": "sheet/C:relative"},
             {"locator": "../private/scores.xlsx"},
             {"locator": "sheet[../scores.xlsx]"},
             {"locator": "//server/share/scores.xlsx"},
@@ -152,6 +153,25 @@ class EvidenceStoreTest(unittest.TestCase):
                 self.assertNotIn(str(values["locator"]), str(raised.exception))
                 self.assertEqual(store._facts, {})
                 self.assertEqual(store._contexts, [])
+
+    def test_fact_provenance_accepts_semantic_colon_and_page_image_locators(self):
+        safe_locators = (
+            "物理类!A2:F2",
+            "page[1]/image[page-1]/bbox[10,20,500,60]",
+        )
+        for index, locator in enumerate(safe_locators):
+            with self.subTest(locator=locator):
+                store = EvidenceStore.create(self.root, self.report)
+                source_id = f"safe-s{index}"
+                fact_id = f"safe-fact-{index}"
+                store.add_candidate(self.candidate(source_id))
+                store.add_fact(
+                    self.fact(fact_id, (source_id,)),
+                    year=2026,
+                    extraction_method="manual-structured",
+                    locator=locator,
+                )
+                store.finalize()
 
     def test_generic_context_cannot_forge_reserved_fact_provenance(self):
         store = EvidenceStore.create(self.root, self.report)

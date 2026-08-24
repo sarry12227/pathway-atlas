@@ -164,6 +164,7 @@ class ValidateEvidenceCliTest(unittest.TestCase):
             {"locator": "C:relative-sheet"},
             {"locator": "z:logical-row"},
             {"locator": "sheet[C:relative-sheet]"},
+            {"locator": "sheet/C:relative"},
             {"locator": "../private/scores.xlsx"},
             {"locator": "sheet[../scores.xlsx]"},
             {"locator": "//server/share/scores.xlsx"},

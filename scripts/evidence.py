@@ -57,7 +57,7 @@ _FACT_EXTRACTION_METHODS = frozenset(FACT_EXTRACTION_METHODS)
 _LOCAL_PATH_FRAGMENT = re.compile(
     r"(?i)(?:[a-z]:[\\/]|//|/(?:home|users|tmp|var|etc|private|mnt)(?:/|\]))"
 )
-_DRIVE_PREFIX = re.compile(r"(?:^|[\[({=,\s])[A-Za-z]:")
+_DRIVE_PREFIX = re.compile(r"(?:^|[/\[({=,\s])[A-Za-z]:")
 _ENVIRONMENT_REFERENCE = re.compile(
     r"%(?:[A-Za-z_][A-Za-z0-9_]*)%|\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][A-Za-z0-9_]*\})"
 )
