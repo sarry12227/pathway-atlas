@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "scenario_id": "heilongjiang-qr",
+  "capability": {"tier": "offline", "degradations": ["host-decoded-qr-replay"]},
+  "extraction": {"kind": "xlsx-worksheet", "artifact": "synthetic-qr-xlsx", "coverage": "worksheet coverage: sheet[synthetic-sheet]/cells[A2:F2]"},
+  "candidates": [
+    {"source_id": "qr-c1", "url": "https://qr-one.example.test/table", "publisher": "Synthetic QR Publisher One", "tier": "C", "published_at": null, "retrieved_at": "2026-08-24T00:00:00Z", "content_hash": "sha256:1111111111111111111111111111111111111111111111111111111111111111", "citation_root": "https://qr-one.example.test/root", "summary": "Synthetic independently published worksheet"},
+    {"source_id": "qr-c2", "url": "https://qr-two.example.test/table", "publisher": "Synthetic QR Publisher Two", "tier": "C", "published_at": null, "retrieved_at": "2026-08-24T00:00:00Z", "content_hash": "sha256:2222222222222222222222222222222222222222222222222222222222222222", "citation_root": "https://qr-two.example.test/root", "summary": "Synthetic independently published worksheet"},
+    {"source_id": "qr-c3", "url": "https://qr-three.example.test/table", "publisher": "Synthetic QR Publisher Three", "tier": "C", "published_at": null, "retrieved_at": "2026-08-24T00:00:00Z", "content_hash": "sha256:3333333333333333333333333333333333333333333333333333333333333333", "citation_root": "https://qr-three.example.test/root", "summary": "Synthetic independently published worksheet"}
+  ],
+  "claims": [
+    {"field": "synthetic_admission_score", "value": 620, "unit": "synthetic-points", "source_id": "qr-c1", "method": "xlsx-worksheet"},
+    {"field": "synthetic_admission_score", "value": 620, "unit": "synthetic-points", "source_id": "qr-c2", "method": "xlsx-worksheet"},
+    {"field": "synthetic_admission_score", "value": 620, "unit": "synthetic-points", "source_id": "qr-c3", "method": "xlsx-worksheet"}
+  ],
+  "expected": {"fact_id": "replay-qr-fact", "field": "synthetic_admission_score", "status": "reference", "value": 620, "unit": "synthetic-points", "method": "three-source-consensus", "notes": "worksheet provenance retained from host-decoded QR: synthetic-sheet!A2:F2", "year": 2026, "extraction_method": "xlsx-worksheet", "locator": "synthetic-sheet!A2:F2", "candidate_count": 3, "independent_source_count": 3, "rejections": [], "report_contains": ["多源参考", "worksheet coverage", "qr-c1"], "coverage_status": "reference"}
+}
