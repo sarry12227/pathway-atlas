@@ -13,6 +13,42 @@ REQUIRED_FILES = (
     "CHANGELOG.md",
     "ROADMAP.md",
 )
+PROVINCIAL_REGIONS = (
+    "北京",
+    "天津",
+    "河北",
+    "山西",
+    "内蒙古",
+    "辽宁",
+    "吉林",
+    "黑龙江",
+    "上海",
+    "江苏",
+    "浙江",
+    "安徽",
+    "福建",
+    "江西",
+    "山东",
+    "河南",
+    "湖北",
+    "湖南",
+    "广东",
+    "广西",
+    "海南",
+    "重庆",
+    "四川",
+    "贵州",
+    "云南",
+    "西藏",
+    "陕西",
+    "甘肃",
+    "青海",
+    "宁夏",
+    "新疆",
+    "香港",
+    "澳门",
+    "台湾",
+)
 
 
 def read_documents():
@@ -26,6 +62,110 @@ def read_documents():
 
 def markdown_links(text):
     return tuple(re.findall(r"\[[^\]]+\]\(([^)\s]+)(?:\s+[^)]*)?\)", text))
+
+
+def markdown_sections(text):
+    """Parse second-level Markdown sections without treating prose as headings."""
+    headings = tuple(re.finditer(r"^##\s+([^\n]+?)\s*$", text, flags=re.MULTILINE))
+    sections = {}
+    for index, heading in enumerate(headings):
+        start = heading.end()
+        end = headings[index + 1].start() if index + 1 < len(headings) else len(text)
+        sections[heading.group(1).strip()] = text[start:end].strip()
+    return sections
+
+
+def markdown_table_rows(text):
+    """Return content rows from simple pipe tables, excluding separator rows."""
+    rows = []
+    for line in text.splitlines():
+        if not line.strip().startswith("|"):
+            continue
+        cells = tuple(cell.strip() for cell in line.strip().strip("|").split("|"))
+        if cells and all(re.fullmatch(r":?-{3,}:?", cell) for cell in cells):
+            continue
+        rows.append(cells)
+    return tuple(rows)
+
+
+def prose_sentences(text):
+    plain = re.sub(r"[`*_]", "", text)
+    plain = re.sub(r"\s+", " ", plain).strip()
+    return tuple(sentence.strip() for sentence in re.split(r"[。！？]", plain) if sentence.strip())
+
+
+def data_governance_violations(data_sources):
+    violations = []
+    sections = markdown_sections(data_sources)
+    tier_rows = [
+        row
+        for row in markdown_table_rows(sections.get("A/B/C 来源", ""))
+        if row and row[0] in {"A 级", "B 级", "C 级"}
+    ]
+    b_rows = [row for row in tier_rows if row[0] == "B 级"]
+    if len(b_rows) != 1 or len(b_rows[0]) < 3:
+        violations.append("DATA_SOURCES.md: one B-tier policy row required")
+    else:
+        b_policy = " ".join(b_rows[0][2:])
+        if not re.search(r"没有直接 A[^；]*至少两个[^；]*独立[^；]*可追溯[^；]*B[^；]*一致", b_policy):
+            violations.append("DATA_SOURCES.md: independent two-B threshold missing")
+
+    freshness = prose_sentences(sections.get("时效与新鲜度", ""))
+    hash_rules = [sentence for sentence in freshness if "哈希变化" in sentence]
+    if len(hash_rules) != 1 or not all(
+        term in hash_rules[0] for term in ("触发", "重新提取", "验证", "不自动覆盖已发布事实")
+    ):
+        violations.append("DATA_SOURCES.md: hash changes must revalidate without auto-overwrite")
+
+    takedown = prose_sentences(sections.get("删除请求", ""))
+    takedown_rules = [sentence for sentence in takedown if "收到可信请求" in sentence]
+    if len(takedown_rules) != 1 or not re.search(
+        r"先停止后续分发[^。]*隔离受影响快照", takedown_rules[0]
+    ):
+        violations.append("DATA_SOURCES.md: takedown must stop distribution and isolate snapshot")
+    return violations
+
+
+def private_reporting_violations(security, conduct):
+    violations = []
+    security_sentences = prose_sentences(markdown_sections(security).get("私密报告", ""))
+    security_rules = [sentence for sentence in security_sentences if "公开 Issue" in sentence]
+    if len(security_rules) != 1 or not all(
+        term in security_rules[0] for term in ("禁止", "披露", "漏洞", "真实学生数据")
+    ):
+        violations.append("SECURITY.md: public issues must not disclose vulnerabilities or student data")
+
+    conduct_sentences = prose_sentences(markdown_sections(conduct).get("执行责任与报告", ""))
+    conduct_rules = [sentence for sentence in conduct_sentences if "公开 Issue" in sentence]
+    if len(conduct_rules) != 1 or not all(
+        term in conduct_rules[0] for term in ("不得", "披露", "敏感事件")
+    ):
+        violations.append("CODE_OF_CONDUCT.md: public issues must not disclose conduct incidents")
+    return violations
+
+
+def roadmap_violations(roadmap):
+    """Validate only roadmap outcome sections, not historical/release prose elsewhere."""
+    violations = []
+    sections = markdown_sections(roadmap)
+    if not sections:
+        return ["ROADMAP.md: outcome sections missing"]
+
+    for heading, body in sections.items():
+        normalized = re.sub(r"\s+", " ", body)
+        if "目标" not in normalized or "验收信号" not in normalized:
+            violations.append(f"ROADMAP.md: {heading} lacks goal or acceptance signal")
+
+    outcome_scope = "\n".join(f"{heading}\n{body}" for heading, body in sections.items())
+    named_regions = tuple(region for region in PROVINCIAL_REGIONS if region in outcome_scope)
+    if named_regions:
+        violations.append(f"ROADMAP.md: province commitment: {','.join(named_regions)}")
+
+    date_token = r"20\d{2}(?:年(?:\d{1,2}月(?:\d{1,2}日)?|第[一二三四0-9]+季度)?|[-/]\d{1,2}[-/]\d{1,2})"
+    delivery = r"(?:完成|上线|发布|交付|推出|覆盖|支持|实现|验收|上线日期|发布日期)"
+    if re.search(rf"(?:{date_token}.{{0,24}}{delivery}|{delivery}.{{0,24}}{date_token})", outcome_scope):
+        violations.append("ROADMAP.md: dated delivery commitment")
+    return violations
 
 
 def contract_violations(documents):
@@ -119,10 +259,12 @@ def contract_violations(documents):
         violations.append("DATA_SOURCES.md: C-tier threshold missing")
     if not re.search(r"快照[^。\n]*许可[^。\n]*再分发", data_sources):
         violations.append("DATA_SOURCES.md: snapshot permission gate missing")
-    if not re.search(r"公开 Issue[^。\n]*(?:不得|禁止)[^。\n]*(?:漏洞|学生数据)", security):
-        violations.append("SECURITY.md: public-report prohibition missing")
     if not re.search(r"不保证录取|不承诺录取", changelog):
         violations.append("CHANGELOG.md: preview limitation missing")
+
+    violations.extend(data_governance_violations(data_sources))
+    violations.extend(private_reporting_violations(security, conduct))
+    violations.extend(roadmap_violations(roadmap))
 
     combined = "\n".join(documents.values())
     unsafe_patterns = {
@@ -138,10 +280,6 @@ def contract_violations(documents):
         if re.search(pattern, combined):
             violations.append(f"community files contain {label}")
 
-    if re.search(r"20\d{2}[年/-]\d{1,2}|第\s*[一二三四0-9]+\s*季度", roadmap):
-        violations.append("ROADMAP.md: calendar commitment")
-    if re.search(r"(?:湖北|湖南|广东|江苏|山东|浙江|上海|北京|天津|河北|辽宁|福建|重庆)", roadmap):
-        violations.append("ROADMAP.md: province commitment")
     return violations
 
 
@@ -223,8 +361,7 @@ class CommunityFilesTest(unittest.TestCase):
         roadmap = self.documents["ROADMAP.md"]
         self.assertIn("结果导向", roadmap)
         self.assertIn("验收信号", roadmap)
-        self.assertIsNone(re.search(r"20\d{2}[年/-]\d{1,2}|第\s*[一二三四0-9]+\s*季度", roadmap))
-        self.assertIsNone(re.search(r"湖北|湖南|广东|江苏|山东|浙江|上海|北京|天津|河北|辽宁|福建|重庆", roadmap))
+        self.assertEqual(roadmap_violations(roadmap), [])
 
     def test_local_markdown_links_resolve_and_no_contact_is_invented(self):
         for name, text in self.documents.items():
@@ -254,7 +391,11 @@ class CommunityFilesTest(unittest.TestCase):
             "active-guarantee": ("ROADMAP.md", "结果导向", "结果导向：保证录取"),
             "invented-email": ("CODE_OF_CONDUCT.md", "执行责任", "执行责任 contact@example.com"),
             "private-path": ("CONTRIBUTING.md", "TDD", r"TDD C:\private\student.csv"),
-            "calendar-promise": ("ROADMAP.md", "验收信号", "2027年6月验收信号"),
+            "calendar-promise": (
+                "ROADMAP.md",
+                "**验收信号：** 新增来源",
+                "**验收信号：** 新增来源于2027年6月上线",
+            ),
             "province-promise": ("ROADMAP.md", "证据覆盖", "湖北证据覆盖"),
         }
         self.assertEqual(contract_violations(self.documents), [])
@@ -264,6 +405,103 @@ class CommunityFilesTest(unittest.TestCase):
                 mutated[filename] = mutated[filename].replace(old, new, 1)
                 self.assertNotEqual(mutated[filename], self.documents[filename], f"mutation did not apply: {name}")
                 self.assertTrue(contract_violations(mutated), f"mutation escaped: {name}")
+
+    def test_governance_direction_mutations_fail_closed(self):
+        mutations = {
+            "single-b-source": (
+                "DATA_SOURCES.md",
+                "没有直接 A 时至少两个独立且可追溯的 B 一致",
+                "没有直接 A 时一个可追溯的 B",
+                "DATA_SOURCES.md: independent two-B threshold missing",
+            ),
+            "hash-auto-overwrite": (
+                "DATA_SOURCES.md",
+                "哈希变化触发重新提取与验证，不自动覆盖已发布事实",
+                "哈希变化自动覆盖已发布事实",
+                "DATA_SOURCES.md: hash changes must revalidate without auto-overwrite",
+            ),
+            "continue-distribution": (
+                "DATA_SOURCES.md",
+                "先停止后续分发并隔离受影响快照",
+                "继续后续分发且不隔离受影响快照",
+                "DATA_SOURCES.md: takedown must stop distribution and isolate snapshot",
+            ),
+            "public-security-disclosure": (
+                "SECURITY.md",
+                "公开 Issue 禁止披露漏洞细节或真实学生数据",
+                "公开 Issue 应披露漏洞细节和真实学生数据",
+                "SECURITY.md: public issues must not disclose vulnerabilities or student data",
+            ),
+            "public-conduct-disclosure": (
+                "CODE_OF_CONDUCT.md",
+                "不得在公开 Issue 披露敏感事件内容",
+                "应在公开 Issue 披露敏感事件内容",
+                "CODE_OF_CONDUCT.md: public issues must not disclose conduct incidents",
+            ),
+        }
+        self.assertEqual(contract_violations(self.documents), [])
+        for name, (filename, old, new, expected) in mutations.items():
+            with self.subTest(name=name):
+                mutated = dict(self.documents)
+                mutated[filename] = mutated[filename].replace(old, new, 1)
+                self.assertNotEqual(mutated[filename], self.documents[filename], f"mutation did not apply: {name}")
+                self.assertIn(expected, contract_violations(mutated), f"mutation escaped: {name}")
+
+    def test_roadmap_mutations_cover_provincial_names_and_future_commitments(self):
+        for region in PROVINCIAL_REGIONS:
+            with self.subTest(region=region):
+                mutated = dict(self.documents)
+                mutated["ROADMAP.md"] = mutated["ROADMAP.md"].replace(
+                    "更多公开材料", f"{region}公开材料", 1
+                )
+                self.assertNotEqual(mutated["ROADMAP.md"], self.documents["ROADMAP.md"])
+                self.assertTrue(
+                    any(
+                        violation.startswith("ROADMAP.md: province commitment:")
+                        for violation in contract_violations(mutated)
+                    ),
+                    f"province mutation escaped: {region}",
+                )
+
+        mutations = {
+            "year-completion": (
+                "更多公开材料",
+                "更多公开材料，并于2027年完成",
+            ),
+            "month-launch": (
+                "更多公开材料",
+                "更多公开材料，并于2027年8月上线",
+            ),
+            "quarter-release": (
+                "更多公开材料",
+                "更多公开材料，并于2027年第三季度发布",
+            ),
+            "launch-date": (
+                "更多公开材料",
+                "更多公开材料，上线日期为2027-08-25",
+            ),
+        }
+        self.assertEqual(contract_violations(self.documents), [])
+        for name, (old, new) in mutations.items():
+            with self.subTest(name=name):
+                mutated = dict(self.documents)
+                mutated["ROADMAP.md"] = mutated["ROADMAP.md"].replace(old, new, 1)
+                self.assertNotEqual(mutated["ROADMAP.md"], self.documents["ROADMAP.md"], f"mutation did not apply: {name}")
+                self.assertIn(
+                    "ROADMAP.md: dated delivery commitment",
+                    contract_violations(mutated),
+                    f"mutation escaped: {name}",
+                )
+
+    def test_historical_dates_and_explicit_noncommitments_are_safe_prose(self):
+        safe = dict(self.documents)
+        safe["CHANGELOG.md"] += "\n## v0.0.9 — 2025-12-31\n\n历史版本。\n"
+        safe["ROADMAP.md"] = safe["ROADMAP.md"].replace(
+            "这是结果导向的维护方向",
+            "本路线图不承诺2027年完成，也不承诺安徽覆盖。这是结果导向的维护方向",
+            1,
+        )
+        self.assertEqual(contract_violations(safe), [])
 
 
 if __name__ == "__main__":
