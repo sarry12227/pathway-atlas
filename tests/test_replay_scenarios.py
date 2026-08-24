@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import base64
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 import hashlib
 import json
@@ -46,6 +47,58 @@ def _install_network_sentinel() -> None:
     socket.socket = _BlockedSocket  # type: ignore[assignment]
 
 
+@contextmanager
+def _network_sentinel():
+    """Block the complete child sentinel surface in one parent-test scope."""
+    with ExitStack() as patches:
+        patches.enter_context(mock.patch.object(socket, "getaddrinfo", _blocked_network))
+        patches.enter_context(mock.patch.object(socket, "gethostbyname", _blocked_network))
+        patches.enter_context(mock.patch.object(socket, "gethostbyaddr", _blocked_network))
+        patches.enter_context(mock.patch.object(socket, "getfqdn", _blocked_network))
+        patches.enter_context(mock.patch.object(socket, "create_connection", _blocked_network))
+        patches.enter_context(mock.patch.object(socket, "socket", _BlockedSocket))
+        yield
+
+
+def _safe_qr_dns(hostname: str, port: int, *_args: object, **_kwargs: object) -> list[tuple[object, ...]]:
+    """Offline resolver seam for the one synthetic public QR host."""
+    if hostname != "qr-origin.example.test":
+        raise AssertionError(_SENTINEL_MARKER)
+    return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("8.8.8.8", port))]
+
+
+def _assert_network_sentinel_canaries() -> None:
+    for call in (
+        lambda: socket.getaddrinfo("example.test", 443),
+        lambda: socket.gethostbyname("example.test"),
+        lambda: socket.gethostbyaddr("8.8.8.8"),
+        lambda: socket.getfqdn("example.test"),
+        lambda: socket.create_connection(("example.test", 443)),
+    ):
+        try:
+            call()
+        except AssertionError as error:
+            if str(error) != _SENTINEL_MARKER:
+                raise
+        else:
+            raise AssertionError("network sentinel canary was not blocked")
+    blocked = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    for call in (
+        lambda: blocked.connect(("127.0.0.1", 9)),
+        lambda: blocked.connect_ex(("127.0.0.1", 9)),
+        lambda: blocked.send(b"x"),
+        lambda: blocked.sendall(b"x"),
+        lambda: blocked.sendto(b"x", ("127.0.0.1", 9)),
+    ):
+        try:
+            call()
+        except AssertionError as error:
+            if str(error) != _SENTINEL_MARKER:
+                raise
+        else:
+            raise AssertionError("network sentinel canary was not blocked")
+
+
 if os.environ.get("REPLAY_CHILD_SENTINEL") == "1":
     _install_network_sentinel()
 
@@ -63,7 +116,9 @@ from scripts.contracts import (
 from scripts.evidence import EvidenceStore
 from scripts.report_model import StudentProfile, build_report_model, render_markdown
 from scripts.adapters import CellStatus, ColumnMapping, ExtractedCoverage, ExtractedRow, ExtractedTable
+from scripts.adapters import qr as qr_adapter
 from scripts.adapters.ocr_rows import normalize_ocr_rows
+from scripts.downloader import DownloadResult
 from scripts.source_policy import deduplicate_candidates, evaluate_claims
 from scripts.validate_evidence import validate_bundle_snapshot
 
@@ -173,6 +228,9 @@ def _extraction_claims(scenario_id: str, extraction: dict[str, object], candidat
     if scenario_id == "heilongjiang-qr":
         if kind != "xlsx-worksheet" or set(artifact) != {"qr", "worksheet"}:
             raise ReplayFixtureError("QR worksheet artifact is invalid")
+        qr = artifact["qr"]
+        if not isinstance(qr, dict) or set(qr) != {"host_decoded_url", "qr_image_source_id", "downloaded_file_id"}:
+            raise ReplayFixtureError("QR download artifact is invalid")
         worksheet = artifact["worksheet"]
         if not isinstance(worksheet, dict) or set(worksheet) != {"sheet", "values", "cell_status", "locator", "coverage"}:
             raise ReplayFixtureError("worksheet result is invalid")
@@ -180,7 +238,32 @@ def _extraction_claims(scenario_id: str, extraction: dict[str, object], candidat
         table = ExtractedTable("sheet:" + str(worksheet["sheet"]), None, worksheet["sheet"], (row,), ExtractedCoverage(**worksheet["coverage"]), (), "xlsx-worksheet")
         if table.extraction_method != kind or row.cell_status.get("score") is not CellStatus.EXACT:
             raise ReplayFixtureError("worksheet artifact is not an exact XLSX result")
-        return tuple(FactClaim("synthetic_admission_score", row.values["score"], "synthetic-points", item.source_id, table.extraction_method) for item in candidates), {"method": table.extraction_method, "locator": row.location, "value": row.values["score"], "coverage": table.coverage.to_dict()}
+        requested_file_id = qr["downloaded_file_id"]
+        if not isinstance(requested_file_id, str):
+            raise ReplayFixtureError("QR artifact downloaded file identity is invalid")
+        downloaded_path = (output_root / requested_file_id).resolve()
+        if downloaded_path.parent != output_root.resolve():
+            raise ReplayFixtureError("QR artifact downloaded file identity is unsafe")
+        downloaded_path.write_bytes(b"synthetic offline XLSX replay\n")
+        download = DownloadResult(
+            path=downloaded_path,
+            source_url=str(qr["host_decoded_url"]),
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            size_bytes=downloaded_path.stat().st_size,
+            redirect_chain=(str(qr["host_decoded_url"]),),
+        )
+        try:
+            with mock.patch.object(socket, "getaddrinfo", _safe_qr_dns), mock.patch.object(qr_adapter, "download_public_file", return_value=download):
+                resolution = qr_adapter.resolve_qr_payload(
+                    qr["host_decoded_url"], output_root.resolve(), qr_image_source_id=qr["qr_image_source_id"], max_bytes=1024, timeout=1.0,
+                )
+        except (qr_adapter.QrPayloadError, qr_adapter.QrResolutionError, TypeError, ValueError, OSError):
+            raise ReplayFixtureError("QR artifact did not produce authenticated provenance") from None
+        if resolution.downloaded_file_id != qr["downloaded_file_id"]:
+            raise ReplayFixtureError("QR artifact downloaded file identity is inconsistent")
+        locator = f"{row.location}; qr-source={resolution.qr_image_source_id}; file={resolution.downloaded_file_id}"
+        notes = f"worksheet provenance from authenticated QR source {resolution.qr_image_source_id}: {locator}"
+        return tuple(FactClaim("synthetic_admission_score", row.values["score"], "synthetic-points", item.source_id, table.extraction_method) for item in candidates), {"method": table.extraction_method, "locator": locator, "value": row.values["score"], "coverage": table.coverage.to_dict(), "notes": notes}
     if scenario_id == "shanghai-masked-ocr":
         if kind != "host-ocr-rows" or set(artifact) != {"document", "mapping", "score_scale", "min_exact_confidence", "target_field"}:
             raise ReplayFixtureError("OCR artifact is invalid")
@@ -251,12 +334,16 @@ def replay_scenario(scenario_id: str, output_root: Path, *, fixture_path: Path |
         )
     if derived["method"] != expected["extraction_method"] or derived["locator"] != expected["locator"]:
         raise ReplayFixtureError("extraction provenance does not match the adapter result")
+    expected_notes = str(expected["notes"])
+    derived_notes = str(derived.get("notes", expected_notes))
+    if derived_notes != expected_notes:
+        raise ReplayFixtureError("extraction notes do not match authenticated provenance")
     if status is EvidenceStatus.MASKED and (derived["value"] is not None or any(character.isdigit() for character in str(expected["unit"]) + str(expected["notes"]))):
         raise ReplayFixtureError("masked artifact cannot carry an exact boundary")
     if (fact.status.value, fact.value, fact.unit, fact.method) != (expected["status"], expected["value"], expected["unit"], expected["method"]):
         raise ReplayFixtureError("policy result does not match fixture expectation")
-    if fact.fact_id != expected["fact_id"]:
-        fact = EvidenceFact(str(expected["fact_id"]), fact.field, fact.value, fact.unit, fact.status, fact.source_ids, fact.method, str(expected["notes"]))
+    if fact.fact_id != expected["fact_id"] or fact.notes != derived_notes:
+        fact = EvidenceFact(str(expected["fact_id"]), fact.field, fact.value, fact.unit, fact.status, fact.source_ids, fact.method, derived_notes)
 
     report = CapabilityReport(
         tier=CapabilityTier(capability_value["tier"]), degradations=tuple(capability_value["degradations"]),
@@ -340,7 +427,42 @@ class ReplayScenarioTest(unittest.TestCase):
         self.assertEqual(result.independent_source_count, 3)
         self.assertEqual(result.snapshot_summary, (1, 0, 1))
         self.assertIn("worksheet", result.fact.notes)
+        self.assertIn("synthetic.xlsx", result.fact.notes)
         self.assertIn("qr-c1", result.report)
+
+    def test_qr_payload_and_downloaded_file_mutations_fail_closed(self):
+        fixture = _strict_json(FIXTURES / "heilongjiang-qr" / "scenario.json")
+        with tempfile.TemporaryDirectory() as temporary:
+            baseline = replay_scenario("heilongjiang-qr", Path(temporary)).semantic_json()
+        changed = json.loads(json.dumps(fixture))
+        changed["extraction"]["artifact"]["qr"]["downloaded_file_id"] = "alternate.xlsx"
+        changed["expected"]["notes"] = "worksheet provenance from authenticated QR source synthetic-qr-image: synthetic-sheet!A2:F2; qr-source=synthetic-qr-image; file=alternate.xlsx"
+        changed["expected"]["locator"] = "synthetic-sheet!A2:F2; qr-source=synthetic-qr-image; file=alternate.xlsx"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = root / "changed.json"
+            path.write_text(json.dumps(changed, ensure_ascii=False), encoding="utf-8", newline="\n")
+            self.assertNotEqual(baseline, replay_scenario("heilongjiang-qr", root / "output", fixture_path=path).semantic_json())
+        for mutation in (
+            ("host_decoded_url", "file:///synthetic.xlsx"),
+            ("host_decoded_url", "C:/synthetic.xlsx"),
+            ("downloaded_file_id", "file:///synthetic.xlsx"),
+            ("downloaded_file_id", "C:/synthetic.xlsx"),
+        ):
+            with self.subTest(mutation=mutation):
+                mutated = json.loads(json.dumps(fixture))
+                mutated["extraction"]["artifact"]["qr"][mutation[0]] = mutation[1]
+                with tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    path = root / "mutated.json"
+                    path.write_text(json.dumps(mutated, ensure_ascii=False), encoding="utf-8", newline="\n")
+                    with self.assertRaises(ReplayFixtureError) as raised:
+                        replay_scenario("heilongjiang-qr", root / "output", fixture_path=path)
+                self.assertNotIn(str(root), str(raised.exception))
+
+    def test_parent_network_sentinel_covers_dns_tcp_and_udp(self):
+        with _network_sentinel():
+            _assert_network_sentinel_canaries()
 
     def test_masked_ocr_never_creates_an_exact_boundary(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -388,11 +510,11 @@ class ReplayScenarioTest(unittest.TestCase):
 
     def test_replay_is_offline_and_never_mutates_committed_input(self):
         before = _fixture_hashes()
-        def blocked(*_args, **_kwargs): raise AssertionError("network access is forbidden during replay")
-        with tempfile.TemporaryDirectory() as temporary, mock.patch.object(socket, "create_connection", blocked), mock.patch.object(socket, "getaddrinfo", blocked), mock.patch.object(socket.socket, "connect", blocked), mock.patch.object(socket.socket, "connect_ex", blocked):
+        with tempfile.TemporaryDirectory() as temporary, _network_sentinel():
             for scenario_id in SCENARIOS:
                 replay_scenario(scenario_id, Path(temporary) / scenario_id)
-            with self.assertRaises(AssertionError): socket.getaddrinfo("example.test", 443)
+            with self.assertRaisesRegex(AssertionError, f"^{_SENTINEL_MARKER}$"):
+                socket.getaddrinfo("example.test", 443)
         self.assertEqual(_fixture_hashes(), before)
 
     def test_replays_are_byte_identical_across_runs_and_hash_seeds(self):
@@ -433,19 +555,7 @@ if __name__ == "__main__":
     if sys.argv[1:] == ["--replay-child"]:
         with tempfile.TemporaryDirectory() as temporary:
             result = replay_scenario("heilongjiang-qr", Path(temporary))
-        for call in (socket.getaddrinfo, socket.gethostbyname, socket.gethostbyaddr, socket.getfqdn, socket.create_connection):
-            try:
-                call("example.test")
-            except AssertionError as error:
-                if str(error) != _SENTINEL_MARKER:
-                    raise
-        blocked = _BlockedSocket()
-        for method in (blocked.connect, blocked.connect_ex, blocked.send, blocked.sendall, blocked.sendto):
-            try:
-                method(b"x")
-            except AssertionError as error:
-                if str(error) != _SENTINEL_MARKER:
-                    raise
+        _assert_network_sentinel_canaries()
         print(json.dumps({"marker": _SENTINEL_MARKER, "semantic": result.semantic_json(), "markdown_b64": base64.b64encode(result.report.encode("utf-8")).decode("ascii")}, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
     else:
         unittest.main()
