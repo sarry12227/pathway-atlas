@@ -7,6 +7,7 @@ import io
 import json
 import os
 import stat
+import ast
 import tempfile
 import unittest
 from dataclasses import replace
@@ -75,6 +76,7 @@ class LiveSmokeContractTest(unittest.TestCase):
         self.assertEqual(("www.hljea.org.cn", "hljea.org.cn"), result.redirect_domains)
         self.assertEqual("2026-08-24T00:00:00Z", result.checked_at)
         self.assertEqual(("https://www.hljea.org.cn/", MAX_RESPONSE_BYTES, TOTAL_TIMEOUT_SECONDS), calls[0])
+        self.assertEqual(1, len(calls))
         self.assertIsNotNone(downloaded)
         self.assertFalse(downloaded.path.exists())
         self.assertEqual(
@@ -231,6 +233,61 @@ class LiveSmokeContractTest(unittest.TestCase):
             runpy.run_path("scripts/live_smoke.py", run_name="not_main")
         finally:
             for item in reversed(patches): item.stop()
+
+    def test_all_tracked_catalog_entries_and_hunan_discovery_path_are_accepted(self) -> None:
+        healthy = LiveSmokeResult(
+            province="湖南", status="healthy", requested_domain="jyt.hunan.gov.cn",
+            final_domain="jyt.hunan.gov.cn", redirect_domains=("jyt.hunan.gov.cn",),
+            checked_at="2026-08-24T00:00:00Z", content_type="text/html", size_bytes=0,
+            reason_code=None,
+        )
+        with patch("scripts.live_smoke.check_official_root", return_value=healthy) as check:
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                self.assertEqual(0, main(["--province", "湖南"])); self.assertEqual(0, main(["--province", "黑龙江"] ))
+        self.assertIn("jyt.hunan.gov.cn", check.call_args_list[0].args[1][0])
+        self.assertEqual("", stderr.getvalue())
+
+    def test_same_site_http_redirect_is_healthy_but_internal_host_is_not_serialized(self) -> None:
+        healthy = check_official_root(
+            "黑龙江", self.roots,
+            downloader=lambda _url, workspace, **kwargs: self._result(workspace, "https://www.hljea.org.cn/", "http://hljea.org.cn/path?token=secret"),
+            clock=self.clock,
+        )
+        internal = check_official_root(
+            "黑龙江", self.roots,
+            downloader=lambda _url, workspace, **kwargs: self._result(workspace, "https://www.hljea.org.cn/", "https://metadata.internal/x?token=secret"),
+            clock=self.clock,
+        )
+        self.assertEqual("healthy", healthy.status)
+        self.assertEqual(("unavailable", "security_rejection"), (internal.status, internal.reason_code))
+        self.assertNotIn("internal", repr(internal))
+
+    def test_result_domains_are_normalized_and_source_surface_has_no_evidence_engines(self) -> None:
+        valid = LiveSmokeResult(
+            province="黑龙江", status="healthy", requested_domain="www.hljea.org.cn",
+            final_domain="hljea.org.cn", redirect_domains=("www.hljea.org.cn", "hljea.org.cn"),
+            checked_at="2026-08-24T00:00:00Z", content_type="text/html", size_bytes=0, reason_code=None,
+        )
+        for changes in ({"requested_domain": "WWW.hljea.org.cn"}, {"final_domain": "C:\\secret"}, {"redirect_domains": ("www.hljea.org.cn", "hljea.org.cn?token=secret")}):
+            with self.subTest(changes=changes), self.assertRaises(ValueError): replace(valid, **changes)
+        source = Path("scripts/live_smoke.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        imported = {alias.name for node in ast.walk(tree) if isinstance(node, (ast.Import, ast.ImportFrom)) for alias in node.names}
+        self.assertFalse(any("evidence" in name.casefold() or "validator" in name.casefold() or "report" in name.casefold() for name in imported))
+
+    def test_unavailable_cli_is_observation_exit_zero(self) -> None:
+        unavailable = LiveSmokeResult(
+            province="黑龙江", status="unavailable", requested_domain="www.hljea.org.cn",
+            final_domain=None, redirect_domains=("www.hljea.org.cn",),
+            checked_at="2026-08-24T00:00:00Z", content_type=None, size_bytes=None,
+            reason_code="timeout",
+        )
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with patch("scripts.live_smoke.check_official_root", return_value=unavailable), contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            self.assertEqual(0, main(["--province", "黑龙江"]))
+        self.assertEqual("", stderr.getvalue())
+        self.assertEqual("unavailable", json.loads(stdout.getvalue())["status"])
 
 
 if __name__ == "__main__":

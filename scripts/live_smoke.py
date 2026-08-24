@@ -58,27 +58,36 @@ def _domain(url: str) -> str:
     if part.scheme.casefold() not in {"http", "https"} or not part.hostname or part.username is not None or part.password is not None:
         return ""
     host = part.hostname.rstrip(".").casefold()
-    if not host or host == "localhost" or host.endswith(".localhost") or host.isdecimal():
+    if not host or host == "localhost" or host.endswith((".localhost", ".internal", ".local")) or host == "home.arpa" or host.endswith(".home.arpa"):
         return ""
     try:
         ipaddress.ip_address(host)
         return ""
     except ValueError:
         pass
+    try:
+        host = host.encode("idna").decode("ascii")
+    except UnicodeError:
+        return ""
+    labels = host.split(".")
+    if len(labels) < 2 or len(host) > 253 or any(not label or len(label) > 63 or label.startswith("-") or label.endswith("-") or not all(char.isascii() and (char.isalnum() or char == "-") for char in label) for label in labels):
+        return ""
+    if all(label.isdecimal() for label in labels) or any(label.casefold().startswith("0x") for label in labels):
+        return ""
     default = (part.scheme.casefold() == "http" and port == 80) or (part.scheme.casefold() == "https" and port == 443)
     return host if port is None or default else f"{host}:{port}"
 
 
-def _safe_url(url: object, *, root_only: bool = False) -> bool:
+def _safe_url(url: object, *, catalog: bool = False, allow_http: bool = False) -> bool:
     if not isinstance(url, str) or not _domain(url):
         return False
     try:
         part = urlsplit(url)
     except ValueError:
         return False
-    if part.scheme.casefold() != "https" or part.username is not None or part.password is not None:
+    if part.scheme.casefold() not in ({"http", "https"} if allow_http else {"https"}) or part.username is not None or part.password is not None:
         return False
-    if root_only and (part.path not in {"", "/"} or part.query or part.fragment):
+    if catalog and (part.query or part.fragment):
         return False
     return True
 
@@ -108,7 +117,9 @@ class LiveSmokeResult:
             raise ValueError("invalid live smoke result")
         if not isinstance(self.checked_at, str) or not _UTC.fullmatch(self.checked_at):
             raise ValueError("invalid checked time")
-        if not isinstance(self.redirect_domains, tuple) or not self.redirect_domains or len(set(self.redirect_domains)) != len(self.redirect_domains) or any(not isinstance(item, str) or not item or "://" in item or "/" in item or "?" in item or "#" in item for item in self.redirect_domains):
+        if (not isinstance(self.redirect_domains, tuple) or not self.redirect_domains or len(set(self.redirect_domains)) != len(self.redirect_domains)
+                or any(not isinstance(item, str) or _domain(f"https://{item}") != item for item in self.redirect_domains)
+                or _domain(f"https://{self.requested_domain}") != self.requested_domain):
             raise ValueError("invalid redirect domains")
         if self.requested_domain != self.redirect_domains[0]:
             raise ValueError("invalid requested domain")
@@ -169,7 +180,7 @@ def check_official_root(province: str, official_roots: tuple[str, ...], *, downl
         except OSError as error:
             raise DownloadStorageError("result file unavailable") from error
         suffix = _MEDIA_TYPE_EXTENSIONS.get(result.media_type) if isinstance(result.media_type, str) else None
-        if (not chain or not all(_safe_url(item) for item in chain) or not all(domains)
+        if (not chain or not all(_safe_url(item, allow_http=True) for item in chain) or not all(domains)
                 or canonical_site_identity(chain[0]) != canonical_site_identity(requested_url)
                 or chain[-1] != result.source_url or result.path.parent != workspace
                 or result.path.resolve() != result.path or result.path.is_symlink()
@@ -215,7 +226,7 @@ def _load_province(token: str) -> tuple[str, tuple[str, ...]]:
             or not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", payload["verified_at"])
             or not isinstance(payload["coverage_note"], str) or not payload["coverage_note"]
             or not isinstance(payload["mode_authority_urls"], list) or not payload["mode_authority_urls"]
-            or not all(_safe_url(url) for url in payload["mode_authority_urls"])
+            or not all(_safe_url(url, catalog=True) for url in payload["mode_authority_urls"])
             or not isinstance(payload["provinces"], list) or not payload["provinces"]): raise ValueError("invalid catalog")
     needle = unicodedata.normalize("NFKC", token).casefold()
     matches = []
@@ -226,12 +237,13 @@ def _load_province(token: str) -> tuple[str, tuple[str, ...]]:
         aliases = record["aliases"]
         if (not isinstance(record["province"], str) or not record["province"] or not isinstance(aliases, list) or not aliases or not all(isinstance(item, str) and item.strip() for item in aliases)
                 or record["mode"] not in {"3+3", "3+1+2"} or not isinstance(record["authority_name"], str) or not record["authority_name"]
-                or not isinstance(roots, list) or not roots or not all(_safe_url(root, root_only=True) for root in roots)
-                or not _safe_url(record["mode_source_url"]) or not isinstance(record["verified_at"], str) or not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", record["verified_at"])
+                or not isinstance(roots, list) or not roots or not all(_safe_url(root, catalog=True) for root in roots)
+                or not _safe_url(record["mode_source_url"], catalog=True) or not isinstance(record["verified_at"], str) or not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", record["verified_at"])
                 or not isinstance(record["notes"], str) or not record["notes"]): raise ValueError("invalid catalog")
         keys = [unicodedata.normalize("NFKC", item).casefold() for item in [record["province"], *aliases]]
-        if len(set(keys)) != len(keys) or aliases_seen.intersection(keys): raise ValueError("ambiguous aliases")
-        aliases_seen.update(keys)
+        normalized_keys = set(keys)
+        if aliases_seen.intersection(normalized_keys): raise ValueError("ambiguous aliases")
+        aliases_seen.update(normalized_keys)
         if needle in keys: matches.append((record["province"], tuple(roots)))
     if len(matches) != 1: raise ValueError("unknown province")
     return matches[0]
