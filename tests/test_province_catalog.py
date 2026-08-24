@@ -55,13 +55,13 @@ EXPECTED_MODES = {
 
 EXPECTED_AUTHORITIES_AND_ROOTS = {
     "北京": ("北京教育考试院", ("https://www.bjeea.cn/",)),
-    "天津": ("天津市教育招生考试院", ("https://www.zhaokao.net/",)),
+    "天津": ("天津市教育招生考试院", ("https://jy.tj.gov.cn/",)),
     "上海": ("上海市教育考试院", ("https://www.shmeea.edu.cn/",)),
     "浙江": ("浙江省教育考试院", ("https://www.zjzs.net/",)),
     "山东": ("山东省教育招生考试院", ("https://www.sdzk.cn/",)),
     "海南": ("海南省考试局", ("https://ea.hainan.gov.cn/",)),
     "河北": ("河北省教育考试院", ("https://www.hebeea.edu.cn/",)),
-    "山西": ("山西省招生考试管理中心", ("https://www.sxkszx.cn/",)),
+    "山西": ("山西省招生考试管理中心", ("https://jyt.shanxi.gov.cn/",)),
     "内蒙古": ("内蒙古自治区教育考试院", ("https://www.nm.zsks.cn/",)),
     "辽宁": ("辽宁省高中等教育招生考试委员会办公室", ("https://www.lnzsks.com/",)),
     "吉林": ("吉林省教育考试院", ("https://www.jleea.com.cn/",)),
@@ -69,7 +69,7 @@ EXPECTED_AUTHORITIES_AND_ROOTS = {
     "江苏": ("江苏省教育考试院", ("https://www.jseea.cn/",)),
     "安徽": ("安徽省教育招生考试院", ("https://www.ahzsks.cn/",)),
     "福建": ("福建省教育考试院", ("https://www.eeafj.cn/",)),
-    "江西": ("江西省教育考试院", ("https://jxgk.jxeea.cn/",)),
+    "江西": ("江西省教育考试院", ("https://jyt.jiangxi.gov.cn/",)),
     "河南": ("河南省教育考试院", ("https://www.haeea.cn/",)),
     "湖北": ("湖北省教育考试院", ("https://www.hbea.edu.cn/",)),
     "湖南": ("湖南省教育考试院", ("https://jyt.hunan.gov.cn/jyt/sjyt/hnsjyksy/",)),
@@ -86,14 +86,12 @@ EXPECTED_AUTHORITIES_AND_ROOTS = {
 }
 
 EXPECTED_MODE_AUTHORITIES = {
-    "https://www.moe.gov.cn/jyb_xwfb/xw_zt/moe_357/2026/2026_zt08/mtbd/202606/t20260608_1439867.html",
-    "https://www.moe.gov.cn/jyb_xwfb/xw_zt/moe_357/2024/2024_zt12/wd/gkwd_zlhz/202406/t20240603_1133733.html",
-    "https://www.moe.gov.cn/jyb_xxgk/xxgk_jyta/jyta_xueshengsi/201911/t20191126_409732.html",
-    "https://www.moe.gov.cn/jyb_xwfb/s5147/202109/t20210916_563605.html",
     "https://hudong.moe.gov.cn/jyb_xwfb/xw_zt/moe_357/2026/2026_zt08/mtbd/202606/t20260608_1439867.html",
     "https://hudong.moe.gov.cn/jyb_xwfb/xw_zt/moe_357/2024/2024_zt12/wd/gkwd_zlhz/202406/t20240603_1133733.html",
     "https://hudong.moe.gov.cn/jyb_xxgk/xxgk_jyta/jyta_xueshengsi/201911/t20191126_409732.html",
     "https://hudong.moe.gov.cn/jyb_xwfb/s5147/202109/t20210916_563605.html",
+    "https://jy.tj.gov.cn/JYXW/GNJY/202506/t20250609_6950729.html",
+    "https://www.beijing.gov.cn/fuwu/bmfw/sy/jrts/202606/t20260609_4692338.html",
 }
 MODE_SOURCE_2019 = (
     "https://hudong.moe.gov.cn/jyb_xxgk/xxgk_jyta/jyta_xueshengsi/"
@@ -252,6 +250,8 @@ def _parse_public_https(url: str) -> tuple[str, str]:
     host = (split.hostname or "").rstrip(".").casefold()
     if not host or "." not in host:
         raise AssertionError(f"host is not public DNS-style: {url}")
+    if re.fullmatch(r"[0-9.]+", host):
+        raise AssertionError(f"ambiguous all-numeric host is forbidden: {url}")
     try:
         ipaddress.ip_address(host)
     except ValueError:
@@ -295,6 +295,29 @@ class StrictJsonParserTest(unittest.TestCase):
             _loads_strict(b'{"value":"\xff"}')
 
 
+class PublicHttpsUrlOracleTest(unittest.TestCase):
+    def test_rejects_ip_literals_and_ambiguous_numeric_host_forms(self) -> None:
+        invalid_urls = (
+            "https://127.0.0.1/",
+            "https://127.1/",
+            "https://127.0.1/",
+            "https://2130706433/",
+            "https://0177.0.0.1/",
+            "https://127.000.000.001/",
+            "https://1.2.3/",
+            "https://[::1]/",
+            "https://[2001:4860:4860::8888]/",
+        )
+        for url in invalid_urls:
+            with self.subTest(url=url), self.assertRaises(AssertionError):
+                _parse_public_https(url)
+
+    def test_accepts_dns_labels_that_merely_contain_digits(self) -> None:
+        for url in ("https://www2.example.com/", "https://exam2026.gov.cn/"):
+            with self.subTest(url=url):
+                self.assertEqual(_parse_public_https(url)[0], urlsplit(url).hostname)
+
+
 class ProvinceCatalogTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -325,6 +348,7 @@ class ProvinceCatalogTest(unittest.TestCase):
         self.assertEqual(self.catalog["schema_version"], "1.0")
         self.assertEqual(self.catalog["verified_at"], TASK_DATE.isoformat())
         self.assertEqual(set(self.catalog["mode_authority_urls"]), EXPECTED_MODE_AUTHORITIES)
+        self.assertNotIn("www.moe.gov.cn", "\n".join(self.catalog["mode_authority_urls"]))
         coverage = self.catalog["coverage_note"]
         for required_text in ("29", "西藏", "新疆", "未纳入"):
             self.assertIn(required_text, coverage)
@@ -390,6 +414,24 @@ class ProvinceCatalogTest(unittest.TestCase):
         for record in self.catalog["provinces"]:
             self.assertEqual(record["verified_at"], TASK_DATE.isoformat())
 
+    def test_jiangxi_uses_a_discovery_root_and_explains_excluded_hosts(self) -> None:
+        record = next(record for record in self.catalog["provinces"] if record["province"] == "江西")
+        self.assertEqual(record["official_roots"], ["https://jyt.jiangxi.gov.cn/"])
+        for marker in ("www.jxeea.cn", "仅HTTP", "未纳入", "jxgk", "业务系统"):
+            self.assertIn(marker, record["notes"])
+
+    def test_tianjin_starts_discovery_at_the_education_authority(self) -> None:
+        record = next(record for record in self.catalog["provinces"] if record["province"] == "天津")
+        self.assertEqual(record["official_roots"], ["https://jy.tj.gov.cn/"])
+        for marker in ("zhaokao", "HTTPS", "未证实", "市教委", "发现"):
+            self.assertIn(marker, record["notes"])
+
+    def test_shanxi_excludes_the_service_and_http_only_exam_hosts(self) -> None:
+        record = next(record for record in self.catalog["provinces"] if record["province"] == "山西")
+        self.assertEqual(record["official_roots"], ["https://jyt.shanxi.gov.cn/"])
+        for marker in ("sxkszx", "仅HTTP", "gkpt", "服务页", "省教育厅", "高考"):
+            self.assertIn(marker, record["notes"])
+
     def test_catalog_has_no_volatile_sensitive_local_or_third_party_payload(self) -> None:
         serialized = json.dumps(self.catalog, ensure_ascii=False, sort_keys=True).casefold()
         forbidden_terms = (
@@ -436,6 +478,20 @@ class ProvinceCatalogTest(unittest.TestCase):
             "官方实施",
             "江西",
             "HTTP",
+        ):
+            self.assertIn(required_text, readme)
+
+    def test_readme_explains_safe_discovery_fallbacks(self) -> None:
+        readme = README_PATH.read_text(encoding="utf-8")
+        for required_text in (
+            "www.zhaokao.net",
+            "www.sxkszx.cn",
+            "www.jxeea.cn",
+            "gkpt",
+            "jxgk",
+            "发现根",
+            "仅提供 HTTP",
+            "machine catalog 不包含",
         ):
             self.assertIn(required_text, readme)
 

@@ -18,7 +18,7 @@
 - [首批及第三批模式说明](https://www.moe.gov.cn/jyb_xxgk/xxgk_jyta/jyta_xueshengsi/201911/t20191126_409732.html)
 - [第四批七省改革说明](https://www.moe.gov.cn/jyb_xwfb/s5147/202109/t20210916_563605.html)
 
-上述四个 `www.moe.gov.cn` 链接是任务固定的权威引用。2026-08-24 实测时，它们的 HTTPS 入口都会以 302 重定向到同路径的未加密 HTTP 页面，因此只能作为 authority citation；自动工具不得跟随 HTTPS 到 HTTP 的降级重定向。教育部 `hudong.moe.gov.cn` 官方主机提供四个同路径、内容相同且最终仍保持 HTTPS 的页面，目录同时列出这些安全镜像，并按改革批次将它们用作各记录的 `mode_source_url`。
+上述四个 `www.moe.gov.cn` 链接是任务固定的权威引用。2026-08-24 实测时，它们的 HTTPS 入口都会以 302 重定向到同路径的未加密 HTTP 页面，因此只在 README 和人工核验报告中说明；machine catalog 不包含这些降级链接，自动工具不得跟随 HTTPS 到 HTTP 的降级重定向。教育部 `hudong.moe.gov.cn` 官方主机提供四个同路径、内容相同且最终仍保持 HTTPS 的页面，目录列出这些安全镜像，并按改革批次将它们用作各记录的 `mode_source_url`。
 
 另以最终仍保持 HTTPS 的[天津市教育委员会 2025 年覆盖说明](https://jy.tj.gov.cn/JYXW/GNJY/202506/t20250609_6950729.html)交叉确认 29 省以及西藏、新疆未进入新模式，并以最终仍保持 HTTPS 的[北京市人民政府 2026 年模式说明](https://www.beijing.gov.cn/fuwu/bmfw/sy/jrts/202606/t20260609_4692338.html)交叉确认六省市采用 `3+3`、其余二十三省区市采用 `3+1+2`。
 
@@ -28,7 +28,11 @@
 
 维护者应至少进行年度复核，并在发生机构更名、重定向、域名变更或模式变更时即时复核。处理重定向时应实际打开最终页面，确认最终主机仍由同一官方机构控制；确认后更新 canonical root、独立测试 oracle 和核验日期。模式变更必须以正式政策或实施文件为依据，不能由页面布局或报名系统字段推断。
 
-江西是当前需要特别复核的例外。2026 年官方公文仍指向 `www.jxeea.cn` 主门户，但在核验日该主门户仅提供未加密 HTTP 服务，因此没有进入 machine catalog 的安全根目录；目录记录的是同一 `jxeea.cn` 官方域下已实测可用的 HTTPS 服务子站 `https://jxgk.jxeea.cn/`。维护者应年度复查主门户是否恢复 HTTPS，并核对官方公文是否宣布域名调整。
+天津、山西、江西采用教育主管机关的 HTTPS 发现根，而不是考试服务主机：
+
+- 天津官方正文可从市教委根发现高考及招考资讯；`www.zhaokao.net` 在核验日仅提供 HTTP，HTTPS 未证实，所以自动发现从 `https://jy.tj.gov.cn/` 开始。
+- 山西省教育厅根直接提供高考综合改革正文；`www.sxkszx.cn` 在核验日仅提供 HTTP，`gkpt` 又是报名查询服务页，均不作为发现根，改从 `https://jyt.shanxi.gov.cn/` 开始。
+- 江西省、市教育机关公文共同确认考试院及 `www.jxeea.cn` 归属；该 canonical 主机在核验日仅提供 HTTP，`jxgk` 只是业务系统，两者均不作为发现根，改从 `https://jyt.jiangxi.gov.cn/` 开始。维护者应年度复查三个考试机构主站是否启用 HTTPS，并核对正式域名变更。
 
 ## 为什么不收录动态数据
 
