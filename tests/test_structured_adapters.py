@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator, Mapping
 from dataclasses import FrozenInstanceError, replace
+from enum import Enum
 import http.client
 import json
 import math
@@ -12,12 +13,14 @@ import stat
 import subprocess
 import sys
 import tempfile
+import traceback
 import unittest
 import urllib.request
 from unittest import mock
 import xml.etree.ElementTree as ET
 import zipfile
 
+import scripts.adapters.spreadsheet as spreadsheet_adapter
 from scripts.adapters import (
     CellStatus,
     ColumnMapping,
@@ -28,7 +31,7 @@ from scripts.adapters import (
     StructuredFileError,
     StructuredValidationError,
 )
-from scripts.adapters.html_table import extract_html_table
+from scripts.adapters.html_table import HtmlStructureError, extract_html_table
 from scripts.adapters.spreadsheet import (
     SpreadsheetDependencyError,
     extract_spreadsheet,
@@ -57,24 +60,21 @@ class _RepeatedCanonicalMapping(Mapping[str, object]):
 
 class ContractTest(unittest.TestCase):
     def test_coverage_normalizes_mathematical_integers_and_rejects_invalid_bounds(self):
-        coverage = ExtractedCoverage(
-            min_score=630.0,
-            max_score=650,
-            min_rank=100.0,
-            max_rank=300,
-        )
+        coverage = ExtractedCoverage(630.0, 650, 100.0, 300)
         self.assertEqual(
             coverage.to_dict(),
-            {"min_score": 630, "max_score": 650, "min_rank": 100, "max_rank": 300},
+            {"lower_score": 630, "upper_score": 650, "lower_rank": 100, "upper_rank": 300},
         )
         for value in (True, 1.5, math.nan, math.inf):
             with self.subTest(value=value):
                 with self.assertRaises((TypeError, ValueError)):
-                    ExtractedCoverage(min_score=value)
+                    ExtractedCoverage(lower_score=value)
         with self.assertRaises(ValueError):
-            ExtractedCoverage(min_score=651, max_score=650)
+            ExtractedCoverage(lower_score=651, upper_score=650)
         with self.assertRaises(ValueError):
-            ExtractedCoverage(min_rank=301, max_rank=300)
+            ExtractedCoverage(lower_rank=301, upper_rank=300)
+        with self.assertRaises(TypeError):
+            ExtractedCoverage(min_score=630)
 
     def test_rows_are_deep_snapshots_and_json_safe(self):
         raw_values = {"score": 650, "meta": {"tags": ["synthetic"]}}
@@ -131,7 +131,7 @@ class ContractTest(unittest.TestCase):
             caption="合成表",
             sheet=None,
             rows=rows,
-            coverage=ExtractedCoverage(min_score=650, max_score=650),
+            coverage=ExtractedCoverage(lower_score=650, upper_score=650),
             warnings=["synthetic"],
             extraction_method="html-table",
         )
@@ -173,6 +173,32 @@ class ContractTest(unittest.TestCase):
         with self.assertRaises((TypeError, ValueError)):
             ColumnMapping({"score": "分数"}, score_scale={"lower": 0, "upper": 750})
 
+    def test_enum_values_are_recursively_frozen_and_must_resolve_to_json_safe_data(self):
+        class MutablePayload(Enum):
+            SYNTHETIC = ["original", {"score": 650}]
+
+        class UnsafePayload(Enum):
+            OBJECT = object()
+
+        row = ExtractedRow(
+            values={"payload": MutablePayload.SYNTHETIC},
+            cell_status={"payload": CellStatus.EXACT},
+            location="table[1]/tbody/tr[1]",
+            confidence=1,
+        )
+        MutablePayload.SYNTHETIC.value.append("mutated")
+        self.assertEqual(row.values["payload"], ("original", {"score": 650}))
+        serialized = row.to_dict()
+        self.assertEqual(serialized["values"]["payload"], ["original", {"score": 650}])
+        json.dumps(serialized, allow_nan=False, ensure_ascii=False)
+        with self.assertRaises(TypeError):
+            ExtractedRow(
+                values={"payload": UnsafePayload.OBJECT},
+                cell_status={"payload": CellStatus.EXACT},
+                location="table[1]/tbody/tr[1]",
+                confidence=1,
+            )
+
 
 class HtmlAdapterTest(unittest.TestCase):
     @staticmethod
@@ -208,7 +234,7 @@ class HtmlAdapterTest(unittest.TestCase):
         self.assertEqual(table.rows[0].cell_status["score"], CellStatus.EXACT)
         self.assertEqual(
             table.coverage,
-            ExtractedCoverage(min_score=630, max_score=650, min_rank=100, max_rank=300),
+            ExtractedCoverage(lower_score=630, upper_score=650, lower_rank=100, upper_rank=300),
         )
         self.assertEqual(len(table.rows), 3, "script payload must not become a table or row")
 
@@ -351,6 +377,125 @@ class HtmlAdapterTest(unittest.TestCase):
             self.assertEqual(table.rows[0].cell_status["score"], CellStatus.MASKED)
             self.assertEqual(table.coverage, ExtractedCoverage())
 
+    def test_rowspan_or_colspan_never_falls_through_to_physical_column_indexes(self):
+        cases = {
+            "header-colspan.html": (
+                "<table><caption>x</caption><tr><th colspan='2'>分数</th><th>位次</th></tr>"
+                "<tr><td>650</td><td>100</td><td>注</td></tr></table>"
+            ),
+            "data-rowspan.html": (
+                "<table><caption>x</caption><tr><th>分数</th><th>位次</th></tr>"
+                "<tr><td rowspan='2'>650</td><td>100</td></tr>"
+                "<tr><td>200</td></tr></table>"
+            ),
+        }
+        mapping = ColumnMapping(
+            {"score": "分数", "rank": "位次"},
+            roles={"score": "score", "rank": "rank"},
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            for name, source in cases.items():
+                with self.subTest(name=name):
+                    path = self._write_html(directory, source, name)
+                    with self.assertRaises(HtmlStructureError):
+                        extract_html_table(path, table_index=1, expected_caption="x", mapping=mapping)
+
+    def test_selected_table_strict_grammar_rejects_review_malformed_pocs(self):
+        cases = {
+            "stray-close.html": (
+                "<table><caption>x</caption><tr><th>名称</th></td></tr>"
+                "<tr><td>合成</td></tr></table>",
+                "x",
+            ),
+            "duplicate-caption.html": (
+                "<table><caption>x</caption><caption>y</caption>"
+                "<tr><th>名称</th></tr><tr><td>合成</td></tr></table>",
+                "xy",
+            ),
+            "unclosed-caption.html": (
+                "<table><caption>x<tr><th>名称</th></tr><tr><td>合成</td></tr></table>",
+                "x",
+            ),
+            "unclosed-table.html": (
+                "<table><caption>x</caption><tr><th>名称</th></tr><tr><td>合成</td></tr>",
+                "x",
+            ),
+            "thead-inside-tr.html": (
+                "<table><caption>x</caption><tr><thead><th>名称</th></thead></tr>"
+                "<tr><td>合成</td></tr></table>",
+                "x",
+            ),
+            "tr-inside-caption.html": (
+                "<table><caption>x<tr><th>名称</th></tr></caption>"
+                "<tr><td>合成</td></tr></table>",
+                "x",
+            ),
+            "tbody-inside-tr.html": (
+                "<table><caption>x</caption><tr><tbody><th>名称</th></tbody></tr>"
+                "<tr><td>合成</td></tr></table>",
+                "x",
+            ),
+            "td-outside-tr.html": (
+                "<table><caption>x</caption><tbody><td>游离</td>"
+                "<tr><th>名称</th></tr><tr><td>合成</td></tr></tbody></table>",
+                "x",
+            ),
+            "th-outside-tr.html": (
+                "<table><caption>x</caption><thead><th>游离</th>"
+                "<tr><th>名称</th></tr></thead><tbody><tr><td>合成</td></tr></tbody></table>",
+                "x",
+            ),
+            "wrapped-tr.html": (
+                "<table><caption>x</caption><div><tr><th>名称</th></tr></div>"
+                "<tr><td>合成</td></tr></table>",
+                "x",
+            ),
+            "wrapped-cell.html": (
+                "<table><caption>x</caption><tr><div><th>名称</th></div></tr>"
+                "<tr><td>合成</td></tr></table>",
+                "x",
+            ),
+            "mismatched-inline-close.html": (
+                "<table><caption>x</caption><tr><th>名称</th></tr>"
+                "<tr><td><span>合成</em></span></td></tr></table>",
+                "x",
+            ),
+            "unclosed-inline.html": (
+                "<table><caption>x</caption><tr><th>名称</th></tr>"
+                "<tr><td><span>合成</td></tr></table>",
+                "x",
+            ),
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            for name, (source, caption) in cases.items():
+                with self.subTest(name=name):
+                    path = self._write_html(directory, source, name)
+                    with self.assertRaises(HtmlStructureError):
+                        extract_html_table(path, table_index=1, expected_caption=caption, mapping={"name": "名称"})
+
+    def test_selected_table_strict_grammar_keeps_legal_controls_exact(self):
+        cases = {
+            "direct.html": (
+                "<table><caption><span>x</span></caption><tr><th>名称</th></tr>"
+                "<tr><td><span>合成甲</span></td></tr></table>"
+            ),
+            "sectioned.html": (
+                "<table><caption>x</caption><thead><tr><th>名称</th></tr></thead>"
+                "<tbody><tr><td>合成甲</td></tr></tbody></table>"
+            ),
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            for name, source in cases.items():
+                with self.subTest(name=name):
+                    path = self._write_html(directory, source, name)
+                    table = extract_html_table(path, table_index=1, expected_caption="x", mapping={"name": "名称"})
+                    self.assertEqual(table.rows[0].values["name"], "合成甲")
+                    self.assertEqual(table.rows[0].cell_status["name"], CellStatus.EXACT)
+                    self.assertEqual(table.rows[0].confidence, 1.0)
+
 
 class FileBoundaryTest(unittest.TestCase):
     def test_html_requires_absolute_exact_suffix_regular_bounded_non_url_file(self):
@@ -418,6 +563,90 @@ class FileBoundaryTest(unittest.TestCase):
                     mapping=HtmlAdapterTest.mapping(),
                 )
 
+    def test_nonlocal_windows_namespaces_are_rejected_before_any_filesystem_lookup(self):
+        paths = (
+            r"\\server\share\table.html",
+            "//server/share/table.html",
+            r"\\?\C:\table.html",
+            r"\\.\C:\table.html",
+            r"\\?\UNC\server\share\table.html",
+            r"C:relative\table.html",
+        )
+        blocked = AssertionError("filesystem lookup reached")
+        with mock.patch.object(Path, "resolve", side_effect=blocked), mock.patch.object(
+            Path, "stat", side_effect=blocked
+        ), mock.patch.object(Path, "lstat", side_effect=blocked), mock.patch.object(
+            Path, "open", side_effect=blocked
+        ):
+            for value in paths:
+                with self.subTest(value=value):
+                    with self.assertRaises(StructuredFileError):
+                        extract_html_table(
+                            value,
+                            table_index=1,
+                            expected_caption="x",
+                            mapping={"x": "x"},
+                        )
+
+    def test_controlled_file_errors_strip_oserror_causes_filenames_and_input_paths(self):
+        secret = str((Path.cwd() / "private-source-name.html").absolute())
+        operating_system_error = OSError(5, "denied", secret)
+        with mock.patch.object(Path, "resolve", side_effect=operating_system_error):
+            with self.assertRaises(StructuredFileError) as raised:
+                extract_html_table(
+                    secret,
+                    table_index=1,
+                    expected_caption="x",
+                    mapping={"x": "x"},
+                )
+        error = raised.exception
+        self.assertIsNone(error.__cause__)
+        self.assertTrue(error.__suppress_context__)
+        self.assertIsNone(getattr(error, "filename", None))
+        self.assertNotIn(secret, "".join(traceback.format_exception(error)))
+
+    def test_controlled_file_read_errors_also_strip_causes_and_input_paths(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            source = (Path(temporary) / "private-read-name.html").resolve()
+            source.write_text("synthetic", encoding="utf-8")
+            operating_system_error = OSError(5, "denied", str(source))
+            with mock.patch.object(Path, "open", side_effect=operating_system_error):
+                with self.assertRaises(StructuredFileError) as raised:
+                    extract_html_table(
+                        source,
+                        table_index=1,
+                        expected_caption="x",
+                        mapping={"x": "x"},
+                    )
+            error = raised.exception
+            self.assertIsNone(error.__cause__)
+            self.assertTrue(error.__suppress_context__)
+            self.assertIsNone(getattr(error, "filename", None))
+            self.assertNotIn(str(source), "".join(traceback.format_exception(error)))
+
+    def test_pathlike_conversion_errors_are_controlled_before_a_path_object_exists(self):
+        secret = "private-pathlike-name.html"
+
+        class FailingPathLike(os.PathLike):
+            def __fspath__(self):
+                raise OSError(5, "denied", secret)
+
+        try:
+            extract_html_table(
+                FailingPathLike(),
+                table_index=1,
+                expected_caption="x",
+                mapping={"x": "x"},
+            )
+        except Exception as error:
+            self.assertIsInstance(error, StructuredFileError)
+            caught = error
+        else:
+            self.fail("failing path-like conversion did not fail closed")
+        self.assertIsNone(caught.__cause__)
+        self.assertTrue(caught.__suppress_context__)
+        self.assertNotIn(secret, "".join(traceback.format_exception(caught)))
+
 
 class SpreadsheetAdapterTest(unittest.TestCase):
     @staticmethod
@@ -467,7 +696,7 @@ class SpreadsheetAdapterTest(unittest.TestCase):
         self.assertIn("empty-required-cell:plan_count", table.rows[2].warnings)
         self.assertEqual(
             table.coverage,
-            ExtractedCoverage(min_score=620, max_score=620, min_rank=1200, max_rank=1200),
+            ExtractedCoverage(lower_score=620, upper_score=620, lower_rank=1200, upper_rank=1200),
         )
         self.assertIn("coverage-excludes-nonexact-rows", table.warnings)
 
@@ -505,6 +734,11 @@ class SpreadsheetAdapterTest(unittest.TestCase):
             hidden_header = self._mutated_fixture(directory, "hidden-header.xlsx", hide_header)
             hidden_header_table = extract_spreadsheet(hidden_header, sheet="物理类", mapping=self.mapping())
             self.assertIn("hidden-header-row", hidden_header_table.warnings)
+            self.assertTrue(
+                all(status is CellStatus.UNCERTAIN for status in hidden_header_table.rows[0].cell_status.values())
+            )
+            self.assertEqual(hidden_header_table.coverage, ExtractedCoverage())
+            self.assertIn("coverage-score-unavailable", hidden_header_table.warnings)
 
             def hide_data(root, namespace):
                 root.find(f".//{{{namespace}}}row[@r='2']").set("hidden", "1")
@@ -514,6 +748,40 @@ class SpreadsheetAdapterTest(unittest.TestCase):
             self.assertEqual(hidden_table.rows[0].cell_status["min_score"], CellStatus.UNCERTAIN)
             self.assertIn("hidden-row", hidden_table.rows[0].warnings)
             self.assertEqual(hidden_table.coverage, ExtractedCoverage())
+
+            def hide_mapped_column(root, namespace):
+                columns = root.find(f"{{{namespace}}}cols")
+                ET.SubElement(
+                    columns,
+                    f"{{{namespace}}}col",
+                    {"min": "3", "max": "3", "hidden": "1"},
+                )
+
+            hidden_column = self._mutated_fixture(directory, "hidden-column.xlsx", hide_mapped_column)
+            hidden_column_table = extract_spreadsheet(hidden_column, sheet="物理类", mapping=self.mapping())
+            self.assertTrue(
+                all(status is CellStatus.UNCERTAIN for status in hidden_column_table.rows[0].cell_status.values())
+            )
+            self.assertEqual(hidden_column_table.coverage, ExtractedCoverage())
+            self.assertIn("coverage-score-unavailable", hidden_column_table.warnings)
+
+            def truncate_exact_row(root, namespace):
+                row2 = root.find(f".//{{{namespace}}}row[@r='2']")
+                row2.remove(row2.find(f"{{{namespace}}}c[@r='F2']"))
+
+            truncated = self._mutated_fixture(directory, "truncated-exact-row.xlsx", truncate_exact_row)
+            truncated_table = extract_spreadsheet(truncated, sheet="物理类", mapping=self.mapping())
+            self.assertIn("truncated-row", truncated_table.rows[0].warnings)
+            self.assertEqual(truncated_table.rows[0].cell_status["note"], CellStatus.EMPTY)
+            self.assertTrue(
+                all(
+                    status is CellStatus.UNCERTAIN
+                    for field, status in truncated_table.rows[0].cell_status.items()
+                    if field != "note"
+                )
+            )
+            self.assertEqual(truncated_table.coverage, ExtractedCoverage())
+            self.assertIn("coverage-score-unavailable", truncated_table.warnings)
 
             def truncate_and_add_formula(root, namespace):
                 sheet_data = root.find(f"{{{namespace}}}sheetData")
@@ -530,6 +798,64 @@ class SpreadsheetAdapterTest(unittest.TestCase):
             self.assertEqual(altered_table.rows[3].location, "物理类!A5:F5")
             self.assertEqual(altered_table.rows[3].cell_status["min_score"], CellStatus.FORMULA)
             self.assertIn("formula-cell:min_score", altered_table.rows[3].warnings)
+
+    def test_large_merge_and_hidden_ranges_use_bounded_interval_membership(self):
+        real_range = range
+
+        def reject_large_expansion(*arguments):
+            result = real_range(*arguments)
+            if len(result) > 20_000:
+                raise AssertionError("worksheet range was expanded cell-by-cell")
+            return result
+
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.object(
+            spreadsheet_adapter, "range", reject_large_expansion, create=True
+        ):
+            directory = Path(temporary)
+            for name, reference, inside in (
+                ("tall-merge.xlsx", "A1:A100000", (100_000, 1)),
+                ("full-sheet-merge.xlsx", "A1:XFD1048576", (1_048_576, 16_384)),
+            ):
+                def large_ranges(root, namespace, reference=reference):
+                    merges = root.find(f"{{{namespace}}}mergeCells")
+                    merges.clear()
+                    ET.SubElement(merges, f"{{{namespace}}}mergeCell", {"ref": reference})
+                    columns = root.find(f"{{{namespace}}}cols")
+                    ET.SubElement(
+                        columns,
+                        f"{{{namespace}}}col",
+                        {"min": "1", "max": "16384", "hidden": "1"},
+                    )
+
+                with self.subTest(name=name):
+                    path = self._mutated_fixture(directory, name, large_ranges)
+                    structure = spreadsheet_adapter._worksheet_structure(path.read_bytes(), "物理类")
+                    self.assertEqual(len(structure.merged_ranges), 1)
+                    self.assertEqual(len(structure.hidden_column_ranges), 1)
+                    self.assertTrue(structure.is_merged(*inside))
+                    self.assertTrue(structure.is_hidden_column(16_384))
+                    self.assertFalse(structure.is_hidden_column(16_385))
+
+    def test_xlsx_ranges_reject_reverse_bounds_out_of_excel_grid_and_excessive_count(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            references = {
+                "reverse.xlsx": ["B2:A1"],
+                "column-overflow.xlsx": ["XFE1:XFE2"],
+                "row-overflow.xlsx": ["A1048577:A1048578"],
+                "too-many.xlsx": [f"A{index}:A{index}" for index in range(1, 4098)],
+            }
+            for name, ranges in references.items():
+                def invalid_ranges(root, namespace, ranges=ranges):
+                    merges = root.find(f"{{{namespace}}}mergeCells")
+                    merges.clear()
+                    for reference in ranges:
+                        ET.SubElement(merges, f"{{{namespace}}}mergeCell", {"ref": reference})
+
+                with self.subTest(name=name):
+                    path = self._mutated_fixture(directory, name, invalid_ranges)
+                    with self.assertRaises(StructuredValidationError):
+                        spreadsheet_adapter._worksheet_structure(path.read_bytes(), "物理类")
 
     def test_xlsx_numeric_bool_nonintegral_rank_scale_and_monotonicity_fail_closed(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -565,6 +891,19 @@ class SpreadsheetAdapterTest(unittest.TestCase):
             path = self._mutated_fixture(directory, "nonmonotonic.xlsx", nonmonotonic)
             with self.assertRaises(StructuredValidationError):
                 extract_spreadsheet(path, sheet="物理类", mapping=self.mapping())
+
+    def test_formula_merged_anchor_keeps_formula_precedence_and_both_warnings(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            def merge_formula_anchor(root, namespace):
+                merges = root.find(f"{{{namespace}}}mergeCells")
+                ET.SubElement(merges, f"{{{namespace}}}mergeCell", {"ref": "C3:D3"})
+
+            path = self._mutated_fixture(Path(temporary), "formula-merged.xlsx", merge_formula_anchor)
+            table = extract_spreadsheet(path, sheet="物理类", mapping=self.mapping())
+            formula_row = table.rows[1]
+            self.assertEqual(formula_row.cell_status["min_score"], CellStatus.FORMULA)
+            self.assertIn("formula-cell:min_score", formula_row.warnings)
+            self.assertIn("merged-cell:min_score", formula_row.warnings)
 
     def test_fixture_binary_independently_contains_expected_structure_formula_merge_and_style(self):
         with zipfile.ZipFile(XLSX_FIXTURE) as archive:

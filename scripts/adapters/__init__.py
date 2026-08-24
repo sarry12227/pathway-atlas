@@ -13,6 +13,7 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import stat
 from types import MappingProxyType
 from typing import Any
@@ -64,13 +65,13 @@ def _mathematical_integer(value: object, name: str) -> int | None:
 
 
 def _freeze_json(value: Any) -> Any:
+    if isinstance(value, Enum):
+        return _freeze_json(value.value)
     if value is None or isinstance(value, (str, int, bool)):
         return value
     if isinstance(value, float):
         if not math.isfinite(value):
             raise ValueError("contract values must be finite")
-        return value
-    if isinstance(value, Enum):
         return value
     if isinstance(value, Mapping):
         snapshot: dict[str, Any] = {}
@@ -121,17 +122,17 @@ class _Serializable:
 
 @dataclass(frozen=True)
 class ExtractedCoverage(_Serializable):
-    min_score: int | None = None
-    max_score: int | None = None
-    min_rank: int | None = None
-    max_rank: int | None = None
+    lower_score: int | None = None
+    upper_score: int | None = None
+    lower_rank: int | None = None
+    upper_rank: int | None = None
 
     def __post_init__(self) -> None:
-        for name in ("min_score", "max_score", "min_rank", "max_rank"):
+        for name in ("lower_score", "upper_score", "lower_rank", "upper_rank"):
             object.__setattr__(self, name, _mathematical_integer(getattr(self, name), name))
-        if self.min_score is not None and self.max_score is not None and self.min_score > self.max_score:
+        if self.lower_score is not None and self.upper_score is not None and self.lower_score > self.upper_score:
             raise ValueError("score coverage bounds are out of order")
-        if self.min_rank is not None and self.max_rank is not None and self.min_rank > self.max_rank:
+        if self.lower_rank is not None and self.upper_rank is not None and self.lower_rank > self.upper_rank:
             raise ValueError("rank coverage bounds are out of order")
 
 
@@ -384,10 +385,10 @@ def derive_coverage(
             warnings.append(f"coverage-{role}-unavailable")
     return (
         ExtractedCoverage(
-            min_score=min(role_values["score"]) if role_values["score"] else None,
-            max_score=max(role_values["score"]) if role_values["score"] else None,
-            min_rank=min(role_values["rank"]) if role_values["rank"] else None,
-            max_rank=max(role_values["rank"]) if role_values["rank"] else None,
+            lower_score=min(role_values["score"]) if role_values["score"] else None,
+            upper_score=max(role_values["score"]) if role_values["score"] else None,
+            lower_rank=min(role_values["rank"]) if role_values["rank"] else None,
+            upper_rank=max(role_values["rank"]) if role_values["rank"] else None,
         ),
         warnings,
     )
@@ -402,9 +403,18 @@ def read_stable_local_file(
 
     if not isinstance(path, (str, os.PathLike)):
         raise StructuredFileError("input must be an absolute local file")
-    raw = os.fspath(path)
+    try:
+        raw = os.fspath(path)
+    except Exception:
+        raise StructuredFileError("input path could not be interpreted safely") from None
     if not isinstance(raw, str) or "://" in raw or raw.casefold().startswith("file:"):
         raise StructuredFileError("input must be an absolute local file")
+    if (
+        raw.startswith(("\\\\", "//"))
+        or re.match(r"^[A-Za-z]:(?![\\/])", raw)
+        or re.match(r"^[\\/](?:\?\?|globalroot)[\\/]", raw, flags=re.IGNORECASE)
+    ):
+        raise StructuredFileError("input must use a local filesystem namespace")
     candidate = Path(raw)
     if not candidate.is_absolute() or ".." in candidate.parts:
         raise StructuredFileError("input must be an absolute traversal-free local file")
@@ -413,8 +423,8 @@ def read_stable_local_file(
     try:
         resolved = candidate.resolve(strict=True)
         before = candidate.lstat()
-    except OSError as error:
-        raise StructuredFileError("input file is unavailable") from error
+    except OSError:
+        raise StructuredFileError("input file is unavailable") from None
     if resolved != candidate:
         raise StructuredFileError("input path must not traverse links or reparse points")
     if candidate.is_symlink() or getattr(before, "st_file_attributes", 0) & _FILE_ATTRIBUTE_REPARSE_POINT:
@@ -444,8 +454,8 @@ def read_stable_local_file(
         after = candidate.lstat()
     except StructuredFileError:
         raise
-    except OSError as error:
-        raise StructuredFileError("input could not be read safely") from error
+    except OSError:
+        raise StructuredFileError("input could not be read safely") from None
     if _file_identity(after) != identity:
         raise StructuredFileError("input identity changed during read")
     return b"".join(chunks)

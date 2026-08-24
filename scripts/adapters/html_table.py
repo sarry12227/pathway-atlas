@@ -27,6 +27,25 @@ from . import (
 
 
 _MASKED = re.compile(r"^(?:[-—–*…]+|前\s*\d+(?:\.\d+)?|\d+(?:\.\d+)?\s*(?:以上|及以上|以下|及以下|\+))$")
+_VOID_TAGS = {
+    "area",
+    "base",
+    "br",
+    "col",
+    "embed",
+    "hr",
+    "img",
+    "input",
+    "link",
+    "meta",
+    "source",
+    "track",
+    "wbr",
+}
+
+
+class HtmlStructureError(StructuredValidationError):
+    """Raised when a selected HTML table cannot preserve cell positions."""
 
 
 @dataclass
@@ -54,6 +73,7 @@ class _Table:
     rows: list[_Row] = field(default_factory=list)
     closed: bool = False
     malformed: bool = False
+    caption_seen: bool = False
 
     @property
     def caption(self) -> str | None:
@@ -71,6 +91,8 @@ class _TableParser(HTMLParser):
         self._section: str | None = None
         self._caption = False
         self._ignored_depth = 0
+        self._nested_table_depth = 0
+        self._inline_stack: list[str] = []
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         tag = tag.casefold()
@@ -82,24 +104,49 @@ class _TableParser(HTMLParser):
         if tag == "table":
             if self._table is not None:
                 self._table.malformed = True
+                self._nested_table_depth += 1
                 return
             self._table = _Table(index=len(self.tables) + 1)
+            return
+        if self._nested_table_depth:
+            return
         elif self._table is None:
             return
         elif tag == "caption":
+            if (
+                self._caption
+                or self._section is not None
+                or self._row is not None
+                or self._cell is not None
+                or self._table.caption_seen
+                or self._table.rows
+            ):
+                self._table.malformed = True
+                return
             self._caption = True
+            self._table.caption_seen = True
         elif tag in {"thead", "tbody", "tfoot"}:
+            if self._caption or self._section is not None or self._row is not None or self._cell is not None:
+                self._table.malformed = True
+                return
             self._section = tag
         elif tag == "tr":
-            if self._row is not None:
+            if self._caption or self._row is not None or self._cell is not None:
                 self._table.malformed = True
+                return
             self._row = _Row(section=self._section or "tbody")
-        elif tag in {"th", "td"} and self._row is not None:
-            if self._cell is not None:
+        elif tag in {"th", "td"}:
+            if self._caption or self._row is None or self._cell is not None:
                 self._table.malformed = True
+                return
             attributes = {name.casefold(): value for name, value in attrs}
             merged = attributes.get("rowspan") not in {None, "1"} or attributes.get("colspan") not in {None, "1"}
             self._cell = _Cell(kind=tag, merged=merged)
+        elif self._caption or self._cell is not None:
+            if tag not in _VOID_TAGS:
+                self._inline_stack.append(tag)
+        else:
+            self._table.malformed = True
 
     def handle_endtag(self, tag: str) -> None:
         tag = tag.casefold()
@@ -108,23 +155,50 @@ class _TableParser(HTMLParser):
             return
         if self._ignored_depth:
             return
+        if tag == "table" and self._nested_table_depth:
+            self._nested_table_depth -= 1
+            return
+        if self._nested_table_depth:
+            return
         if self._table is None:
             return
-        if tag in {"th", "td"} and self._cell is not None and self._row is not None:
+        if tag in {"th", "td"}:
+            if self._cell is None or self._cell.kind != tag or self._row is None or self._inline_stack:
+                self._table.malformed = True
+                return
             self._row.cells.append(self._cell)
             self._cell = None
-        elif tag == "tr" and self._row is not None:
-            if self._cell is not None:
+        elif tag == "tr":
+            if self._row is None or self._cell is not None or self._caption:
                 self._table.malformed = True
+                return
             self._row.closed = True
             self._table.rows.append(self._row)
             self._row = None
         elif tag in {"thead", "tbody", "tfoot"}:
+            if self._section != tag or self._row is not None or self._cell is not None or self._caption:
+                self._table.malformed = True
+                return
             self._section = None
         elif tag == "caption":
+            if (
+                not self._caption
+                or self._section is not None
+                or self._row is not None
+                or self._cell is not None
+                or self._inline_stack
+            ):
+                self._table.malformed = True
+                return
             self._caption = False
         elif tag == "table":
-            if self._row is not None or self._cell is not None:
+            if (
+                self._caption
+                or self._section is not None
+                or self._row is not None
+                or self._cell is not None
+                or self._inline_stack
+            ):
                 self._table.malformed = True
             self._table.closed = True
             self.tables.append(self._table)
@@ -133,6 +207,12 @@ class _TableParser(HTMLParser):
             self._cell = None
             self._section = None
             self._caption = False
+            self._inline_stack.clear()
+        else:
+            if self._inline_stack and self._inline_stack[-1] == tag:
+                self._inline_stack.pop()
+            elif tag not in _VOID_TAGS or not (self._caption or self._cell is not None):
+                self._table.malformed = True
 
     def handle_data(self, data: str) -> None:
         if self._ignored_depth or self._table is None:
@@ -144,8 +224,16 @@ class _TableParser(HTMLParser):
 
     def finish(self) -> None:
         self.close()
-        if self._table is not None or self._row is not None or self._cell is not None:
-            raise StructuredValidationError("selected HTML structure is truncated")
+        if (
+            self._table is not None
+            or self._row is not None
+            or self._cell is not None
+            or self._caption
+            or self._section is not None
+            or self._nested_table_depth
+            or self._inline_stack
+        ):
+            raise HtmlStructureError("selected HTML structure is truncated")
 
 
 def extract_html_table(
@@ -179,7 +267,9 @@ def extract_html_table(
         raise StructuredValidationError("selected table does not exist")
     selected = parser.tables[table_index - 1]
     if not selected.closed or selected.malformed:
-        raise StructuredValidationError("selected HTML table is malformed")
+        raise HtmlStructureError("selected HTML table is malformed")
+    if any(cell.merged for row in selected.rows for cell in row.cells):
+        raise HtmlStructureError("selected HTML table contains spanning cells")
     if selected.caption != expected_caption:
         raise StructuredValidationError("selected table caption does not match")
 
@@ -303,4 +393,4 @@ def _normalize_untyped(text: str) -> str:
     return text
 
 
-__all__ = ["extract_html_table"]
+__all__ = ["HtmlStructureError", "extract_html_table"]

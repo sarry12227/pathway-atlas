@@ -155,19 +155,48 @@ def _load_openpyxl():
 
 
 @dataclass(frozen=True)
+class _CellRange:
+    start_row: int
+    end_row: int
+    start_column: int
+    end_column: int
+
+    def contains(self, row: int, column: int) -> bool:
+        return self.start_row <= row <= self.end_row and self.start_column <= column <= self.end_column
+
+
+@dataclass(frozen=True)
+class _ColumnRange:
+    start: int
+    end: int
+
+    def contains(self, column: int) -> bool:
+        return self.start <= column <= self.end
+
+
+@dataclass(frozen=True)
 class _WorksheetStructure:
-    merged_cells: frozenset[tuple[int, int]]
+    merged_ranges: tuple[_CellRange, ...]
     hidden_rows: frozenset[int]
-    hidden_columns: frozenset[int]
+    hidden_column_ranges: tuple[_ColumnRange, ...]
     row_cells: dict[int, frozenset[int]]
     sheet_hidden: bool
     header_hidden: bool
+
+    def is_merged(self, row: int, column: int) -> bool:
+        return any(item.contains(row, column) for item in self.merged_ranges)
+
+    def is_hidden_column(self, column: int) -> bool:
+        return any(item.contains(column) for item in self.hidden_column_ranges)
 
 
 _MAIN_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 _REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 _PACKAGE_REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
 _CELL_REFERENCE = re.compile(r"^([A-Z]+)([1-9][0-9]*)$")
+_MAX_EXCEL_ROWS = 1_048_576
+_MAX_EXCEL_COLUMNS = 16_384
+_MAX_STRUCTURE_RANGES = 4_096
 
 
 def _worksheet_structure(source: bytes, sheet: str) -> _WorksheetStructure:
@@ -203,8 +232,11 @@ def _worksheet_structure(source: bytes, sheet: str) -> _WorksheetStructure:
     except (KeyError, OSError, ET.ParseError, zipfile.BadZipFile) as error:
         raise StructuredValidationError("XLSX package structure is invalid") from error
 
-    merged: set[tuple[int, int]] = set()
-    for item in worksheet.findall(f"{{{_MAIN_NS}}}mergeCells/{{{_MAIN_NS}}}mergeCell"):
+    merge_items = worksheet.findall(f"{{{_MAIN_NS}}}mergeCells/{{{_MAIN_NS}}}mergeCell")
+    if len(merge_items) > _MAX_STRUCTURE_RANGES:
+        raise StructuredValidationError("worksheet contains too many merged ranges")
+    merged_ranges: list[_CellRange] = []
+    for item in merge_items:
         reference = item.attrib.get("ref", "")
         try:
             start, end = reference.split(":", 1)
@@ -212,9 +244,9 @@ def _worksheet_structure(source: bytes, sheet: str) -> _WorksheetStructure:
             end_row, end_col = _coordinate(end)
         except (TypeError, ValueError) as error:
             raise StructuredValidationError("worksheet merge range is invalid") from error
-        for row_number in range(start_row, end_row + 1):
-            for column_number in range(start_col, end_col + 1):
-                merged.add((row_number, column_number))
+        if start_row > end_row or start_col > end_col:
+            raise StructuredValidationError("worksheet merge range is reversed")
+        merged_ranges.append(_CellRange(start_row, end_row, start_col, end_col))
 
     hidden_rows: set[int] = set()
     row_cells: dict[int, frozenset[int]] = {}
@@ -223,6 +255,8 @@ def _worksheet_structure(source: bytes, sheet: str) -> _WorksheetStructure:
             row_number = int(row.attrib["r"])
         except (KeyError, ValueError) as error:
             raise StructuredValidationError("worksheet row identity is invalid") from error
+        if not 1 <= row_number <= _MAX_EXCEL_ROWS:
+            raise StructuredValidationError("worksheet row identity is outside the Excel grid")
         if row.attrib.get("hidden") in {"1", "true", "True"}:
             hidden_rows.add(row_number)
         cells: set[int] = set()
@@ -234,20 +268,27 @@ def _worksheet_structure(source: bytes, sheet: str) -> _WorksheetStructure:
             cells.add(parsed_column)
         row_cells[row_number] = frozenset(cells)
 
-    hidden_columns: set[int] = set()
-    for column in worksheet.findall(f"{{{_MAIN_NS}}}cols/{{{_MAIN_NS}}}col"):
-        if column.attrib.get("hidden") not in {"1", "true", "True"}:
-            continue
+    hidden_items = [
+        column
+        for column in worksheet.findall(f"{{{_MAIN_NS}}}cols/{{{_MAIN_NS}}}col")
+        if column.attrib.get("hidden") in {"1", "true", "True"}
+    ]
+    if len(hidden_items) > _MAX_STRUCTURE_RANGES:
+        raise StructuredValidationError("worksheet contains too many hidden column ranges")
+    hidden_column_ranges: list[_ColumnRange] = []
+    for column in hidden_items:
         try:
             lower = int(column.attrib["min"])
             upper = int(column.attrib["max"])
         except (KeyError, ValueError) as error:
             raise StructuredValidationError("worksheet column identity is invalid") from error
-        hidden_columns.update(range(lower, upper + 1))
+        if not 1 <= lower <= upper <= _MAX_EXCEL_COLUMNS:
+            raise StructuredValidationError("worksheet column range is outside the Excel grid")
+        hidden_column_ranges.append(_ColumnRange(lower, upper))
     return _WorksheetStructure(
-        merged_cells=frozenset(merged),
+        merged_ranges=tuple(merged_ranges),
         hidden_rows=frozenset(hidden_rows),
-        hidden_columns=frozenset(hidden_columns),
+        hidden_column_ranges=tuple(hidden_column_ranges),
         row_cells=row_cells,
         sheet_hidden=selected.attrib.get("state", "visible") != "visible",
         header_hidden=1 in hidden_rows,
@@ -262,7 +303,10 @@ def _coordinate(reference: str) -> tuple[int, int]:
     column = 0
     for character in letters:
         column = column * 26 + ord(character) - ord("A") + 1
-    return int(row_text), column
+    row = int(row_text)
+    if row > _MAX_EXCEL_ROWS or column > _MAX_EXCEL_COLUMNS:
+        raise StructuredValidationError("worksheet cell reference is outside the Excel grid")
+    return row, column
 
 
 def _header_value(value: object) -> str:
@@ -285,10 +329,19 @@ def _extract_row(
 ) -> ExtractedRow:
     warnings: list[str] = []
     explicit_columns = structure.row_cells.get(row_number, frozenset())
-    if explicit_columns and max(explicit_columns) < width:
+    required_columns = {position + 1 for position in positions.values()}
+    truncated = not required_columns.issubset(explicit_columns)
+    if truncated:
         warnings.append("truncated-row")
     if row_number in structure.hidden_rows:
         warnings.append("hidden-row")
+    structure_uncertain = (
+        structure.header_hidden
+        or sheet_hidden
+        or row_number in structure.hidden_rows
+        or truncated
+        or any(structure.is_hidden_column(column) for column in required_columns)
+    )
     values: dict[str, Any] = {}
     statuses: dict[str, CellStatus] = {}
     for canonical, zero_based in positions.items():
@@ -297,19 +350,19 @@ def _extract_row(
         cached_cell = cached_cells[zero_based] if zero_based < len(cached_cells) else None
         formula_value = getattr(formula_cell, "value", None)
         data_type = getattr(formula_cell, "data_type", None)
-        merged = (row_number, column_number) in structure.merged_cells
-        if merged:
-            value = _json_cell_value(formula_value)
-            status = CellStatus.MERGED
-        elif data_type == "f":
+        merged = structure.is_merged(row_number, column_number)
+        if data_type == "f":
             value = _json_cell_value(getattr(cached_cell, "value", None))
             status = CellStatus.FORMULA
+        elif merged:
+            value = _json_cell_value(formula_value)
+            status = CellStatus.MERGED
         elif data_type == "e":
             value = None
             status = CellStatus.INVALID
         else:
             value, status = _normalize_value(formula_value, mapping.roles.get(canonical), mapping.score_scale)
-        if (sheet_hidden or row_number in structure.hidden_rows or column_number in structure.hidden_columns) and status is CellStatus.EXACT:
+        if structure_uncertain and status is CellStatus.EXACT:
             status = CellStatus.UNCERTAIN
         values[canonical] = value
         statuses[canonical] = status
@@ -323,7 +376,9 @@ def _extract_row(
             warnings.append(f"invalid-cell:{canonical}")
         elif status is CellStatus.UNCERTAIN:
             warnings.append(f"uncertain-cell:{canonical}")
-        if column_number in structure.hidden_columns:
+        if merged and status is not CellStatus.MERGED:
+            warnings.append(f"merged-cell:{canonical}")
+        if structure.is_hidden_column(column_number):
             warnings.append(f"hidden-column:{canonical}")
     nonexact = sum(status is not CellStatus.EXACT for status in statuses.values())
     confidence = max(0.0, 1.0 - (nonexact / max(1, len(statuses))) * 0.5)
