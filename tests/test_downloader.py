@@ -15,6 +15,7 @@ from scripts.downloader import (
     DownloadMediaTypeError,
     DownloadNetworkError,
     DownloadRedirectError,
+    DownloadResult,
     DownloadSecurityError,
     DownloadStorageError,
     DownloadTimeout,
@@ -613,6 +614,39 @@ class DownloaderResponseTest(unittest.TestCase):
     def tearDown(self):
         self.temporary_directory.cleanup()
 
+    def test_old_four_argument_result_construction_remains_compatible(self):
+        result = DownloadResult(
+            self.workspace / "legacy.pdf",
+            "https://public.example.test/legacy.pdf",
+            "application/pdf",
+            7,
+        )
+
+        self.assertEqual(
+            result.redirect_chain,
+            ("https://public.example.test/legacy.pdf",),
+        )
+
+        supplied_chain = [
+            "https://public.example.test/start",
+            "https://public.example.test/legacy.pdf",
+        ]
+        snapshotted = DownloadResult(
+            self.workspace / "legacy.pdf",
+            "https://public.example.test/legacy.pdf",
+            "application/pdf",
+            7,
+            supplied_chain,
+        )
+        supplied_chain.append("https://public.example.test/forged")
+        self.assertEqual(
+            snapshotted.redirect_chain,
+            (
+                "https://public.example.test/start",
+                "https://public.example.test/legacy.pdf",
+            ),
+        )
+
     @patch("scripts.downloader.socket.getaddrinfo")
     @patch("scripts.downloader._open_pinned_request", create=True)
     def test_success_uses_internal_name_and_media_type_extension(
@@ -641,6 +675,12 @@ class DownloaderResponseTest(unittest.TestCase):
         self.assertEqual(result.path.read_bytes(), b"PDFDATA")
         self.assertEqual(result.media_type, "application/pdf")
         self.assertEqual(result.size_bytes, 7)
+        self.assertEqual(
+            result.redirect_chain,
+            ("https://public.example.test/untrusted.exe",),
+        )
+        with self.assertRaises(TypeError):
+            result.redirect_chain[0] = "https://public.example.test/forged"
         self.assertTrue(response.closed)
 
     @patch("scripts.downloader.socket.getaddrinfo")
@@ -750,9 +790,47 @@ class DownloaderResponseTest(unittest.TestCase):
         )
 
         self.assertEqual(result.source_url, "https://public.example.test/final")
+        self.assertEqual(
+            result.redirect_chain,
+            (
+                "https://public.example.test/start",
+                "https://public.example.test/final",
+            ),
+        )
         self.assertEqual(result.path.read_bytes(), b"{}")
         self.assertTrue(first.closed)
         self.assertTrue(final.closed)
+
+    @patch("scripts.downloader.socket.getaddrinfo")
+    @patch("scripts.downloader._open_pinned_request", create=True)
+    def test_multi_redirect_result_records_every_validated_target(self, open_request, getaddrinfo):
+        open_request.side_effect = [
+            FakeHttpResponse(301, headers={"Location": "/middle"}),
+            FakeHttpResponse(
+                307,
+                headers={"Location": "https://final.example.test/table.json"},
+            ),
+            FakeHttpResponse(
+                200,
+                headers={"Content-Type": "application/json"},
+                body=b"{}",
+            ),
+        ]
+        getaddrinfo.return_value = self.public_dns
+
+        result = download_public_file(
+            "https://public.example.test/start", self.workspace
+        )
+
+        self.assertEqual(
+            result.redirect_chain,
+            (
+                "https://public.example.test/start",
+                "https://public.example.test/middle",
+                "https://final.example.test/table.json",
+            ),
+        )
+        self.assertEqual(result.source_url, result.redirect_chain[-1])
 
     @patch("scripts.downloader.socket.getaddrinfo")
     @patch("scripts.downloader._open_pinned_request", create=True)

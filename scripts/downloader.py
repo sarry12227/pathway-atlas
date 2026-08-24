@@ -65,6 +65,15 @@ class DownloadResult:
     source_url: str
     media_type: str
     size_bytes: int
+    redirect_chain: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        chain = tuple(self.redirect_chain) or (self.source_url,)
+        if not all(isinstance(url, str) and url for url in chain):
+            raise ValueError("redirect_chain must contain nonempty URLs")
+        if chain[-1] != self.source_url:
+            raise ValueError("redirect_chain must end at source_url")
+        object.__setattr__(self, "redirect_chain", chain)
 
 
 _MEDIA_TYPE_EXTENSIONS = {
@@ -547,6 +556,7 @@ def download_public_file(
         raise ValueError("timeout must be positive")
     deadline = time.monotonic() + timeout
     current_url = url
+    redirect_chain = [url]
     redirects_followed = 0
     while True:
         _remaining_timeout(deadline)
@@ -570,6 +580,7 @@ def download_public_file(
                 if not location:
                     raise DownloadRedirectError("Redirect response has no Location")
                 current_url = urljoin(current_url, location)
+                redirect_chain.append(current_url)
                 redirects_followed += 1
                 continue
             if not 200 <= response.status < 300:
@@ -586,6 +597,7 @@ def download_public_file(
                 extension,
                 max_bytes,
                 deadline,
+                tuple(redirect_chain),
             )
         finally:
             response.close()
@@ -645,6 +657,7 @@ def _stream_to_workspace(
     extension: str,
     max_bytes: int,
     deadline: float,
+    redirect_chain: tuple[str, ...],
 ) -> DownloadResult:
     destination = workspace / f"{secrets.token_hex(16)}{extension}"
     temporary_path: Path | None = None
@@ -694,7 +707,7 @@ def _stream_to_workspace(
                 temporary_path.unlink()
             except FileNotFoundError:
                 pass
-    return DownloadResult(destination, source_url, media_type, total)
+    return DownloadResult(destination, source_url, media_type, total, redirect_chain)
 
 
 __all__ = [

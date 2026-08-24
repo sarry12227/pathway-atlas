@@ -1,0 +1,126 @@
+{
+  "schema_version": 1,
+  "document_id": "ocr-document-001",
+  "total_pages": 1,
+  "covered_pages": [1],
+  "images": [
+    {
+      "page_number": 1,
+      "image_id": "page-1"
+    }
+  ],
+  "rows": [
+    {
+      "page_number": 1,
+      "image_id": "page-1",
+      "bbox": [10, 20, 500, 60],
+      "cropped": false,
+      "cells": [
+        {
+          "label": "Fictional group",
+          "bbox": [10, 20, 200, 60],
+          "raw_text": "Sample Alpha",
+          "normalized_value": "Sample Alpha",
+          "confidence": 0.99,
+          "verified": true
+        },
+        {
+          "label": "Score",
+          "bbox": [210, 20, 330, 60],
+          "raw_text": "650",
+          "normalized_value": 650,
+          "confidence": 0.99,
+          "verified": true
+        },
+        {
+          "label": "Rank",
+          "bbox": [340, 20, 500, 60],
+          "raw_text": "100",
+          "normalized_value": 100,
+          "confidence": 0.99,
+          "verified": true
+        }
+      ]
+    },
+    {
+      "page_number": 1,
+      "image_id": "page-1",
+      "bbox": [10, 70, 500, 110],
+      "cropped": false,
+      "cells": [
+        {
+          "label": "Fictional group",
+          "bbox": [10, 70, 200, 110],
+          "raw_text": "Sample Boundary",
+          "normalized_value": "Sample Boundary",
+          "confidence": 0.99,
+          "verified": true
+        },
+        {
+          "label": "Score",
+          "bbox": [210, 70, 330, 110],
+          "raw_text": "580分以上",
+          "normalized_value": 580,
+          "confidence": 0.99,
+          "verified": true
+        },
+        {
+          "label": "Rank",
+          "bbox": [340, 70, 500, 110],
+          "raw_text": "前100名",
+          "normalized_value": 100,
+          "confidence": 0.99,
+          "verified": true
+        }
+      ]
+    },
+    {
+      "page_number": 1,
+      "image_id": "page-1",
+      "bbox": [10, 120, 500, 160],
+      "cropped": false,
+      "cells": [
+        {
+          "label": "Fictional group",
+          "bbox": [10, 120, 200, 160],
+          "raw_text": "Sample Beta",
+          "normalized_value": "Sample Beta",
+          "confidence": 0.98,
+          "verified": true
+        },
+        {
+          "label": "Score",
+          "bbox": [210, 120, 330, 160],
+          "raw_text": "620",
+          "normalized_value": 620,
+          "confidence": 0.98,
+          "verified": true
+        },
+        {
+          "label": "Rank",
+          "bbox": [340, 120, 500, 160],
+          "raw_text": "420",
+          "normalized_value": 420,
+          "confidence": 0.98,
+          "verified": true
+        }
+      ]
+    }
+  ],
+  "anchors": [
+    {
+      "row_index": 1,
+      "label": "Fictional group",
+      "bbox": [10, 20, 200, 60],
+      "raw_text": "Sample Alpha",
+      "normalized_value": "Sample Alpha"
+    },
+    {
+      "row_index": 3,
+      "label": "Rank",
+      "bbox": [340, 120, 500, 160],
+      "raw_text": "420",
+      "normalized_value": 420
+    }
+  ]
+}
