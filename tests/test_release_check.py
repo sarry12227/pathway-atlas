@@ -5,12 +5,18 @@ import os
 import subprocess
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
 from scripts.release_check import (
     CheckResult,
     ReleaseContext,
+    _check_clean_worktree,
+    _check_deterministic_boundaries,
+    _check_docx_tests,
+    _check_future_paths,
+    _check_tracked_modes,
     check_markdown_links,
     check_path_identities,
     check_project_version,
@@ -19,6 +25,7 @@ from scripts.release_check import (
     evaluate_release,
     main,
 )
+from scripts.compliance_scan import git_tracked_entries, load_policy
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -65,6 +72,28 @@ class TrackedBoundaryTest(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertIn("tracked-link-or-reparse:linked.txt", result.details)
         self.assertNotIn(str(target), json.dumps(result.to_dict()))
+
+    def test_release_inventory_rejects_non_regular_index_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            subprocess.run(["git", "init", "--quiet"], cwd=root, check=True)
+            object_id = subprocess.run(
+                ["git", "hash-object", "-w", "--stdin"],
+                cwd=root,
+                input=b"target",
+                capture_output=True,
+                check=True,
+            ).stdout.decode("ascii").strip()
+            subprocess.run(
+                ["git", "update-index", "--add", "--cacheinfo", f"120000,{object_id},payload.txt"],
+                cwd=root,
+                check=True,
+            )
+
+            result = _check_tracked_modes(git_tracked_entries(root))
+
+        self.assertFalse(result.ok)
+        self.assertIn("rule=unsupported-tracked-mode", result.details[0])
 
 
 class ReleaseComponentTest(unittest.TestCase):
@@ -114,6 +143,128 @@ class ReleaseComponentTest(unittest.TestCase):
         self.assertNotIn(secret, serialized)
         self.assertIn("redacted-sensitive-path", serialized)
 
+    def test_untracked_safe_name_with_secret_content_is_rejected_and_redacted(self) -> None:
+        secret = "ghp_abcdefghijklmnopqrstuvwxyz123456"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "notes.txt").write_text(f"token={secret}", encoding="utf-8")
+            result = check_untracked_sensitive_paths(
+                ["notes.txt"], root=root, policy=load_policy(ROOT / "release-policy.json")
+            )
+
+        serialized = json.dumps(result.to_dict())
+        self.assertFalse(result.ok)
+        self.assertNotIn(secret, serialized)
+        self.assertIn("rule=github-token", serialized)
+
+    def test_ci_cleanliness_exempts_only_declared_generated_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            subprocess.run(["git", "init", "--quiet"], cwd=root, check=True)
+            (root / "tracked.txt").write_text("base", encoding="utf-8")
+            subprocess.run(["git", "add", "--", "tracked.txt"], cwd=root, check=True)
+            (root / "tracked.txt").write_text("dirty", encoding="utf-8")
+            (root / "generated").mkdir()
+            (root / "generated" / "report.txt").write_text("generated", encoding="utf-8")
+
+            result = _check_clean_worktree(root, True, ("generated",))
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.details, ("worktree-has-unexpected-changes",))
+
+    def test_untracked_future_artifact_does_not_satisfy_release_gate(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / ".github" / "workflows").mkdir(parents=True)
+            (root / ".github" / "workflows" / "ci.yml").write_text("name: fake", encoding="utf-8")
+            policy = load_policy(ROOT / "release-policy.json")
+
+            result = _check_future_paths(root, policy, tracked=())
+
+        self.assertFalse(result.ok)
+        self.assertIn("missing-or-untracked:.github/workflows/ci.yml", result.details)
+
+    def test_offline_gate_installs_real_sentinel_and_does_not_trust_noop_name(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "tests").mkdir()
+            (root / "tests" / "__init__.py").write_text("", encoding="utf-8")
+            (root / "tests" / "test_noop_network.py").write_text(
+                "import unittest\n"
+                "def network_sentinel(): pass\n"
+                "class Safe(unittest.TestCase):\n"
+                "    def test_safe(self): self.assertEqual(2 + 2, 4)\n",
+                encoding="utf-8",
+            )
+            (root / "scripts").mkdir()
+            (root / "scripts" / "live_smoke.py").write_text("# explicit live-only boundary\n", encoding="utf-8")
+            policy = replace(
+                load_policy(ROOT / "release-policy.json"),
+                deterministic_test_modules=("tests.test_noop_network",),
+            )
+            context = ReleaseContext(root=root, expected_version="0.1.0")
+
+            result = _check_deterministic_boundaries(context, policy)
+
+        self.assertTrue(result.ok, result.details)
+        self.assertEqual(result.details, ("armed=13;attempts=0;run=1;skipped=0",))
+
+    def test_offline_gate_rejects_any_network_attempt_without_leaking_endpoint(self) -> None:
+        endpoint = "private-endpoint.invalid"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "tests").mkdir()
+            (root / "tests" / "__init__.py").write_text("", encoding="utf-8")
+            (root / "tests" / "test_network_attempt.py").write_text(
+                "import socket, unittest\n"
+                "class Unsafe(unittest.TestCase):\n"
+                f"    def test_network(self): socket.getaddrinfo('{endpoint}', 443)\n",
+                encoding="utf-8",
+            )
+            (root / "scripts").mkdir()
+            (root / "scripts" / "live_smoke.py").write_text("# explicit live-only boundary\n", encoding="utf-8")
+            policy = replace(
+                load_policy(ROOT / "release-policy.json"),
+                deterministic_test_modules=("tests.test_network_attempt",),
+            )
+            context = ReleaseContext(root=root, expected_version="0.1.0")
+
+            result = _check_deterministic_boundaries(context, policy)
+
+        self.assertFalse(result.ok)
+        self.assertNotIn(endpoint, json.dumps(result.to_dict()))
+
+    def test_docx_gate_uses_explicit_suite_loaded_run_and_skip_counts(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "tests").mkdir()
+            (root / "tests" / "__init__.py").write_text("", encoding="utf-8")
+            suite_path = root / "tests" / "test_docx_contract.py"
+            suite_path.write_text(
+                "import unittest\n"
+                "class Docx(unittest.TestCase):\n"
+                "    def test_export(self): self.assertTrue(True)\n",
+                encoding="utf-8",
+            )
+            policy = replace(
+                load_policy(ROOT / "release-policy.json"),
+                docx_test_modules=("tests.test_docx_contract",),
+            )
+            context = ReleaseContext(root=root, expected_version="0.1.0")
+            passed = _check_docx_tests(context, policy)
+            suite_path.write_text(
+                "import unittest\n"
+                "class Docx(unittest.TestCase):\n"
+                "    @unittest.skip('dependency absent')\n"
+                "    def test_export(self): pass\n",
+                encoding="utf-8",
+            )
+            skipped = _check_docx_tests(context, policy)
+
+        self.assertTrue(passed.ok)
+        self.assertEqual(passed.details, ("loaded=1;run=1;skipped=0",))
+        self.assertFalse(skipped.ok)
+
     def test_result_json_has_stable_bounded_shape(self) -> None:
         result = CheckResult("privacy", False, ("secret:README.md:4",), count=1)
         self.assertEqual(
@@ -123,6 +274,32 @@ class ReleaseComponentTest(unittest.TestCase):
 
 
 class ReleaseEvaluationTest(unittest.TestCase):
+    def test_all_release_git_queries_ignore_ambient_git_controls(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            poison_index = Path(temporary) / "empty-index"
+            poison_index.write_bytes(b"")
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "GIT_INDEX_FILE": str(poison_index),
+                    "GIT_DIR": str(Path(temporary) / "fake-git"),
+                    "GIT_WORK_TREE": str(Path(temporary) / "fake-worktree"),
+                },
+            ):
+                report = evaluate_release(
+                    ReleaseContext(
+                        root=ROOT,
+                        expected_version="0.1.0",
+                        ci=True,
+                        run_tests=False,
+                    )
+                )
+
+        by_name = {result.name: result for result in report.results}
+        self.assertTrue(by_name["repository_scope"].ok)
+        self.assertTrue(by_name["tracked_inventory"].ok)
+        self.assertGreater(by_name["tracked_inventory"].count, 100)
+
     def test_current_tree_reports_later_task_gaps_precisely_without_running_nested_suite(self) -> None:
         context = ReleaseContext(
             root=ROOT,
@@ -137,7 +314,10 @@ class ReleaseEvaluationTest(unittest.TestCase):
         by_name = {result.name: result for result in report.results}
         self.assertFalse(report.ok)
         self.assertFalse(by_name["future_release_artifacts"].ok)
-        self.assertIn("missing:.github/workflows/ci.yml", by_name["future_release_artifacts"].details)
+        self.assertIn(
+            "missing-or-untracked:.github/workflows/ci.yml",
+            by_name["future_release_artifacts"].details,
+        )
         serialized = json.dumps(report.to_dict(), ensure_ascii=False)
         self.assertNotIn(str(ROOT), serialized)
         self.assertNotIn("ghp_", serialized)

@@ -403,7 +403,9 @@ Path(os.environ["SHENGXUE_SENTINEL_ACTIVE"]).write_text("active", encoding="utf-
         price.write_text("方案优惠价 3999", encoding="utf-8", newline="\n")
         rejected = self._script("compliance_scan.py", price)
         self.assertEqual(rejected.returncode, 2, rejected.stdout + rejected.stderr)
-        self.assertIn("优惠价 3999", rejected.stderr)
+        self.assertNotIn("优惠价 3999", rejected.stderr)
+        self.assertIn("kind=pricing_or_sales", rejected.stderr)
+        self.assertIn("rule=price-expression", rejected.stderr)
 
         marker = "学生张三13800138000"
         malformed = self.sandbox / f"{marker}-malformed.md"

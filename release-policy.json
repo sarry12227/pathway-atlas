@@ -60,8 +60,8 @@
     },
     {
       "path": "scripts/compliance_scan.py",
-      "kinds": ["pricing_or_sales"],
-      "file_sha256": "39f579f927fc8631ac064d9d21c2ece355d033dacf47b59d6e80a7fda2b1f44b",
+      "kinds": ["absolute_local_path", "pricing_or_sales"],
+      "file_sha256": "8fbcaca90eaaac27c930018b2d3a419d47080f7bc7f4f17a8d49768ef094df5b",
       "reason": "scanner rule literal"
     },
     {
@@ -73,7 +73,7 @@
     {
       "path": "tests/test_cli_smoke.py",
       "kinds": ["absolute_local_path", "phone", "pricing_or_sales"],
-      "file_sha256": "6651bfd812fd487cbdf182bb041252ce15be1fb6789f542c5762bb8dfc8b49ec",
+      "file_sha256": "8a125a4d39c59745bca7a79407d3a727097128d9bbb086ce30213dff9b5d0a15",
       "reason": "synthetic negative fixture"
     },
     {
@@ -85,7 +85,7 @@
     {
       "path": "tests/test_compliance_scan.py",
       "kinds": ["absolute_local_path", "identity_number", "phone", "pricing_or_sales", "private_system_reference", "secret", "student_pii"],
-      "file_sha256": "c2f206fcfd65affbe1b0db7c7e396dded00e8be0c01b1387cb40561a2335bd63",
+      "file_sha256": "e8937241182605cb60bb4f46325786bbeb3fc02e47f9df35a478c267805c262c",
       "reason": "synthetic negative fixture"
     },
     {
@@ -145,7 +145,7 @@
     {
       "path": "tests/test_release_check.py",
       "kinds": ["absolute_local_path", "secret"],
-      "file_sha256": "5b58a7b45813a7a0de985961a4be1e67e6f0fe1c5132166bde21d61f1cb71c7d",
+      "file_sha256": "c5a9ea2fdcdd6a7c8f525cb4cbed62ee13160176d092d36209a19880c230444b",
       "reason": "synthetic negative fixture"
     },
     {
@@ -195,9 +195,17 @@
     "tests/test_workflows.py",
     "docs/release-process.md"
   ],
+  "ci_generated_paths": [
+    "build",
+    "dist",
+    "shengxue_skill.egg-info"
+  ],
   "deterministic_test_modules": [
     "tests.test_replay_scenarios",
     "tests.test_structured_adapters",
     "tests.test_unstructured_adapters"
+  ],
+  "docx_test_modules": [
+    "tests.test_docx_semantic_parity"
   ]
 }

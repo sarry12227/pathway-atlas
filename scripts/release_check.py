@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import ast
 import json
 import os
 import re
@@ -22,9 +21,33 @@ except ModuleNotFoundError:  # pragma: no cover - exercised by the Python 3.10 g
     import tomli as tomllib
 
 try:
-    from .compliance_scan import PolicyError, ReleasePolicy, load_policy, scan_text, scan_tracked
+    from .compliance_scan import (
+        GitTrackedEntry,
+        PolicyError,
+        ReleasePolicy,
+        git_environment,
+        git_paths,
+        git_top_level,
+        git_tracked_entries,
+        load_policy,
+        safe_tracked_file,
+        scan_text,
+        scan_tracked,
+    )
 except ImportError:  # pragma: no cover - direct script execution
-    from compliance_scan import PolicyError, ReleasePolicy, load_policy, scan_text, scan_tracked
+    from compliance_scan import (
+        GitTrackedEntry,
+        PolicyError,
+        ReleasePolicy,
+        git_environment,
+        git_paths,
+        git_top_level,
+        git_tracked_entries,
+        load_policy,
+        safe_tracked_file,
+        scan_text,
+        scan_tracked,
+    )
 
 
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
@@ -55,7 +78,15 @@ _REQUIRED_COMMUNITY = (
 
 def _safe_relative(value: str) -> str:
     normalized = value.replace("\\", "/")
-    sensitive_kinds = {"secret", "student_pii", "phone", "identity_number", "absolute_local_path"}
+    sensitive_kinds = {
+        "secret",
+        "student_pii",
+        "phone",
+        "identity_number",
+        "absolute_local_path",
+        "private_system_reference",
+        "pricing_or_sales",
+    }
     if (
         _CONTROL_RE.search(normalized)
         or len(normalized) > 180
@@ -156,6 +187,15 @@ def check_tracked_paths(
     return CheckResult("tracked_paths", not details, tuple(details), len(details))
 
 
+def _check_tracked_modes(entries: Sequence[GitTrackedEntry]) -> CheckResult:
+    details = tuple(
+        f"kind=tracked_path;rule=unsupported-tracked-mode;line=0;path={_safe_relative(entry.path)}"
+        for entry in entries
+        if re.fullmatch(r"100[0-7]{3}", entry.mode) is None
+    )
+    return CheckResult("tracked_modes", not details, details, len(details))
+
+
 def check_path_identities(root: Path, paths: Sequence[str]) -> CheckResult:
     """Reject symlink/reparse escapes and duplicate filesystem identities."""
 
@@ -166,17 +206,15 @@ def check_path_identities(root: Path, paths: Sequence[str]) -> CheckResult:
         canonical = _canonical_repo_path(relative)
         if canonical is None:
             continue
-        candidate = repo.joinpath(*PurePosixPath(canonical).parts)
-        try:
-            metadata = candidate.lstat()
-        except OSError:
-            details.append(f"missing-tracked-path:{_safe_relative(canonical)}")
+        candidate, finding = safe_tracked_file(repo, canonical)
+        if finding is not None:
+            details.append(
+                f"kind={finding.kind};rule={finding.rule_id};line={finding.line};"
+                f"path={_safe_relative(finding.path or 'unknown')}"
+            )
             continue
-        attributes = getattr(metadata, "st_file_attributes", 0)
-        reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
-        if stat.S_ISLNK(metadata.st_mode) or bool(attributes & reparse_flag):
-            details.append(f"tracked-link-or-reparse:{_safe_relative(canonical)}")
-            continue
+        assert candidate is not None
+        metadata = candidate.stat()
         try:
             candidate.resolve(strict=True).relative_to(repo)
         except (OSError, ValueError):
@@ -245,7 +283,12 @@ def check_markdown_links(root: Path, markdown_paths: Sequence[str]) -> CheckResu
     return CheckResult("markdown_links", not details, tuple(details), len(details))
 
 
-def check_untracked_sensitive_paths(paths: Sequence[str]) -> CheckResult:
+def check_untracked_sensitive_paths(
+    paths: Sequence[str],
+    *,
+    root: Path | None = None,
+    policy: ReleasePolicy | None = None,
+) -> CheckResult:
     details: list[str] = []
     for raw in paths:
         canonical = _canonical_repo_path(raw)
@@ -262,7 +305,54 @@ def check_untracked_sensitive_paths(paths: Sequence[str]) -> CheckResult:
             or any(folded.startswith(prefix) for prefix in _SENSITIVE_PREFIXES)
         )
         if sensitive:
-            details.append(f"untracked-sensitive:{_safe_relative(canonical)}")
+            details.append(
+                "kind=untracked_path;rule=sensitive-name;line=0;"
+                f"path={_safe_relative(canonical)}"
+            )
+        if root is None or policy is None:
+            continue
+        candidate, path_finding = safe_tracked_file(root.resolve(), canonical)
+        if path_finding is not None:
+            details.append(
+                "kind=untracked_path;"
+                f"rule={path_finding.rule_id};line=0;path={_safe_relative(canonical)}"
+            )
+            continue
+        assert candidate is not None
+        try:
+            raw = candidate.read_bytes()
+        except OSError:
+            details.append(
+                "kind=untracked_path;rule=unreadable-untracked-file;line=0;"
+                f"path={_safe_relative(canonical)}"
+            )
+            continue
+        if len(raw) > policy.max_text_bytes:
+            details.append(
+                "kind=untracked_path;rule=untracked-file-too-large;line=0;"
+                f"path={_safe_relative(canonical)}"
+            )
+            continue
+        if candidate.suffix.casefold() in policy.binary_extensions:
+            continue
+        if b"\x00" in raw:
+            details.append(
+                "kind=untracked_path;rule=undeclared-binary-content;line=0;"
+                f"path={_safe_relative(canonical)}"
+            )
+            continue
+        try:
+            text = raw.decode("utf-8", errors="strict")
+        except UnicodeError:
+            details.append(
+                "kind=untracked_path;rule=untracked-text-not-utf8;line=0;"
+                f"path={_safe_relative(canonical)}"
+            )
+            continue
+        details.extend(
+            f"kind={finding.kind};rule={finding.rule_id};line={finding.line};path={_safe_relative(canonical)}"
+            for finding in scan_text(text)
+        )
     return CheckResult("untracked_sensitive", not details, tuple(details), len(details))
 
 
@@ -357,20 +447,6 @@ def check_province_catalog(root: Path) -> CheckResult:
     return CheckResult("province_catalog", True)
 
 
-def _git_inventory(root: Path, arguments: Sequence[str]) -> tuple[str, ...]:
-    completed = subprocess.run(["git", *arguments], cwd=root, check=False, capture_output=True)
-    if completed.returncode != 0:
-        raise RuntimeError("git inventory failed")
-    try:
-        return tuple(
-            item.decode("utf-8", errors="strict")
-            for item in completed.stdout.split(b"\x00")
-            if item
-        )
-    except UnicodeError as error:
-        raise RuntimeError("git inventory encoding failed") from error
-
-
 def _check_repo_scope(root: Path) -> CheckResult:
     try:
         metadata = root.lstat()
@@ -380,21 +456,10 @@ def _check_repo_scope(root: Path) -> CheckResult:
     reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
     if stat.S_ISLNK(metadata.st_mode) or bool(attributes & reparse_flag):
         return CheckResult("repository_scope", False, ("repository-root-link-or-reparse",), 1)
-    completed = subprocess.run(
-        ["git", "rev-parse", "--show-toplevel"],
-        cwd=root,
-        check=False,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="strict",
-    )
-    if completed.returncode != 0:
-        return CheckResult("repository_scope", False, ("not-a-git-repository",), 1)
     try:
-        top = Path(completed.stdout.strip()).resolve(strict=True)
-    except OSError:
-        return CheckResult("repository_scope", False, ("invalid-git-top-level",), 1)
+        top = git_top_level(root)
+    except RuntimeError:
+        return CheckResult("repository_scope", False, ("not-a-git-repository",), 1)
     if top != root.resolve():
         return CheckResult("repository_scope", False, ("root-is-not-git-top-level",), 1)
     for required in ("pyproject.toml", "SKILL.md", "scripts", "tests"):
@@ -403,11 +468,11 @@ def _check_repo_scope(root: Path) -> CheckResult:
     return CheckResult("repository_scope", True)
 
 
-def _check_license_and_data_docs(root: Path) -> CheckResult:
+def _check_license_and_data_docs(root: Path, tracked: frozenset[str]) -> CheckResult:
     details: list[str] = []
     for relative in _REQUIRED_COMMUNITY:
-        if not (root / relative).is_file():
-            details.append(f"missing:{relative}")
+        if relative not in tracked or not (root / relative).is_file():
+            details.append(f"missing-or-untracked:{relative}")
     try:
         license_text = (root / "LICENSE").read_text("utf-8")
         data_text = (root / "DATA_SOURCES.md").read_text("utf-8")
@@ -420,65 +485,265 @@ def _check_license_and_data_docs(root: Path) -> CheckResult:
     return CheckResult("license_and_data_docs", not details, tuple(details), len(details))
 
 
-def _check_clean_worktree(root: Path, ci: bool) -> CheckResult:
-    if ci:
-        return CheckResult("clean_worktree", True)
+def _check_required_artifacts(
+    root: Path,
+    policy: ReleasePolicy,
+    tracked: frozenset[str],
+) -> CheckResult:
+    required = {
+        "pyproject.toml",
+        "release-policy.json",
+        "schemas/province-catalog.schema.json",
+        "references/provinces/index.json",
+        "scripts/compliance_scan.py",
+        "scripts/release_check.py",
+        "scripts/live_smoke.py",
+        *_REQUIRED_COMMUNITY,
+        *(module.replace(".", "/") + ".py" for module in policy.deterministic_test_modules),
+        *(module.replace(".", "/") + ".py" for module in policy.docx_test_modules),
+    }
+    details = tuple(
+        f"missing-or-untracked:{relative}"
+        for relative in sorted(required)
+        if relative not in tracked or not (root / relative).is_file()
+    )
+    return CheckResult("required_artifacts", not details, details, len(details))
+
+
+def _status_path(entry: str) -> str | None:
+    if len(entry) < 4 or entry[2] != " ":
+        return None
+    return _canonical_repo_path(entry[3:])
+
+
+def _is_under(relative: str, prefixes: Sequence[str]) -> bool:
+    identity = _path_identity(relative)
+    return any(identity == _path_identity(prefix) or identity.startswith(_path_identity(prefix) + "/") for prefix in prefixes)
+
+
+def _check_clean_worktree(root: Path, ci: bool, generated_paths: Sequence[str] = ()) -> CheckResult:
     try:
-        entries = _git_inventory(root, ("status", "--porcelain=v1", "-z", "--untracked-files=all"))
+        entries = git_paths(root, ("status", "--porcelain=v1", "-z", "--untracked-files=all"))
     except RuntimeError:
         return CheckResult("clean_worktree", False, ("git-status-failed",), 1)
-    if entries:
-        return CheckResult("clean_worktree", False, ("worktree-has-changes",), len(entries))
+    unexpected = []
+    for entry in entries:
+        relative = _status_path(entry)
+        if relative is None or not (ci and _is_under(relative, generated_paths)):
+            unexpected.append(entry)
+    if unexpected:
+        return CheckResult("clean_worktree", False, ("worktree-has-unexpected-changes",), len(unexpected))
     return CheckResult("clean_worktree", True)
 
 
-def _check_deterministic_boundaries(root: Path, policy: ReleasePolicy) -> CheckResult:
-    details: list[str] = []
-    for module in policy.deterministic_test_modules:
-        relative = module.replace(".", "/") + ".py"
-        path = root / relative
-        try:
-            source = path.read_text("utf-8")
-            tree = ast.parse(source, filename=relative)
-        except (OSError, UnicodeError, SyntaxError):
-            details.append(f"invalid-deterministic-test:{relative}")
-            continue
-        imported_socket = any(
-            isinstance(node, ast.Import) and any(alias.name == "socket" for alias in node.names)
-            for node in ast.walk(tree)
-        )
-        isolated_socket_sentinel = any(
-            isinstance(node, ast.Constant)
-            and isinstance(node.value, str)
-            and "socket" in node.value
-            and "socket.create_connection" in node.value
-            and "socket.getaddrinfo" in node.value
-            for node in ast.walk(tree)
-        )
-        named_boundary = any(
-            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-            and ("network" in node.name or "sentinel" in node.name)
-            for node in ast.walk(tree)
-        )
-        if (not imported_socket and not isolated_socket_sentinel) or not named_boundary:
-            details.append(f"network-sentinel-missing:{relative}")
-    if not (root / "scripts" / "live_smoke.py").is_file():
-        details.append("live-network-boundary-missing")
-    return CheckResult("deterministic_boundaries", not details, tuple(details), len(details))
+_UNITTEST_CHILD = r'''
+import io, json, os, sys, unittest
+root, *modules = sys.argv[1:]
+sys.path.insert(0, root)
+os.chdir(root)
+suite = unittest.defaultTestLoader.loadTestsFromNames(modules)
+loaded = suite.countTestCases()
+result = unittest.TextTestRunner(stream=io.StringIO(), verbosity=0).run(suite)
+print(json.dumps({"requested": len(modules), "loaded": loaded, "run": result.testsRun,
+                  "skipped": len(result.skipped), "failures": len(result.failures),
+                  "errors": len(result.errors)}, sort_keys=True))
+'''
 
 
-def _check_future_paths(root: Path, policy: ReleasePolicy) -> CheckResult:
-    details = tuple(f"missing:{path}" for path in policy.future_release_paths if not (root / path).is_file())
+_NETWORK_CHILD = r'''
+import http.client, io, json, os, socket, sys, unittest, urllib.request
+root, *modules = sys.argv[1:]
+sys.path.insert(0, root)
+os.chdir(root)
+attempts = 0
+class NetworkBlocked(RuntimeError): pass
+def blocked(*args, **kwargs):
+    global attempts
+    attempts += 1
+    raise NetworkBlocked("offline-network-blocked")
+OriginalSocket = socket.socket
+class GuardedSocket(OriginalSocket):
+    connect = blocked
+    connect_ex = blocked
+    send = blocked
+    sendall = blocked
+    sendto = blocked
+socket.socket = GuardedSocket
+socket.create_connection = blocked
+socket.getaddrinfo = blocked
+socket.gethostbyname = blocked
+socket.gethostbyname_ex = blocked
+socket.gethostbyaddr = blocked
+socket.getnameinfo = blocked
+http.client.HTTPConnection.connect = blocked
+http.client.HTTPConnection.request = blocked
+http.client.HTTPSConnection.connect = blocked
+http.client.HTTPSConnection.request = blocked
+urllib.request.urlopen = blocked
+canaries = {
+    "dns-getaddrinfo": lambda: socket.getaddrinfo("invalid.test", 443),
+    "dns-gethostbyname": lambda: socket.gethostbyname("invalid.test"),
+    "dns-gethostbyname-ex": lambda: socket.gethostbyname_ex("invalid.test"),
+    "reverse-gethostbyaddr": lambda: socket.gethostbyaddr("192.0.2.1"),
+    "reverse-getnameinfo": lambda: socket.getnameinfo(("192.0.2.1", 9), 0),
+    "tcp-create-connection": lambda: socket.create_connection(("192.0.2.1", 9)),
+    "tcp-connect": lambda: GuardedSocket().connect(("192.0.2.1", 9)),
+    "tcp-connect-ex": lambda: GuardedSocket().connect_ex(("192.0.2.1", 9)),
+    "udp": lambda: GuardedSocket(type=socket.SOCK_DGRAM).sendto(b"x", ("192.0.2.1", 9)),
+    "send": lambda: GuardedSocket().send(b"x"),
+    "sendall": lambda: GuardedSocket().sendall(b"x"),
+    "http-urlopen": lambda: urllib.request.urlopen("http://invalid.test/"),
+    "http-request": lambda: http.client.HTTPConnection("invalid.test").request("GET", "/"),
+}
+armed = []
+for name, canary in canaries.items():
+    try: canary()
+    except NetworkBlocked: armed.append(name)
+attempts = 0
+suite = unittest.defaultTestLoader.loadTestsFromNames(modules)
+loaded = suite.countTestCases()
+result = unittest.TextTestRunner(stream=io.StringIO(), verbosity=0).run(suite)
+print(json.dumps({"armed": sorted(armed), "attempts": attempts, "requested": len(modules),
+                  "loaded": loaded, "run": result.testsRun, "skipped": len(result.skipped),
+                  "failures": len(result.failures), "errors": len(result.errors)}, sort_keys=True))
+'''
+
+
+def _isolated_child_environment() -> dict[str, str]:
+    environment = git_environment()
+    blocked_names = {"http_proxy", "https_proxy", "all_proxy", "no_proxy"}
+    return {
+        name: value
+        for name, value in environment.items()
+        if not name.upper().startswith("PYTHON") and name.casefold() not in blocked_names
+    }
+
+
+def _run_json_child(
+    root: Path,
+    python_executable: str,
+    script: str,
+    modules: Sequence[str],
+) -> dict[str, object] | None:
+    try:
+        completed = subprocess.run(
+            [python_executable, "-I", "-c", script, str(root), *modules],
+            cwd=root,
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=_isolated_child_environment(),
+            timeout=600,
+        )
+        if completed.returncode != 0:
+            return None
+        payload = json.loads(completed.stdout)
+    except (OSError, subprocess.TimeoutExpired, UnicodeError, ValueError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _valid_test_child(payload: dict[str, object] | None, requested: int) -> bool:
+    if payload is None or set(payload) != {"requested", "loaded", "run", "skipped", "failures", "errors"}:
+        return False
+    return (
+        payload["requested"] == requested
+        and isinstance(payload["loaded"], int)
+        and payload["loaded"] > 0
+        and payload["run"] == payload["loaded"]
+        and payload["skipped"] == 0
+        and payload["failures"] == 0
+        and payload["errors"] == 0
+    )
+
+
+def _check_docx_tests(context: ReleaseContext, policy: ReleasePolicy) -> CheckResult:
+    if not context.run_tests:
+        return CheckResult("docx_tests", False, ("docx-tests-not-run",), 1)
+    payload = _run_json_child(
+        context.root,
+        context.python_executable,
+        _UNITTEST_CHILD,
+        policy.docx_test_modules,
+    )
+    if not _valid_test_child(payload, len(policy.docx_test_modules)):
+        return CheckResult("docx_tests", False, ("docx-suite-failed-loaded-run-or-skip-contract",), 1)
+    assert payload is not None
+    return CheckResult("docx_tests", True, (f"loaded={payload['loaded']};run={payload['run']};skipped=0",), int(payload["run"]))
+
+
+def _check_deterministic_boundaries(context: ReleaseContext, policy: ReleasePolicy) -> CheckResult:
+    if not context.run_tests:
+        return CheckResult("deterministic_boundaries", False, ("deterministic-tests-not-run",), 1)
+    if not (context.root / "scripts" / "live_smoke.py").is_file():
+        return CheckResult("deterministic_boundaries", False, ("live-network-boundary-missing",), 1)
+    payload = _run_json_child(
+        context.root,
+        context.python_executable,
+        _NETWORK_CHILD,
+        policy.deterministic_test_modules,
+    )
+    required = {
+        "dns-getaddrinfo",
+        "dns-gethostbyname",
+        "dns-gethostbyname-ex",
+        "reverse-gethostbyaddr",
+        "reverse-getnameinfo",
+        "tcp-create-connection",
+        "tcp-connect",
+        "tcp-connect-ex",
+        "udp",
+        "send",
+        "sendall",
+        "http-urlopen",
+        "http-request",
+    }
+    valid_shape = payload is not None and set(payload) == {
+        "armed", "attempts", "requested", "loaded", "run", "skipped", "failures", "errors"
+    }
+    ok = bool(
+        valid_shape
+        and set(payload["armed"]) == required
+        and payload["attempts"] == 0
+        and payload["requested"] == len(policy.deterministic_test_modules)
+        and isinstance(payload["loaded"], int)
+        and payload["loaded"] > 0
+        and payload["run"] == payload["loaded"]
+        and isinstance(payload["skipped"], int)
+        and 0 <= payload["skipped"] < payload["run"]
+        and payload["failures"] == 0
+        and payload["errors"] == 0
+    )
+    if not ok:
+        return CheckResult("deterministic_boundaries", False, ("offline-sentinel-or-test-contract-failed",), 1)
+    assert payload is not None
+    return CheckResult(
+        "deterministic_boundaries",
+        True,
+        (f"armed=13;attempts=0;run={payload['run']};skipped={payload['skipped']}",),
+        int(payload["run"]),
+    )
+
+
+def _check_future_paths(
+    root: Path,
+    policy: ReleasePolicy,
+    tracked: Sequence[str],
+) -> CheckResult:
+    tracked_set = frozenset(tracked)
+    details = tuple(
+        f"missing-or-untracked:{path}"
+        for path in policy.future_release_paths
+        if path not in tracked_set or not (root / path).is_file()
+    )
     return CheckResult("future_release_artifacts", not details, details, len(details))
 
 
 def _check_full_tests(context: ReleaseContext) -> CheckResult:
     if not context.run_tests:
         return CheckResult("full_tests", False, ("tests-not-run",), 1)
-    environment = dict(os.environ)
-    for name in tuple(environment):
-        if name.upper().startswith("PYTHON"):
-            del environment[name]
     try:
         completed = subprocess.run(
             [context.python_executable, "-m", "unittest", "discover", "-s", "tests", "-v"],
@@ -488,7 +753,7 @@ def _check_full_tests(context: ReleaseContext) -> CheckResult:
             text=True,
             encoding="utf-8",
             errors="replace",
-            env=environment,
+            env=_isolated_child_environment(),
             timeout=600,
         )
     except (OSError, subprocess.TimeoutExpired):
@@ -496,17 +761,11 @@ def _check_full_tests(context: ReleaseContext) -> CheckResult:
     output = completed.stdout + "\n" + completed.stderr
     count_matches = re.findall(r"Ran (\d+) tests?", output)
     test_count = int(count_matches[-1]) if count_matches else 0
-    docx_skips = sum(
-        "docx" in line.casefold() and ("skipped" in line.casefold() or " ... skip" in line.casefold())
-        for line in output.splitlines()
-    )
     details: list[str] = []
     if completed.returncode != 0:
         details.append("test-suite-failed")
     if test_count == 0:
         details.append("test-count-unavailable")
-    if docx_skips:
-        details.append(f"docx-tests-skipped:{docx_skips}")
     return CheckResult("full_tests", not details, tuple(details), test_count)
 
 
@@ -526,39 +785,65 @@ def evaluate_release(context: ReleaseContext) -> ReleaseReport:
     except PolicyError:
         return ReleaseReport((CheckResult("release_policy", False, ("invalid-release-policy",), 1),))
     try:
-        tracked = _git_inventory(root, ("ls-files", "-z", "--"))
+        tracked_entries = git_tracked_entries(root)
+        tracked = tuple(entry.path for entry in tracked_entries)
+        tracked_inventory_result = CheckResult("tracked_inventory", True, count=len(tracked))
     except RuntimeError:
+        tracked_entries = ()
         tracked = ()
+        tracked_inventory_result = CheckResult("tracked_inventory", False, ("git-index-inventory-failed",), 1)
     try:
-        untracked = _git_inventory(root, ("ls-files", "--others", "--exclude-standard", "-z", "--"))
+        untracked = git_paths(root, ("ls-files", "--others", "--exclude-standard", "-z", "--"))
+        untracked_inventory_result = CheckResult("untracked_inventory", True, count=len(untracked))
     except RuntimeError:
         untracked = ()
+        untracked_inventory_result = CheckResult("untracked_inventory", False, ("git-untracked-inventory-failed",), 1)
 
-    scan_result = _safe_run("compliance_scan", lambda: _compliance_result(root, policy))
+    scan_result = _safe_run(
+        "compliance_scan",
+        lambda: _compliance_result(root, policy, tracked_entries),
+    )
     markdown = tuple(path for path in tracked if path.casefold().endswith(".md"))
+    tracked_set = frozenset(tracked)
     results = (
         _safe_run("repository_scope", lambda: _check_repo_scope(root)),
         CheckResult("release_policy", True),
+        tracked_inventory_result,
+        untracked_inventory_result,
         check_tracked_paths(tracked, policy.forbidden_tracked_directories),
+        _check_tracked_modes(tracked_entries),
         _safe_run("path_identities", lambda: check_path_identities(root, tracked)),
         scan_result,
         check_project_version(root, context.expected_version, context.tag),
-        _safe_run("license_and_data_docs", lambda: _check_license_and_data_docs(root)),
-        _safe_run("clean_worktree", lambda: _check_clean_worktree(root, context.ci)),
-        check_untracked_sensitive_paths(untracked),
+        _safe_run(
+            "required_artifacts",
+            lambda: _check_required_artifacts(root, policy, tracked_set),
+        ),
+        _safe_run("license_and_data_docs", lambda: _check_license_and_data_docs(root, tracked_set)),
+        _safe_run(
+            "clean_worktree",
+            lambda: _check_clean_worktree(root, context.ci, policy.ci_generated_paths),
+        ),
+        check_untracked_sensitive_paths(untracked, root=root, policy=policy),
         _safe_run("province_catalog", lambda: check_province_catalog(root)),
         _safe_run("markdown_links", lambda: check_markdown_links(root, markdown)),
-        _safe_run("deterministic_boundaries", lambda: _check_deterministic_boundaries(root, policy)),
-        _safe_run("future_release_artifacts", lambda: _check_future_paths(root, policy)),
+        _safe_run("deterministic_boundaries", lambda: _check_deterministic_boundaries(context, policy)),
+        _safe_run("future_release_artifacts", lambda: _check_future_paths(root, policy, tracked)),
+        _safe_run("docx_tests", lambda: _check_docx_tests(context, policy)),
         _safe_run("full_tests", lambda: _check_full_tests(context)),
     )
     return ReleaseReport(results)
 
 
-def _compliance_result(root: Path, policy: ReleasePolicy) -> CheckResult:
-    summary = scan_tracked(root, policy)
+def _compliance_result(
+    root: Path,
+    policy: ReleasePolicy,
+    entries: Sequence[GitTrackedEntry] | None = None,
+) -> CheckResult:
+    summary = scan_tracked(root, policy, entries)
     details = tuple(
-        f"{finding.kind}:{_safe_relative(finding.path or 'unknown')}:{finding.line}"
+        f"kind={finding.kind};rule={finding.rule_id};line={finding.line};"
+        f"path={_safe_relative(finding.path or 'unknown')}"
         for finding in summary.findings[:200]
     )
     if len(summary.findings) > 200:

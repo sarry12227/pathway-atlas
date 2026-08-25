@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import stat
 import subprocess
@@ -61,6 +62,11 @@ _RULES: tuple[tuple[str, str, re.Pattern[str]], ...] = (
         re.compile(r"(?:学生|考生)?(?:姓名|名字)\s*[:：=]\s*[^\s,，;；]{1,32}"),
     ),
     (
+        "student_pii",
+        "student-address-label",
+        re.compile(r"(?:学生|考生|家庭|居住|通讯)?(?:住址|地址)\s*[:：=]\s*[^\r\n]{2,100}"),
+    ),
+    (
         "phone",
         "mainland-phone",
         re.compile(r"(?<![0-9A-Fa-f])1[3-9]\d{9}(?![0-9A-Fa-f])"),
@@ -91,6 +97,22 @@ _RULES: tuple[tuple[str, str, re.Pattern[str]], ...] = (
         re.compile(r"(?i)file:///{1,3}[^\s<>()\[\]{}\"']+"),
     ),
     (
+        "absolute_local_path",
+        "posix-absolute-attachment",
+        re.compile(
+            r"(?i)(?:附件|本地文件|本地路径|attachment|local[ _-]?path)\s*[:：=]\s*"
+            r"/(?!/)[^\s<>()\[\]{}\"']+"
+        ),
+    ),
+    (
+        "absolute_local_path",
+        "unc-absolute-path",
+        re.compile(
+            r"(?i)(?:附件|本地文件|本地路径|attachment|local[ _-]?path)\s*[:：=]\s*"
+            r"(?:\\\\|//)[^\\/\s]+[\\/][^\s<>()\[\]{}\"']+"
+        ),
+    ),
+    (
         "pricing_or_sales",
         "sales-language",
         re.compile(r"(?:限时优惠|立即咨询|扫码咨询|购买咨询|报名优惠|私聊(?:咨询|购买)|加微信)"),
@@ -106,13 +128,21 @@ _POLICY_KEYS = frozenset(
         "allowlist",
         "file_allowlist",
         "future_release_paths",
+        "ci_generated_paths",
         "deterministic_test_modules",
+        "docx_test_modules",
     }
 )
 _ALLOWLIST_KEYS = frozenset({"path", "kind", "line_sha256", "reason"})
 _FILE_ALLOWLIST_KEYS = frozenset({"path", "kinds", "file_sha256", "reason"})
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
 _PATH_DRIVE_RE = re.compile(r"^[A-Za-z]:")
+_EDUCATIONAL_PRICE_CONTEXT_RE = re.compile(
+    r"(?:学费|住宿费|教材费|奖学金|助学金|助学贷款|困难补助|生活补助|补贴|资助)"
+)
+_COMMERCIAL_PRICE_CONTEXT_RE = re.compile(
+    r"(?:产品|服务|课程|套餐|会员|咨询|报价|原价|现价|优惠|购买|下单|报名|私聊|微信)"
+)
 
 
 class PolicyError(ValueError):
@@ -144,7 +174,9 @@ class ReleasePolicy:
     allowlist: tuple[AllowlistEntry, ...]
     file_allowlist: tuple[FileAllowlistEntry, ...]
     future_release_paths: tuple[str, ...]
+    ci_generated_paths: tuple[str, ...]
     deterministic_test_modules: tuple[str, ...]
+    docx_test_modules: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -160,7 +192,6 @@ class Finding:
             "kind": self.kind,
             "rule": self.rule_id,
             "line": self.line,
-            "column": self.column,
         }
         if self.path is not None:
             result["path"] = self.path
@@ -185,6 +216,14 @@ class ScanSummary:
             "finding_count": len(self.findings),
             "findings": [finding.to_dict() for finding in self.findings],
         }
+
+
+@dataclass(frozen=True)
+class GitTrackedEntry:
+    """One stage-zero Git index entry with a safe logical path."""
+
+    path: str
+    mode: str
 
 
 def find_price_text(text: object) -> Optional[str]:
@@ -301,9 +340,15 @@ def load_policy(path: Path | str) -> ReleasePolicy:
 
     directories = _policy_path_list(payload["forbidden_tracked_directories"], "forbidden_tracked_directories")
     future_paths = _policy_path_list(payload["future_release_paths"], "future_release_paths")
+    generated_paths = _policy_path_list(payload["ci_generated_paths"], "ci_generated_paths")
     modules = _string_list(payload["deterministic_test_modules"], "deterministic_test_modules")
+    docx_modules = _string_list(payload["docx_test_modules"], "docx_test_modules")
     if any(not re.fullmatch(r"tests\.test_[A-Za-z0-9_]+", module) for module in modules):
         raise PolicyError("deterministic_test_modules contains an invalid module name")
+    if any(not re.fullmatch(r"tests\.test_[A-Za-z0-9_]+", module) for module in docx_modules):
+        raise PolicyError("docx_test_modules contains an invalid module name")
+    if not modules or not docx_modules:
+        raise PolicyError("test module inventories must not be empty")
 
     supported_kinds = {rule[0] for rule in _RULES} | {"pricing_or_sales"}
     allowlist_payload = payload["allowlist"]
@@ -362,7 +407,9 @@ def load_policy(path: Path | str) -> ReleasePolicy:
         allowlist=tuple(allowlist),
         file_allowlist=tuple(file_allowlist),
         future_release_paths=future_paths,
+        ci_generated_paths=generated_paths,
         deterministic_test_modules=modules,
+        docx_test_modules=docx_modules,
     )
 
 
@@ -379,10 +426,18 @@ def _is_allowlisted(policy: ReleasePolicy | None, path: str | None, kind: str, l
 def _reported_path(path: str | None) -> str | None:
     if path is None:
         return None
-    if any(
+    if any(regex.search(path) for regex in PRICE_RES) or any(
         regex.search(path)
         for kind, _rule_id, regex in _RULES
-        if kind in {"secret", "student_pii", "phone", "identity_number", "absolute_local_path"}
+        if kind in {
+            "secret",
+            "student_pii",
+            "phone",
+            "identity_number",
+            "absolute_local_path",
+            "private_system_reference",
+            "pricing_or_sales",
+        }
     ):
         return "redacted-sensitive-path"
     if any(ord(character) < 32 or ord(character) == 127 for character in path) or len(path) > 180:
@@ -416,10 +471,14 @@ def scan_text(
         for kind, rule_id, regex in _RULES:
             matches.extend((kind, rule_id, match) for match in regex.finditer(line))
         for regex in PRICE_RES:
-            matches.extend(
-                ("pricing_or_sales", "price-expression", match)
-                for match in regex.finditer(line)
-            )
+            for match in regex.finditer(line):
+                local_context = line[max(0, match.start() - 32) : match.end() + 8]
+                if (
+                    _EDUCATIONAL_PRICE_CONTEXT_RE.search(local_context)
+                    and not _COMMERCIAL_PRICE_CONTEXT_RE.search(line)
+                ):
+                    continue
+                matches.append(("pricing_or_sales", "price-expression", match))
         for kind, rule_id, match in sorted(matches, key=lambda item: (item[2].start(), item[0], item[1])):
             if kind in _file_allowlisted_kinds or _is_allowlisted(policy, path, kind, line):
                 continue
@@ -431,39 +490,99 @@ def scan_text(
     return findings
 
 
-def _git_paths(root: Path, arguments: Sequence[str]) -> tuple[str, ...]:
+def git_environment() -> dict[str, str]:
+    """Return a child environment with every ambient Git control removed."""
+
+    return {
+        name: value
+        for name, value in os.environ.items()
+        if not name.upper().startswith("GIT_")
+    }
+
+
+def _run_git(root: Path, arguments: Sequence[str]) -> bytes:
     completed = subprocess.run(
         ["git", *arguments],
         cwd=root,
         check=False,
         capture_output=True,
+        env=git_environment(),
     )
     if completed.returncode != 0:
         raise RuntimeError("git inventory failed")
+    return completed.stdout
+
+
+def git_paths(root: Path, arguments: Sequence[str]) -> tuple[str, ...]:
+    """Run one NUL-delimited Git inventory command in the isolated environment."""
+
     try:
         return tuple(
             item.decode("utf-8", errors="strict")
-            for item in completed.stdout.split(b"\x00")
+            for item in _run_git(root, arguments).split(b"\x00")
             if item
         )
     except UnicodeError as error:
         raise RuntimeError("git inventory is not UTF-8") from error
 
 
-def _safe_tracked_file(root: Path, relative: str) -> tuple[Path | None, Finding | None]:
+def git_top_level(root: Path) -> Path:
+    """Resolve Git's top level without honoring caller-provided Git controls."""
+
+    try:
+        value = _run_git(root, ("rev-parse", "--show-toplevel")).decode("utf-8", errors="strict").strip()
+        return Path(value).resolve(strict=True)
+    except (UnicodeError, OSError) as error:
+        raise RuntimeError("git top level is invalid") from error
+
+
+def git_tracked_entries(root: Path) -> tuple[GitTrackedEntry, ...]:
+    """Read and strictly parse stage-zero index entries."""
+
+    records = _run_git(root, ("ls-files", "--stage", "-z", "--")).split(b"\x00")
+    entries: list[GitTrackedEntry] = []
+    try:
+        for record in records:
+            if not record:
+                continue
+            metadata, encoded_path = record.split(b"\t", 1)
+            mode, object_id, stage = metadata.split(b" ", 2)
+            if re.fullmatch(rb"[0-7]{6}", mode) is None or re.fullmatch(
+                rb"(?:[0-9a-f]{40}|[0-9a-f]{64})", object_id
+            ) is None:
+                raise ValueError
+            if stage != b"0":
+                raise ValueError
+            entries.append(
+                GitTrackedEntry(
+                    encoded_path.decode("utf-8", errors="strict"),
+                    mode.decode("ascii"),
+                )
+            )
+    except (UnicodeError, ValueError) as error:
+        raise RuntimeError("git index inventory is malformed") from error
+    return tuple(entries)
+
+
+def safe_tracked_file(root: Path, relative: str) -> tuple[Path | None, Finding | None]:
+    """Validate every component of one tracked path without following reparses."""
+
     try:
         canonical = _policy_path(relative, "tracked path")
     except PolicyError:
         return None, Finding("tracked_path", "noncanonical-tracked-path", 0, 0, None)
-    candidate = root.joinpath(*PurePosixPath(canonical).parts)
-    try:
-        metadata = candidate.lstat()
-    except OSError:
-        return None, Finding("tracked_path", "missing-tracked-path", 0, 0, _reported_path(canonical))
-    attributes = getattr(metadata, "st_file_attributes", 0)
-    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
-    if stat.S_ISLNK(metadata.st_mode) or bool(attributes & reparse_flag):
-        return None, Finding("tracked_path", "tracked-link-or-reparse", 0, 0, _reported_path(canonical))
+    candidate = root
+    metadata = None
+    for part in PurePosixPath(canonical).parts:
+        candidate = candidate / part
+        try:
+            metadata = candidate.lstat()
+        except OSError:
+            return None, Finding("tracked_path", "missing-tracked-path", 0, 0, _reported_path(canonical))
+        attributes = getattr(metadata, "st_file_attributes", 0)
+        reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+        if stat.S_ISLNK(metadata.st_mode) or bool(attributes & reparse_flag):
+            return None, Finding("tracked_path", "tracked-link-or-reparse", 0, 0, _reported_path(canonical))
     try:
         resolved = candidate.resolve(strict=True)
         resolved.relative_to(root)
@@ -474,16 +593,24 @@ def _safe_tracked_file(root: Path, relative: str) -> tuple[Path | None, Finding 
     return candidate, None
 
 
-def scan_tracked(root: Path | str, policy: ReleasePolicy) -> ScanSummary:
+def scan_tracked(
+    root: Path | str,
+    policy: ReleasePolicy,
+    entries: Sequence[GitTrackedEntry] | None = None,
+) -> ScanSummary:
     """Scan only Git-tracked, bounded UTF-8 text files beneath ``root``."""
 
     repo = Path(root).resolve()
-    paths = _git_paths(repo, ("ls-files", "-z", "--"))
+    inventory = tuple(entries) if entries is not None else git_tracked_entries(repo)
     findings: list[Finding] = []
     scanned = 0
     skipped = 0
-    for relative in paths:
-        candidate, path_finding = _safe_tracked_file(repo, relative)
+    for entry in inventory:
+        relative = entry.path
+        if re.fullmatch(r"100[0-7]{3}", entry.mode) is None:
+            findings.append(Finding("tracked_path", "unsupported-tracked-mode", 0, 0, _reported_path(relative)))
+            continue
+        candidate, path_finding = safe_tracked_file(repo, relative)
         if path_finding is not None:
             findings.append(path_finding)
             continue
@@ -505,7 +632,7 @@ def scan_tracked(root: Path | str, policy: ReleasePolicy) -> ScanSummary:
             findings.append(Finding("tracked_path", "unreadable-tracked-file", 0, 0, _reported_path(relative)))
             continue
         if b"\x00" in raw:
-            skipped += 1
+            findings.append(Finding("tracked_path", "undeclared-binary-content", 0, 0, _reported_path(relative)))
             continue
         try:
             content = raw.decode("utf-8", errors="strict")
@@ -548,13 +675,6 @@ def _file_mode(path: str) -> int:
     findings = scan_text(content)
     if findings:
         first = findings[0]
-        price_hit = find_price_text(content)
-        if first.kind == "pricing_or_sales" and price_hit is not None:
-            print(
-                f"合规扫描未通过：命中价格/营销词片段「{price_hit}」，请移除后重新交付",
-                file=sys.stderr,
-            )
-            return 2
         print(
             f"合规扫描未通过：kind={first.kind} line={first.line} rule={first.rule_id}；请移除后重新交付",
             file=sys.stderr,
