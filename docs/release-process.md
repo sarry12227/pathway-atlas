@@ -27,13 +27,14 @@ if (git -C $clonePath status --short) { throw "clean clone is dirty before rehea
 
 ### 2. 新建 Python 环境并安装全部依赖
 
-- [ ] 使用受支持的 Python 新建 `.venv`，记录实际 OS 与 Python patch 版本。
+- [ ] 使用受支持的 Python 在 clone 外、本次排练根目录内新建 venv，记录实际 OS 与 Python patch 版本。
 - [ ] 优先使用本地包缓存执行 editable all/test 安装；如果缺包才允许访问受控依赖源。
 - [ ] 安装后再次确认 `git status --short` 为空。
 
 ```powershell
-& $python310 -m venv (Join-Path $clonePath ".venv")
-$releasePython = Join-Path $clonePath ".venv\Scripts\python.exe"
+$venvPath = Join-Path $rehearsalRoot "venv"
+& $python310 -m venv $venvPath
+$releasePython = Join-Path $venvPath "Scripts\python.exe"
 Push-Location $clonePath
 & $releasePython -m pip install -e ".[all,test]"
 & $releasePython --version
@@ -89,6 +90,7 @@ Pop-Location
 
 ```powershell
 Push-Location $clonePath
+New-Item -ItemType Directory -Path dist | Out-Null
 & $releasePython scripts\build_release.py --version 0.1.0 --output dist/rehearsal-one
 & $releasePython scripts\build_release.py --version 0.1.0 --output dist/rehearsal-two
 $zipOne = Join-Path $clonePath "dist\rehearsal-one\shengxue-skill-0.1.0.zip"
@@ -110,16 +112,18 @@ Pop-Location
 
 ## 2026-08-25 v0.1.0 排练结果
 
-状态：待执行。
+状态：通过。
 
-- 排练 commit：待记录
-- 环境：待记录
-- 全量测试：待记录
-- DOCX：待记录
-- compliance scan：待记录
-- strict release check：待记录
-- ZIP：待记录
-- `SHA256SUMS`：待记录
-- 双构建字节比较：待记录
-- 清理后 clone 状态：待记录
-- 已知限制：本地单环境排练不替代 GitHub Actions 的三操作系统、Python 3.10/3.13 六项矩阵；实时来源健康检查是非权威维护遥测，不参与确定性正确性。
+- 排练 commit：`eecfcb8189f27317fe9aca7411aa44a37c20c2fc`（独立 checklist commit；关闭 `core.autocrlf` 的 detached clean clone，136 个 tracked archive entries）。
+- 环境：`Microsoft Windows NT 10.0.26100.0`，CPython `3.10.20`；新 venv 位于 clone 外。初次本地缓存解析缺少 PyYAML，随后经批准由 pip 安装声明的 `.[all,test]` 依赖。
+- 预检与输入：offline 降级符合预期；`demo-312`、`demo-33` 和三独立来源证据 fixture 均有效。
+- 真实报告：Markdown 2,705 bytes，SHA-256 `314187d0afa167d5826fb731afd7f028b7d1538dfaee947efb6ce836e159af37`；DOCX 40,464 bytes，SHA-256 `9207e656661b08e780515fb51c0bb6cc1d239984158ea1f67caeba3ad576f99c`。
+- 全量测试：741 tests，0 failures/errors，14 个 Windows 平台能力 skips；独立 DOCX suite 20/20，0 skips。
+- compliance scan：134 个 tracked 文本文件、2 个已声明二进制文件、0 findings。
+- strict release check：18/18 checks，0 failures；full tests 741，DOCX 20/20、0 skips，deterministic boundary 93 tests、13 个已武装网络 canaries、0 次测试期网络尝试。
+- ZIP：525,515 bytes、136 entries，SHA-256 `399ec22c63b1a4aaa9a26c878407a1d396258b06d5f993193b6de0ed2f107de8`。
+- `SHA256SUMS`：91 bytes，SHA-256 由 `c7d1ecbf18` 与 `852438692b71ebaffdf1e316ae38c762fbf213c376e4990708725b` 无分隔拼接；内容引用同一 ZIP digest。
+- 双构建字节比较：两个不同输出目录的 ZIP bytes 相同，两个 `SHA256SUMS` bytes 相同。
+- 清理后 clone 状态：首次检查为空；删除 builder 的 `dist/` 后再次为空。
+- 排练中验证的 fail-closed 行为：若把 venv 建在 clone 内，第三方包自带的 DOCX/PEM 会被 untracked-sensitive gate 拒绝；因此正式 checklist 明确要求 venv 和普通报告位于 clone 外。builder 还要求安全的中间输出父目录预先存在。
+- 已知限制：本地单环境排练不替代 GitHub Actions 的三操作系统、Python 3.10/3.13 六项矩阵；14 个 skips 是本机不可用的 POSIX/symlink 等能力，不包含 DOCX skip；实时来源健康检查是非权威维护遥测，不参与确定性正确性。

@@ -19,3 +19,12 @@
 公开预览不包含全国真实录取数据库，不宣称所有网站或省份材料都可访问，也不保证录取。Agent
 负责检索和理解公开材料；只有通过证据、结构、时效与许可门禁的事实才能进入本地确定性计算。
 实时来源波动会产生明确降级，不会被当成确定性测试失败或自动改写事实。
+
+2026-08-25 在 Windows NT `10.0.26100.0`、CPython `3.10.20` 的 LF clean clone 中完成
+`eecfcb8189f27317fe9aca7411aa44a37c20c2fc` 发布排练：全量 741 tests 通过（14 个平台能力
+skips，DOCX 20/20、0 skips），tracked compliance 为 0 findings，strict release check 为
+18/18。两次构建得到逐字节相同的 525,515-byte ZIP（136 entries，SHA-256
+`399ec22c63b1a4aaa9a26c878407a1d396258b06d5f993193b6de0ed2f107de8`）和 `SHA256SUMS`
+（SHA-256 由 `c7d1ecbf18` 与 `852438692b71ebaffdf1e316ae38c762fbf213c376e4990708725b`
+无分隔拼接）。本地单环境
+排练不替代 GitHub Actions 的六项 OS/Python 矩阵，实时来源健康仍是非权威维护遥测。
