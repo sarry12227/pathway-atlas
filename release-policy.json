@@ -145,7 +145,7 @@
     {
       "path": "tests/test_release_check.py",
       "kinds": ["absolute_local_path", "secret"],
-      "file_sha256": "d2d181a89acb8478f161aa0763b835cddd5f579e148d8bcd66af13d7d314f84a",
+      "file_sha256": "b2ed7d0b16a8810ec56502d3c78e6baca097cab3ccc6dbb3f3b84c1e21ccd98d",
       "reason": "synthetic negative fixture"
     },
     {

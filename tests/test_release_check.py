@@ -366,7 +366,7 @@ class ReleaseEvaluationTest(unittest.TestCase):
         self.assertTrue(by_name["tracked_inventory"].ok)
         self.assertGreater(by_name["tracked_inventory"].count, 100)
 
-    def test_current_tree_reports_later_task_gaps_precisely_without_running_nested_suite(self) -> None:
+    def test_current_tree_tracks_ci_and_reports_later_task_gaps_without_nested_suite(self) -> None:
         context = ReleaseContext(
             root=ROOT,
             expected_version="0.1.0",
@@ -380,8 +380,12 @@ class ReleaseEvaluationTest(unittest.TestCase):
         by_name = {result.name: result for result in report.results}
         self.assertFalse(report.ok)
         self.assertFalse(by_name["future_release_artifacts"].ok)
-        self.assertIn(
+        self.assertNotIn(
             "missing-or-untracked:.github/workflows/ci.yml",
+            by_name["future_release_artifacts"].details,
+        )
+        self.assertIn(
+            "missing-or-untracked:.github/workflows/source-health.yml",
             by_name["future_release_artifacts"].details,
         )
         serialized = json.dumps(report.to_dict(), ensure_ascii=False)
