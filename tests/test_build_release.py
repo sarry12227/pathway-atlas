@@ -102,6 +102,21 @@ class BuildReleaseTest(unittest.TestCase):
         self.assertNotIn(sensitive, stderr.getvalue())
         self.assertFalse((self.root / "dist").exists())
 
+    def test_release_checker_can_import_a_sibling_module_as_the_real_gate_does(self) -> None:
+        (self.root / "scripts" / "gate_helper.py").write_text(
+            "ALLOW_RELEASE = True\n", encoding="utf-8"
+        )
+        (self.root / "scripts" / "release_check.py").write_text(
+            "from gate_helper import ALLOW_RELEASE\n"
+            "raise SystemExit(0 if ALLOW_RELEASE else 2)\n",
+            encoding="utf-8",
+        )
+        self._git_add_all()
+
+        artifacts = self._build("dist")
+
+        self.assertTrue(artifacts.archive.is_file())
+
     def test_rejects_version_mismatch_unsafe_output_sensitive_paths_and_overwrite(self) -> None:
         with self.assertRaises(build_release.BuildReleaseError):
             build_release.build_release(self.root, "0.1.1", "dist")

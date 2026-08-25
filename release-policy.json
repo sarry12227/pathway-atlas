@@ -73,7 +73,7 @@
     {
       "path": "tests/test_build_release.py",
       "kinds": ["secret"],
-      "file_sha256": "19d58bf8f50563387c0743ad09d5972833363ca12702405c71691db14953851c",
+      "file_sha256": "b862428f412ecc629528716ba9da43e2db2bebd7d5e6f05535e7cb4558bea835",
       "reason": "synthetic negative fixture"
     },
     {

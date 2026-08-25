@@ -199,7 +199,6 @@ def _run_release_check(root: Path, version: str) -> None:
         completed = subprocess.run(
             [
                 sys.executable,
-                "-I",
                 str(checker),
                 "--root",
                 str(root),
