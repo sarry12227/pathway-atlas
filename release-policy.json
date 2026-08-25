@@ -79,7 +79,7 @@
     {
       "path": "tests/test_community_files.py",
       "kinds": ["absolute_local_path", "pricing_or_sales", "private_system_reference"],
-      "file_sha256": "1ebb36f9bf0a3fe53412a9b884f03c357e61815fa83ee31d4895de7f4a99af20",
+      "file_sha256": "dc55e05b21f7d43418d319482fb6acc6fcd1c733abe4669c5368fd1de504cfc1",
       "reason": "synthetic negative fixture"
     },
     {
@@ -145,7 +145,7 @@
     {
       "path": "tests/test_release_check.py",
       "kinds": ["absolute_local_path", "secret"],
-      "file_sha256": "d15ff2a7f1738f478df0bf8594c95c7fe13f0c2f0ca1fe2035d31baca728b81d",
+      "file_sha256": "0eb8795b1b992d5303398981f94e626c7e6ff37ab2ef47af33bdcd4f525211e5",
       "reason": "synthetic negative fixture"
     },
     {

@@ -1,6 +1,10 @@
+import copy
 import re
 import unittest
 from pathlib import Path
+from typing import Any
+
+import yaml
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -49,6 +53,233 @@ PROVINCIAL_REGIONS = (
     "澳门",
     "台湾",
 )
+ISSUE_TEMPLATE_DIR = ROOT / ".github" / "ISSUE_TEMPLATE"
+ISSUE_FORMS = {
+    "bug": ISSUE_TEMPLATE_DIR / "bug.yml",
+    "data-correction": ISSUE_TEMPLATE_DIR / "data-correction.yml",
+    "source-request": ISSUE_TEMPLATE_DIR / "source-request.yml",
+}
+ISSUE_FORM_FIELDS = {
+    "bug": {
+        "summary": "textarea",
+        "reproduction_steps": "textarea",
+        "expected_behavior": "textarea",
+        "actual_behavior": "textarea",
+        "environment": "input",
+        "privacy_confirmation": "checkboxes",
+    },
+    "data-correction": {
+        "province": "input",
+        "applicable_year": "input",
+        "challenged_fact": "textarea",
+        "source_url": "input",
+        "publisher": "input",
+        "captured_at": "input",
+        "correction_reason": "textarea",
+        "privacy_confirmation": "checkboxes",
+    },
+    "source-request": {
+        "origin_url": "input",
+        "publisher": "input",
+        "applicable_year": "input",
+        "source_scope": "textarea",
+        "rights_basis": "textarea",
+        "license_terms": "textarea",
+        "redistribution_notes": "textarea",
+        "privacy_confirmation": "checkboxes",
+    },
+}
+ISSUE_FORM_POLICY_LINKS = {
+    "bug": "../../SECURITY.md",
+    "data-correction": "../../DATA_SOURCES.md",
+    "source-request": "../../DATA_SOURCES.md",
+}
+PR_TEMPLATE = ROOT / ".github" / "pull_request_template.md"
+DEPENDABOT_CONFIG = ROOT / ".github" / "dependabot.yml"
+ISSUE_CHOOSER_CONFIG = ISSUE_TEMPLATE_DIR / "config.yml"
+
+
+class _StrictYamlLoader(yaml.SafeLoader):
+    pass
+
+
+def _construct_unique_mapping(
+    loader: _StrictYamlLoader,
+    node: yaml.nodes.MappingNode,
+    deep: bool = False,
+) -> dict[Any, Any]:
+    loader.flatten_mapping(node)
+    mapping: dict[Any, Any] = {}
+    for key_node, value_node in node.value:
+        key = loader.construct_object(key_node, deep=deep)
+        try:
+            duplicate = key in mapping
+        except TypeError as error:
+            raise yaml.constructor.ConstructorError(
+                "while constructing a mapping",
+                node.start_mark,
+                "found an unhashable key",
+                key_node.start_mark,
+            ) from error
+        if duplicate:
+            raise yaml.constructor.ConstructorError(
+                "while constructing a mapping",
+                node.start_mark,
+                f"found duplicate key {key!r}",
+                key_node.start_mark,
+            )
+        mapping[key] = loader.construct_object(value_node, deep=deep)
+    return mapping
+
+
+_StrictYamlLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
+    _construct_unique_mapping,
+)
+
+
+def load_strict_yaml(text):
+    try:
+        document = yaml.load(text, Loader=_StrictYamlLoader)
+    except yaml.YAMLError as error:
+        raise ValueError("invalid YAML") from error
+    if not isinstance(document, dict):
+        raise ValueError("YAML document must be a mapping")
+    return document
+
+
+def has_chinese_text(value):
+    return isinstance(value, str) and re.search(r"[\u4e00-\u9fff]", value) is not None
+
+
+def issue_form_errors(document, expected_fields, policy_link):
+    """Validate rendered issue-form behavior instead of matching source snippets."""
+
+    errors = []
+    if set(document) != {"name", "description", "title", "labels", "body"}:
+        errors.append("top-level-shape")
+    for key in ("name", "description", "title"):
+        if not has_chinese_text(document.get(key)):
+            errors.append(f"chinese-{key}")
+    labels = document.get("labels")
+    if not isinstance(labels, list) or not labels or not all(isinstance(label, str) for label in labels):
+        errors.append("labels")
+
+    body = document.get("body")
+    if not isinstance(body, list) or not all(isinstance(item, dict) for item in body):
+        return errors + ["body"]
+    markdown_items = [item for item in body if item.get("type") == "markdown"]
+    fields = [item for item in body if item.get("type") != "markdown"]
+    ids = [item.get("id") for item in fields]
+    if len(ids) != len(set(ids)) or any(
+        not isinstance(field_id, str) or re.fullmatch(r"[A-Za-z0-9_-]+", field_id) is None
+        for field_id in ids
+    ):
+        errors.append("field-identities")
+    if set(ids) != set(expected_fields):
+        errors.append("field-set")
+
+    for item in fields:
+        field_id = item.get("id")
+        field_type = item.get("type")
+        if field_type != expected_fields.get(field_id):
+            errors.append(f"field-type:{field_id}")
+        attributes = item.get("attributes")
+        validations = item.get("validations")
+        if not isinstance(attributes, dict):
+            errors.append(f"attributes:{field_id}")
+            continue
+        if not has_chinese_text(attributes.get("label")):
+            errors.append(f"chinese-label:{field_id}")
+        if not has_chinese_text(attributes.get("description")):
+            errors.append(f"chinese-description:{field_id}")
+        if validations != {"required": True}:
+            errors.append(f"required:{field_id}")
+        if field_type == "textarea" and attributes.get("render") != "text":
+            errors.append(f"attachments-disabled:{field_id}")
+        if field_type == "checkboxes":
+            options = attributes.get("options")
+            if not isinstance(options, list) or not options:
+                errors.append(f"checkbox-options:{field_id}")
+            elif any(
+                not isinstance(option, dict)
+                or not has_chinese_text(option.get("label"))
+                or option.get("required") is not True
+                for option in options
+            ):
+                errors.append(f"checkbox-required:{field_id}")
+
+    privacy = next((item for item in fields if item.get("id") == "privacy_confirmation"), None)
+    privacy_text = str(privacy.get("attributes", {}).get("options", [])) if privacy else ""
+    if not all(
+        phrase in privacy_text
+        for phrase in ("学生真实姓名", "手机号", "身份证号", "精确住址", "私人报告")
+    ):
+        errors.append("privacy-boundary")
+
+    markdown_text = "\n".join(
+        str(item.get("attributes", {}).get("value", "")) for item in markdown_items
+    )
+    if policy_link not in markdown_links(markdown_text):
+        errors.append("policy-link")
+    if not has_chinese_text(markdown_text):
+        errors.append("chinese-markdown")
+    return errors
+
+
+def dependabot_errors(document):
+    errors = []
+    if set(document) != {"version", "updates"} or document.get("version") != 2:
+        errors.append("top-level-shape")
+    updates = document.get("updates")
+    if not isinstance(updates, list) or not all(isinstance(update, dict) for update in updates):
+        return errors + ["updates"]
+    ecosystems = [update.get("package-ecosystem") for update in updates]
+    if ecosystems != ["pip", "github-actions"]:
+        errors.append("ecosystems")
+    for update in updates:
+        ecosystem = update.get("package-ecosystem")
+        if set(update) != {
+            "package-ecosystem",
+            "directory",
+            "schedule",
+            "open-pull-requests-limit",
+        }:
+            errors.append(f"update-shape:{ecosystem}")
+        if update.get("directory") != "/":
+            errors.append(f"directory:{ecosystem}")
+        if update.get("schedule") != {"interval": "weekly"}:
+            errors.append(f"schedule:{ecosystem}")
+        limit = update.get("open-pull-requests-limit")
+        if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 5:
+            errors.append(f"pull-request-limit:{ecosystem}")
+    return errors
+
+
+def pr_template_errors(text):
+    checklist = re.findall(r"(?m)^\s*- \[([ xX])\]\s+(.+?)\s*$", text)
+    errors = []
+    if len(checklist) != 8:
+        errors.append("checklist-size")
+    if any(mark != " " for mark, _item in checklist):
+        errors.append("prechecked-item")
+    items = [item for _mark, item in checklist]
+    categories = {
+        "tests": lambda item: "测试" in item and "命令" in item,
+        "tdd": lambda item: all(term in item for term in ("TDD", "RED", "GREEN")),
+        "synthetic-fixtures": lambda item: "fixture" in item and "虚构" in item,
+        "evidence-ids": lambda item: "证据" in item and "source ID" in item,
+        "documentation": lambda item: "文档" in item,
+        "release-scans": lambda item: all(
+            term in item for term in ("compliance_scan.py", "release_check.py")
+        ),
+        "no-pii": lambda item: "学生个人信息" in item and "没有" in item,
+        "no-unlicensed-data": lambda item: "真实数据" in item and "再分发许可" in item,
+    }
+    for category, predicate in categories.items():
+        if sum(bool(predicate(item)) for item in items) != 1:
+            errors.append(category)
+    return errors
 
 
 def read_documents():
@@ -502,6 +733,132 @@ class CommunityFilesTest(unittest.TestCase):
             1,
         )
         self.assertEqual(contract_violations(safe), [])
+
+    def test_github_issue_forms_are_strict_required_and_privacy_safe(self):
+        for name, path in ISSUE_FORMS.items():
+            with self.subTest(name=name):
+                self.assertTrue(path.is_file(), f"{path.relative_to(ROOT)} is missing")
+                document = load_strict_yaml(path.read_text(encoding="utf-8"))
+                self.assertEqual(
+                    issue_form_errors(
+                        document,
+                        ISSUE_FORM_FIELDS[name],
+                        ISSUE_FORM_POLICY_LINKS[name],
+                    ),
+                    [],
+                )
+
+    def test_issue_form_mutations_fail_closed(self):
+        documents = {
+            name: load_strict_yaml(path.read_text(encoding="utf-8"))
+            for name, path in ISSUE_FORMS.items()
+        }
+
+        optional_field = copy.deepcopy(documents["data-correction"])
+        next(item for item in optional_field["body"] if item.get("id") == "source_url")[
+            "validations"
+        ]["required"] = False
+        self.assertIn(
+            "required:source_url",
+            issue_form_errors(
+                optional_field,
+                ISSUE_FORM_FIELDS["data-correction"],
+                ISSUE_FORM_POLICY_LINKS["data-correction"],
+            ),
+        )
+
+        attachment_enabled = copy.deepcopy(documents["bug"])
+        next(item for item in attachment_enabled["body"] if item.get("id") == "summary")[
+            "attributes"
+        ].pop("render")
+        self.assertIn(
+            "attachments-disabled:summary",
+            issue_form_errors(
+                attachment_enabled,
+                ISSUE_FORM_FIELDS["bug"],
+                ISSUE_FORM_POLICY_LINKS["bug"],
+            ),
+        )
+
+        pii_collector = copy.deepcopy(documents["bug"])
+        pii_collector["body"].append(
+            {
+                "type": "input",
+                "id": "student_name",
+                "attributes": {"label": "学生称呼", "description": "填写学生称呼"},
+                "validations": {"required": True},
+            }
+        )
+        self.assertIn(
+            "field-set",
+            issue_form_errors(
+                pii_collector,
+                ISSUE_FORM_FIELDS["bug"],
+                ISSUE_FORM_POLICY_LINKS["bug"],
+            ),
+        )
+
+        optional_privacy = copy.deepcopy(documents["source-request"])
+        privacy = next(
+            item for item in optional_privacy["body"] if item.get("id") == "privacy_confirmation"
+        )
+        privacy["attributes"]["options"][0]["required"] = False
+        self.assertIn(
+            "checkbox-required:privacy_confirmation",
+            issue_form_errors(
+                optional_privacy,
+                ISSUE_FORM_FIELDS["source-request"],
+                ISSUE_FORM_POLICY_LINKS["source-request"],
+            ),
+        )
+
+    def test_issue_chooser_disables_blank_issues_and_no_funding_is_solicited(self):
+        self.assertTrue(ISSUE_CHOOSER_CONFIG.is_file(), ".github/ISSUE_TEMPLATE/config.yml is missing")
+        config = load_strict_yaml(ISSUE_CHOOSER_CONFIG.read_text(encoding="utf-8"))
+        self.assertEqual(config, {"blank_issues_enabled": False})
+        self.assertFalse((ROOT / ".github" / "FUNDING.yml").exists())
+
+    def test_dependabot_has_two_bounded_weekly_public_ecosystems(self):
+        self.assertTrue(DEPENDABOT_CONFIG.is_file(), ".github/dependabot.yml is missing")
+        document = load_strict_yaml(DEPENDABOT_CONFIG.read_text(encoding="utf-8"))
+        self.assertEqual(dependabot_errors(document), [])
+
+    def test_dependabot_mutations_reject_credentials_unbounded_or_disabled_updates(self):
+        document = load_strict_yaml(DEPENDABOT_CONFIG.read_text(encoding="utf-8"))
+
+        credentials = copy.deepcopy(document)
+        credentials["registries"] = {"private": {"token": "redacted-placeholder"}}
+        self.assertIn("top-level-shape", dependabot_errors(credentials))
+
+        unlimited = copy.deepcopy(document)
+        unlimited["updates"][0]["open-pull-requests-limit"] = 100
+        self.assertIn("pull-request-limit:pip", dependabot_errors(unlimited))
+
+        disabled = copy.deepcopy(document)
+        disabled["updates"][1]["open-pull-requests-limit"] = 0
+        self.assertIn("pull-request-limit:github-actions", dependabot_errors(disabled))
+
+        daily = copy.deepcopy(document)
+        daily["updates"][0]["schedule"]["interval"] = "daily"
+        self.assertIn("schedule:pip", dependabot_errors(daily))
+
+    def test_pull_request_template_is_an_unchecked_complete_compliance_gate(self):
+        self.assertTrue(PR_TEMPLATE.is_file(), ".github/pull_request_template.md is missing")
+        text = PR_TEMPLATE.read_text(encoding="utf-8")
+        self.assertEqual(pr_template_errors(text), [])
+
+        checked = text.replace("- [ ]", "- [x]", 1)
+        self.assertIn("prechecked-item", pr_template_errors(checked))
+        missing_gate = "\n".join(
+            line for line in text.splitlines() if "release_check.py" not in line
+        )
+        self.assertIn("release-scans", pr_template_errors(missing_gate))
+
+    def test_template_yaml_parser_rejects_malformed_and_duplicate_mappings(self):
+        with self.assertRaises(ValueError):
+            load_strict_yaml("name: 'unterminated\n")
+        with self.assertRaises(ValueError):
+            load_strict_yaml("name: first\nname: second\n")
 
 
 if __name__ == "__main__":

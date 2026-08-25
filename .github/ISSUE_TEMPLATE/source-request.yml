@@ -1,0 +1,80 @@
+name: "新增来源请求"
+description: "建议评估新的公开来源，并说明来源、许可和再分发权利。"
+title: "[来源请求] "
+labels:
+  - source-request
+body:
+  - type: markdown
+    attributes:
+      value: |
+        来源公开可访问不代表可以复制或再分发。请按[数据来源与再分发政策](../../DATA_SOURCES.md)提供最小、可核验的来源与权利说明。
+
+        不要填写或附加学生真实姓名、手机号、身份证号、精确住址、私人报告、来源附件或任何私密访问凭证。
+  - type: input
+    id: origin_url
+    attributes:
+      label: "原始来源网址"
+      description: "填写发布主体控制的公开原始网址，不要填写带凭证或个人查询参数的网址。"
+      placeholder: "https://example.test/original-source"
+    validations:
+      required: true
+  - type: input
+    id: publisher
+    attributes:
+      label: "发布主体"
+      description: "填写可从来源页面核验的机构或发布者名称。"
+      placeholder: "例如：公开发布机构"
+    validations:
+      required: true
+  - type: input
+    id: applicable_year
+    attributes:
+      label: "适用年份"
+      description: "填写建议来源中事实对应的招生或考试年份。"
+      placeholder: "例如：2026"
+    validations:
+      required: true
+  - type: textarea
+    id: source_scope
+    attributes:
+      label: "来源内容与覆盖范围"
+      description: "说明来源包含哪些最小事实、地区、批次或科目范围，不要复制正文或表格。"
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: rights_basis
+    attributes:
+      label: "权利依据"
+      description: "说明你为何有权建议保存或处理这些内容，并指出权利人或发布主体。"
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: license_terms
+    attributes:
+      label: "许可证或来源条款"
+      description: "概述可核验的许可证、使用条款、署名要求、地域或期限限制。"
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: redistribution_notes
+    attributes:
+      label: "再分发说明"
+      description: "明确区分可提交的 URL、最小结构化事实、哈希与可否再分发原始快照。"
+      render: text
+    validations:
+      required: true
+  - type: checkboxes
+    id: privacy_confirmation
+    attributes:
+      label: "公开信息确认"
+      description: "提交前请确认内容满足隐私、许可和最小化边界。"
+      options:
+        - label: "我确认没有填写或附加学生真实姓名、手机号、身份证号、精确住址、私人报告、来源附件或访问凭证。"
+          required: true
+        - label: "我确认已如实说明许可证、来源条款和再分发边界，没有把公开访问等同于再分发许可。"
+          required: true
+    validations:
+      required: true
