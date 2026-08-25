@@ -64,7 +64,10 @@ _RULES: tuple[tuple[str, str, re.Pattern[str]], ...] = (
     (
         "student_pii",
         "student-address-label",
-        re.compile(r"(?:学生|考生|家庭|居住|通讯)?(?:住址|地址)\s*[:：=]\s*[^\r\n]{2,100}"),
+        re.compile(
+            r"(?:(?:学生|考生|家庭|居住|通讯)(?:住址|地址)|(?<![\u4e00-\u9fff])住址)"
+            r"\s*[:：=]\s*[^\r\n]{2,100}"
+        ),
     ),
     (
         "phone",
@@ -141,8 +144,10 @@ _EDUCATIONAL_PRICE_CONTEXT_RE = re.compile(
     r"(?:学费|住宿费|教材费|奖学金|助学金|助学贷款|困难补助|生活补助|补贴|资助)"
 )
 _COMMERCIAL_PRICE_CONTEXT_RE = re.compile(
-    r"(?:产品|服务|课程|套餐|会员|咨询|报价|原价|现价|优惠|购买|下单|报名|私聊|微信)"
+    r"(?:(?:产品|服务|课程|咨询|套餐|会员)(?:售价|报价|价格|收费)|"
+    r"售价|报价|原价|现价|优惠价|购买价|立即购买|下单|扫码咨询|购买咨询|报名优惠|私聊)"
 )
+_PRICE_CLAUSE_BOUNDARIES = frozenset("。；;，,！？!?\n\r")
 
 
 class PolicyError(ValueError):
@@ -472,10 +477,15 @@ def scan_text(
             matches.extend((kind, rule_id, match) for match in regex.finditer(line))
         for regex in PRICE_RES:
             for match in regex.finditer(line):
-                local_context = line[max(0, match.start() - 32) : match.end() + 8]
-                if (
-                    _EDUCATIONAL_PRICE_CONTEXT_RE.search(local_context)
-                    and not _COMMERCIAL_PRICE_CONTEXT_RE.search(line)
+                clause_start = max(
+                    (index + 1 for index, character in enumerate(line[: match.start()]) if character in _PRICE_CLAUSE_BOUNDARIES),
+                    default=0,
+                )
+                prefix = line[clause_start : match.start()]
+                educational = list(_EDUCATIONAL_PRICE_CONTEXT_RE.finditer(prefix))
+                commercial = list(_COMMERCIAL_PRICE_CONTEXT_RE.finditer(prefix))
+                if educational and (
+                    not commercial or educational[-1].end() > commercial[-1].end()
                 ):
                     continue
                 matches.append(("pricing_or_sales", "price-expression", match))

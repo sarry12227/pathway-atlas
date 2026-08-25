@@ -61,7 +61,7 @@
     {
       "path": "scripts/compliance_scan.py",
       "kinds": ["absolute_local_path", "pricing_or_sales"],
-      "file_sha256": "8fbcaca90eaaac27c930018b2d3a419d47080f7bc7f4f17a8d49768ef094df5b",
+      "file_sha256": "c3be49ae740eddd07923d369c4311576802cb6ba10879a84f0118b6cf3a4fbc9",
       "reason": "scanner rule literal"
     },
     {
@@ -85,7 +85,7 @@
     {
       "path": "tests/test_compliance_scan.py",
       "kinds": ["absolute_local_path", "identity_number", "phone", "pricing_or_sales", "private_system_reference", "secret", "student_pii"],
-      "file_sha256": "e8937241182605cb60bb4f46325786bbeb3fc02e47f9df35a478c267805c262c",
+      "file_sha256": "ad425ce2a9319475664f839a2c383463c5d030ff6aa25fdbca5dbab631b10570",
       "reason": "synthetic negative fixture"
     },
     {
@@ -96,8 +96,8 @@
     },
     {
       "path": "tests/test_docx_semantic_parity.py",
-      "kinds": ["absolute_local_path", "phone"],
-      "file_sha256": "259475cd301216d89b0c6cc1b97c1bd5029eb786cd608b07224c2f6c31b71b36",
+      "kinds": ["absolute_local_path", "phone", "pricing_or_sales"],
+      "file_sha256": "e1bf6162a86da58ece3b91cd3fc60cc8ffdc79acc030ba3016a61b4c953f42ab",
       "reason": "synthetic negative fixture"
     },
     {
@@ -114,8 +114,8 @@
     },
     {
       "path": "tests/test_generate_report_evidence.py",
-      "kinds": ["absolute_local_path", "phone", "student_pii"],
-      "file_sha256": "964665081e0f38dc6660c0148945ed3924bada601e724fe6c7e648092877d871",
+      "kinds": ["absolute_local_path", "phone", "pricing_or_sales", "student_pii"],
+      "file_sha256": "3b8010cb3b033e507a92496006ba64e69f2ab81cfb5c2c006652bf4cdd11b97f",
       "reason": "synthetic negative fixture"
     },
     {
@@ -145,7 +145,7 @@
     {
       "path": "tests/test_release_check.py",
       "kinds": ["absolute_local_path", "secret"],
-      "file_sha256": "c5a9ea2fdcdd6a7c8f525cb4cbed62ee13160176d092d36209a19880c230444b",
+      "file_sha256": "68982b4a845541d144147134725069139093638d6946cd88830a0d6d4f38bc1f",
       "reason": "synthetic negative fixture"
     },
     {

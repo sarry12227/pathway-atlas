@@ -654,6 +654,30 @@ class EvidenceReportModelTest(unittest.TestCase):
 
 
 class EvidenceReportCliTest(unittest.TestCase):
+    def test_markdown_gate_uses_shared_semantics_and_never_echoes_rejected_amount(self):
+        safe = "武汉大学学费 30000元；国家助学金 6000元\n"
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with mock.patch.object(report_cli, "render_markdown", return_value=safe), mock.patch(
+            "sys.stdout", stdout
+        ), mock.patch("sys.stderr", stderr):
+            safe_code = report_cli.main(self.command()[2:])
+
+        rejected_amount = "30600元"
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with mock.patch.object(
+            report_cli,
+            "render_markdown",
+            return_value=f"升学规划产品售价 {rejected_amount}\n",
+        ), mock.patch("sys.stdout", stdout), mock.patch("sys.stderr", stderr):
+            rejected_code = report_cli.main(self.command()[2:])
+
+        self.assertEqual(safe_code, 0, stderr.getvalue())
+        self.assertEqual(rejected_code, 2)
+        self.assertNotIn(rejected_amount, stderr.getvalue())
+        self.assertIn("REPORT_002", stderr.getvalue())
+
     def test_markdown_cli_masks_publication_oserror_without_path_or_pii(self):
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(temporary) / "student-13800138000.md"

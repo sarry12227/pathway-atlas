@@ -65,6 +65,26 @@ def xml_part(path: Path, name: str):
 
 
 class DocxSemanticParityTest(unittest.TestCase):
+    def test_docx_gate_uses_shared_semantics_and_exception_never_echoes_amount(self):
+        safe = "武汉大学学费 30000元；国家助学金 6000元"
+        rejected_amount = "30600元"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with mock.patch.object(docx_export, "_document_text", return_value=safe):
+                output = docx_export.export_docx(model(), root / "safe.docx")
+            self.assertTrue(output.is_file())
+
+            with mock.patch.object(
+                docx_export,
+                "_document_text",
+                return_value=f"升学规划产品售价 {rejected_amount}",
+            ):
+                with self.assertRaises(docx_export.DocumentComplianceError) as captured:
+                    docx_export.export_docx(model(), root / "rejected.docx")
+            self.assertFalse((root / "rejected.docx").exists())
+
+        self.assertNotIn(rejected_amount, str(captured.exception))
+
     def test_task3_inside_coverage_partial_result_has_markdown_docx_parity(self):
         report = model(recommendations=partial_task3_recommendations())
         markdown = render_markdown(report)

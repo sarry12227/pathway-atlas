@@ -65,6 +65,7 @@ _SENSITIVE_BASENAMES = frozenset(
     }
 )
 _SENSITIVE_PREFIXES = ("private/", "reports/", "output/", "data/", "work/", "evidence/raw-downloads/")
+_BENIGN_IGNORED_COMPONENTS = frozenset({".superpowers", ".venv", "__pycache__", "node_modules"})
 _REQUIRED_COMMUNITY = (
     "LICENSE",
     "CONTRIBUTING.md",
@@ -288,9 +289,27 @@ def check_untracked_sensitive_paths(
     *,
     root: Path | None = None,
     policy: ReleasePolicy | None = None,
+    ignored_paths: Sequence[str] = (),
 ) -> CheckResult:
     details: list[str] = []
-    for raw in paths:
+    ignored_identities = {_path_identity(path.replace("\\", "/")) for path in ignored_paths}
+    ordinary_set = set(paths)
+    combined = tuple(paths) + tuple(path for path in ignored_paths if path not in ordinary_set)
+    for raw in combined:
+        normalized_raw = raw.replace("\\", "/")
+        ignored = _path_identity(normalized_raw) in ignored_identities
+        raw_parts = PurePosixPath(normalized_raw).parts
+        raw_basename = PurePosixPath(normalized_raw).name.casefold()
+        high_risk_ignored_name = (
+            raw_basename in _SENSITIVE_BASENAMES
+            or raw_basename.startswith(".env.")
+        )
+        benign_ignored = any(
+            part.casefold() in _BENIGN_IGNORED_COMPONENTS or part.casefold().endswith(".egg-info")
+            for part in raw_parts
+        ) or (policy is not None and _is_under(normalized_raw, policy.ci_generated_paths))
+        if ignored and benign_ignored and not high_risk_ignored_name:
+            continue
         canonical = _canonical_repo_path(raw)
         if canonical is None:
             details.append("untracked-noncanonical-path")
@@ -353,7 +372,21 @@ def check_untracked_sensitive_paths(
             f"kind={finding.kind};rule={finding.rule_id};line={finding.line};path={_safe_relative(canonical)}"
             for finding in scan_text(text)
         )
-    return CheckResult("untracked_sensitive", not details, tuple(details), len(details))
+    bounded = tuple(details[:200])
+    if len(details) > 200:
+        bounded += ("sensitive-untracked-output-truncated",)
+    return CheckResult("untracked_sensitive", not details, bounded, len(details))
+
+
+def _git_untracked_inventory(root: Path) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Return ordinary and ignored untracked files from isolated Git queries."""
+
+    ordinary = git_paths(root, ("ls-files", "--others", "--exclude-standard", "-z", "--"))
+    ignored = git_paths(
+        root,
+        ("ls-files", "--others", "--ignored", "--exclude-standard", "-z", "--"),
+    )
+    return ordinary, ignored
 
 
 def _strict_json(path: Path) -> object:
@@ -562,12 +595,15 @@ def blocked(*args, **kwargs):
     attempts += 1
     raise NetworkBlocked("offline-network-blocked")
 OriginalSocket = socket.socket
+sendmsg_available = hasattr(OriginalSocket, "sendmsg")
 class GuardedSocket(OriginalSocket):
     connect = blocked
     connect_ex = blocked
     send = blocked
     sendall = blocked
     sendto = blocked
+if sendmsg_available:
+    GuardedSocket.sendmsg = blocked
 socket.socket = GuardedSocket
 socket.create_connection = blocked
 socket.getaddrinfo = blocked
@@ -595,6 +631,8 @@ canaries = {
     "http-urlopen": lambda: urllib.request.urlopen("http://invalid.test/"),
     "http-request": lambda: http.client.HTTPConnection("invalid.test").request("GET", "/"),
 }
+if sendmsg_available:
+    canaries["sendmsg"] = lambda: GuardedSocket().sendmsg([b"x"])
 armed = []
 for name, canary in canaries.items():
     try: canary()
@@ -604,6 +642,7 @@ suite = unittest.defaultTestLoader.loadTestsFromNames(modules)
 loaded = suite.countTestCases()
 result = unittest.TextTestRunner(stream=io.StringIO(), verbosity=0).run(suite)
 print(json.dumps({"armed": sorted(armed), "attempts": attempts, "requested": len(modules),
+                  "sendmsg_available": sendmsg_available,
                   "loaded": loaded, "run": result.testsRun, "skipped": len(result.skipped),
                   "failures": len(result.failures), "errors": len(result.errors)}, sort_keys=True))
 '''
@@ -701,8 +740,11 @@ def _check_deterministic_boundaries(context: ReleaseContext, policy: ReleasePoli
         "http-request",
     }
     valid_shape = payload is not None and set(payload) == {
-        "armed", "attempts", "requested", "loaded", "run", "skipped", "failures", "errors"
+        "armed", "attempts", "requested", "sendmsg_available", "loaded", "run", "skipped", "failures", "errors"
     }
+    sendmsg_available = bool(valid_shape and payload["sendmsg_available"] is True)
+    if sendmsg_available:
+        required.add("sendmsg")
     ok = bool(
         valid_shape
         and set(payload["armed"]) == required
@@ -722,7 +764,10 @@ def _check_deterministic_boundaries(context: ReleaseContext, policy: ReleasePoli
     return CheckResult(
         "deterministic_boundaries",
         True,
-        (f"armed=13;attempts=0;run={payload['run']};skipped={payload['skipped']}",),
+        (
+            f"armed={len(required)};sendmsg={'armed' if sendmsg_available else 'unavailable'};"
+            f"attempts=0;run={payload['run']};skipped={payload['skipped']}",
+        ),
         int(payload["run"]),
     )
 
@@ -793,10 +838,16 @@ def evaluate_release(context: ReleaseContext) -> ReleaseReport:
         tracked = ()
         tracked_inventory_result = CheckResult("tracked_inventory", False, ("git-index-inventory-failed",), 1)
     try:
-        untracked = git_paths(root, ("ls-files", "--others", "--exclude-standard", "-z", "--"))
-        untracked_inventory_result = CheckResult("untracked_inventory", True, count=len(untracked))
+        untracked, ignored_untracked = _git_untracked_inventory(root)
+        untracked_inventory_result = CheckResult(
+            "untracked_inventory",
+            True,
+            (f"ordinary={len(untracked)};ignored={len(ignored_untracked)}",),
+            len(untracked) + len(ignored_untracked),
+        )
     except RuntimeError:
         untracked = ()
+        ignored_untracked = ()
         untracked_inventory_result = CheckResult("untracked_inventory", False, ("git-untracked-inventory-failed",), 1)
 
     scan_result = _safe_run(
@@ -824,7 +875,12 @@ def evaluate_release(context: ReleaseContext) -> ReleaseReport:
             "clean_worktree",
             lambda: _check_clean_worktree(root, context.ci, policy.ci_generated_paths),
         ),
-        check_untracked_sensitive_paths(untracked, root=root, policy=policy),
+        check_untracked_sensitive_paths(
+            untracked,
+            root=root,
+            policy=policy,
+            ignored_paths=ignored_untracked,
+        ),
         _safe_run("province_catalog", lambda: check_province_catalog(root)),
         _safe_run("markdown_links", lambda: check_markdown_links(root, markdown)),
         _safe_run("deterministic_boundaries", lambda: _check_deterministic_boundaries(context, policy)),

@@ -2,6 +2,7 @@ import contextlib
 import io
 import json
 import os
+import socket
 import subprocess
 import tempfile
 import unittest
@@ -9,6 +10,7 @@ from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
+from scripts import release_check as release_gate
 from scripts.release_check import (
     CheckResult,
     ReleaseContext,
@@ -157,6 +159,34 @@ class ReleaseComponentTest(unittest.TestCase):
         self.assertNotIn(secret, serialized)
         self.assertIn("rule=github-token", serialized)
 
+    def test_ignored_inventory_scans_sensitive_files_without_flagging_benign_cache(self) -> None:
+        secret = "ghp_abcdefghijklmnopqrstuvwxyz123456"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            subprocess.run(["git", "init", "--quiet"], cwd=root, check=True)
+            (root / ".gitignore").write_text(".env\nignored-notes.txt\n.venv/\n", encoding="utf-8")
+            subprocess.run(["git", "add", "--", ".gitignore"], cwd=root, check=True)
+            (root / ".env").write_text(f"token={secret}", encoding="utf-8")
+            (root / "ignored-notes.txt").write_text(f"token={secret}", encoding="utf-8")
+            (root / ".venv").mkdir()
+            (root / ".venv" / "cache.pyc").write_bytes(b"\x00benign-cache")
+
+            ordinary, ignored = release_gate._git_untracked_inventory(root)
+            result = check_untracked_sensitive_paths(
+                ordinary,
+                root=root,
+                policy=load_policy(ROOT / "release-policy.json"),
+                ignored_paths=ignored,
+            )
+
+        serialized = json.dumps(result.to_dict())
+        self.assertFalse(result.ok)
+        self.assertEqual(result.count, 5)
+        self.assertIn("rule=sensitive-name", serialized)
+        self.assertIn("rule=github-token", serialized)
+        self.assertNotIn(secret, serialized)
+        self.assertNotIn("cache.pyc", serialized)
+
     def test_ci_cleanliness_exempts_only_declared_generated_paths(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -207,7 +237,12 @@ class ReleaseComponentTest(unittest.TestCase):
             result = _check_deterministic_boundaries(context, policy)
 
         self.assertTrue(result.ok, result.details)
-        self.assertEqual(result.details, ("armed=13;attempts=0;run=1;skipped=0",))
+        sendmsg = "armed" if hasattr(socket.socket, "sendmsg") else "unavailable"
+        armed = 14 if sendmsg == "armed" else 13
+        self.assertEqual(
+            result.details,
+            (f"armed={armed};sendmsg={sendmsg};attempts=0;run=1;skipped=0",),
+        )
 
     def test_offline_gate_rejects_any_network_attempt_without_leaking_endpoint(self) -> None:
         endpoint = "private-endpoint.invalid"

@@ -9,7 +9,7 @@ import tempfile
 from pathlib import Path
 
 if __package__:
-    from .compliance_scan import find_price_text
+    from .compliance_scan import scan_text
     from .contracts import EvidenceStatus, RecommendationProfile
     from .data_loader import DataError
     from .path_recommend import PathwayProfile, evaluate_pathways
@@ -28,7 +28,7 @@ if __package__:
     )
     from .validate_evidence import validate_bundle_snapshot
 else:
-    from compliance_scan import find_price_text
+    from compliance_scan import scan_text
     from contracts import EvidenceStatus, RecommendationProfile
     from data_loader import DataError
     from path_recommend import PathwayProfile, evaluate_pathways
@@ -515,8 +515,7 @@ def _evidence_main(argv) -> int:
             evidence=evidence,
         )
         markdown = render_markdown(model)
-        hit = find_price_text(markdown)
-        if hit is not None:
+        if scan_text(markdown):
             raise EvidenceReportInputError("报告未通过合规扫描")
         if args.output is not None:
             output = args.output.resolve(strict=False)

@@ -29,10 +29,12 @@ except ImportError:  # Importable without the extra so the CLI can fail clearly.
     OxmlElement = qn = Inches = Pt = RGBColor = None
 
 if __package__:
+    from .compliance_scan import scan_text
     from .contracts import CapabilityTier, EvidenceStatus, RecommendationProfile
     from .path_recommend import evaluate_pathways
     from .report_model import ReportModel, StudentProfile, build_report_model
 else:  # pragma: no cover - direct script execution
+    from compliance_scan import scan_text
     from contracts import CapabilityTier, EvidenceStatus, RecommendationProfile
     from path_recommend import evaluate_pathways
     from report_model import ReportModel, StudentProfile, build_report_model
@@ -629,13 +631,8 @@ def export_docx(model: ReportModel, output=None) -> Path:
     text = _document_text(document)
     if "http://" in text or "https://" in text:
         raise DocumentComplianceError("DOCX must not contain raw URLs")
-    if __package__:
-        from .compliance_scan import find_price_text
-    else:
-        from compliance_scan import find_price_text
-    hit = find_price_text(text)
-    if hit is not None:
-        raise DocumentComplianceError(f"DOCX compliance gate rejected: {hit}")
+    if scan_text(text):
+        raise DocumentComplianceError("DOCX compliance gate rejected")
     _save(document, destination)
     return destination
 

@@ -103,6 +103,11 @@ class ComplianceScanTest(unittest.TestCase):
         self.assertNotIn(posix_path, serialized)
         self.assertNotIn(unc_path, serialized)
 
+    def test_school_and_report_addresses_are_safe_but_bare_residential_address_is_pii(self) -> None:
+        self.assertEqual(scan_text("学校地址：武汉市大学路；报告地址：https://example.test/report"), [])
+        findings = scan_text("住址：湖北省武汉市某路 1 号")
+        self.assertEqual({finding.rule_id for finding in findings}, {"student-address-label"})
+
     def test_legacy_price_helpers_keep_the_public_report_contract(self) -> None:
         self.assertEqual(find_price_text("方案原价 30600元"), "原价 30600")
         self.assertTrue(contains_price_text("现在仅需六万元"))
@@ -111,6 +116,16 @@ class ComplianceScanTest(unittest.TestCase):
     def test_school_tuition_and_student_aid_are_safe_but_product_quotes_are_not(self) -> None:
         self.assertEqual(scan_text("武汉大学学费 30000元；国家助学金 6000元"), [])
         findings = scan_text("咨询服务报价 30000元，立即购买")
+        self.assertEqual({finding.kind for finding in findings}, {"pricing_or_sales"})
+
+    def test_distant_course_or_registration_words_do_not_poison_educational_amounts(self) -> None:
+        safe_controls = (
+            "课程报名请参考招生章程；武汉大学学费 30000元，国家助学金 6000元",
+            "产品售价示例仅作说明，武汉大学学费 30000元",
+        )
+        for safe in safe_controls:
+            self.assertEqual(scan_text(safe), [])
+        findings = scan_text("升学规划课程收费 30000元")
         self.assertEqual({finding.kind for finding in findings}, {"pricing_or_sales"})
 
     def test_exact_allowlist_requires_path_kind_line_hash_and_reason(self) -> None:
