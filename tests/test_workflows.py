@@ -11,7 +11,10 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 CI_WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
+SOURCE_HEALTH_WORKFLOW = ROOT / ".github" / "workflows" / "source-health.yml"
+SOURCE_HEALTH_TEMPLATE = ROOT / ".github" / "ISSUE_TEMPLATE" / "source-health.yml"
 EXPECTED_CONCURRENCY_GROUP = "deterministic-ci-${{ github.workflow }}-${{ github.ref }}"
+EXPECTED_SOURCE_HEALTH_CONCURRENCY_GROUP = "source-health-${{ github.repository }}"
 
 
 class _StrictWorkflowLoader(yaml.SafeLoader):
@@ -161,10 +164,227 @@ def _workflow_errors(document: dict[str, Any]) -> list[str]:
     return errors
 
 
+def _source_health_errors(document: dict[str, Any]) -> list[str]:
+    """Return contract breaks in the non-authoritative live monitor."""
+
+    errors: list[str] = []
+    triggers = document.get("on")
+    if not isinstance(triggers, dict) or set(triggers) != {"schedule", "workflow_dispatch"}:
+        errors.append("triggers")
+    else:
+        schedule = triggers.get("schedule")
+        if (
+            not isinstance(schedule, list)
+            or len(schedule) != 1
+            or schedule[0] != {"cron": "17 3 * * 1"}
+        ):
+            errors.append("weekly-schedule")
+        if triggers.get("workflow_dispatch") is not None:
+            errors.append("manual-dispatch")
+
+    if document.get("permissions") != {"contents": "read", "issues": "write"}:
+        errors.append("permissions")
+
+    concurrency = document.get("concurrency")
+    if not isinstance(concurrency, dict):
+        errors.append("concurrency")
+    else:
+        if concurrency.get("group") != EXPECTED_SOURCE_HEALTH_CONCURRENCY_GROUP:
+            errors.append("concurrency-group")
+        if concurrency.get("cancel-in-progress") is not True:
+            errors.append("concurrency")
+
+    jobs = document.get("jobs")
+    job = jobs.get("monitor") if isinstance(jobs, dict) and set(jobs) == {"monitor"} else None
+    if not isinstance(job, dict):
+        return errors + ["monitor-job"]
+    if "permissions" in job:
+        errors.append("job-permissions")
+    if job.get("runs-on") != "ubuntu-latest":
+        errors.append("runs-on")
+    timeout = job.get("timeout-minutes")
+    if not isinstance(timeout, int) or isinstance(timeout, bool) or not 1 <= timeout <= 15:
+        errors.append("timeout")
+
+    steps = job.get("steps")
+    if not isinstance(steps, list) or not all(isinstance(step, dict) for step in steps):
+        return errors + ["steps"]
+    if any("continue-on-error" in step for step in steps):
+        errors.append("failure-masking")
+
+    actions = [step.get("uses") for step in steps if "uses" in step]
+    if actions != [
+        "actions/checkout@v7",
+        "actions/setup-python@v7",
+        "actions/upload-artifact@v6",
+        "actions/github-script@v8",
+    ]:
+        errors.append("official-actions")
+
+    checkout = next((step for step in steps if step.get("uses") == "actions/checkout@v7"), {})
+    if checkout.get("with") != {"persist-credentials": False}:
+        errors.append("checkout-credentials")
+    setup = next((step for step in steps if step.get("uses") == "actions/setup-python@v7"), {})
+    if setup.get("with") != {"python-version": "3.10"}:
+        errors.append("supported-python")
+
+    run_steps = [step for step in steps if "run" in step]
+    install_steps = [step for step in run_steps if step.get("run") == "python -m pip install -e ."]
+    if len(install_steps) != 1:
+        errors.append("minimal-install")
+    collect_steps = [step for step in run_steps if step.get("id") == "collect"]
+    if len(collect_steps) != 1 or not isinstance(collect_steps[0].get("run"), str):
+        errors.append("collector")
+        collector = ""
+    else:
+        collector = collect_steps[0]["run"]
+
+    required_collector_contract = (
+        "references/provinces/index.json",
+        "len(records) != 29",
+        '"scripts/live_smoke.py"',
+        '"--province"',
+        "subprocess.run",
+        "timeout=10",
+        '"source-health/results.json"',
+    )
+    if (
+        any(token not in collector for token in required_collector_contract)
+        or re.search(r"(?m)^\s*for alias in aliases:\s*$", collector) is None
+    ):
+        errors.append("catalog-coverage")
+    lowered_commands = "\n".join(
+        str(step.get("run", "")) for step in run_steps
+    ).casefold()
+    forbidden_network_or_mutation = (
+        "curl ",
+        "wget ",
+        "invoke-webrequest",
+        "requests.",
+        "urllib.",
+        "httpx.",
+        "aiohttp.",
+        "socket.",
+        "git push",
+        "git commit",
+        "write_text(\"references/provinces/index.json",
+        "scripts/validate_data.py",
+        "scripts/validate_evidence.py",
+        "scripts/release_check.py",
+    )
+    if any(token in lowered_commands for token in forbidden_network_or_mutation):
+        errors.append("unsafe-command")
+    live_entrypoints = re.findall(r"scripts[/\\][A-Za-z0-9_.-]+\.py", lowered_commands)
+    if set(live_entrypoints) != {"scripts/live_smoke.py"}:
+        errors.append("live-entrypoint")
+
+    upload = next(
+        (step for step in steps if step.get("uses") == "actions/upload-artifact@v6"),
+        {},
+    )
+    upload_with = upload.get("with")
+    if not isinstance(upload_with, dict):
+        errors.append("artifact")
+    else:
+        artifact_path = upload_with.get("path")
+        if (
+            upload_with.get("name") != "source-health-${{ github.run_id }}"
+            or artifact_path != "source-health/results.json"
+            or upload_with.get("if-no-files-found") != "error"
+            or upload_with.get("retention-days") != 14
+            or not isinstance(artifact_path, str)
+            or artifact_path.startswith(("/", "\\"))
+            or re.match(r"^[A-Za-z]:", artifact_path)
+        ):
+            errors.append("artifact")
+
+    issue_step = next(
+        (step for step in steps if step.get("uses") == "actions/github-script@v8"),
+        {},
+    )
+    issue_with = issue_step.get("with")
+    issue_script = issue_with.get("script") if isinstance(issue_with, dict) else None
+    if not isinstance(issue_script, str):
+        errors.append("issue-gating")
+    else:
+        required_issue_contract = (
+            'status === "redirect_review"',
+            'status === "unavailable"',
+            "priorBody.includes(unavailableMarker(result.province))",
+            "if (review.length === 0)",
+            "first unavailable observations remain in the artifact only",
+            "review.map(statusMarker)",
+            "matching.length > 1",
+            "github.rest.issues.create",
+            "github.rest.issues.update",
+            'labels: [label]',
+        )
+        if any(token not in issue_script for token in required_issue_contract):
+            errors.append("issue-gating")
+        gate_position = issue_script.find("if (review.length === 0)")
+        mutation_positions = [
+            issue_script.find("github.rest.issues.create"),
+            issue_script.find("github.rest.issues.update"),
+        ]
+        if gate_position < 0 or any(position <= gate_position for position in mutation_positions):
+            errors.append("issue-gating")
+        forbidden_payload_fields = (
+            "result.requested_domain",
+            "result.final_domain",
+            "result.redirect_domains",
+            "result.content_type",
+            "result.size_bytes",
+            "http://",
+            "https://",
+        )
+        if any(token in issue_script for token in forbidden_payload_fields):
+            errors.append("unsafe-issue-payload")
+    return errors
+
+
+def _source_health_template_errors(document: dict[str, Any]) -> list[str]:
+    errors: list[str] = []
+    if set(document) != {"name", "description", "title", "labels", "body"}:
+        errors.append("template-shape")
+    if document.get("labels") != ["source-health"]:
+        errors.append("template-label")
+    if document.get("title") != "[source-health] Manual official-root review":
+        errors.append("template-title")
+    body = document.get("body")
+    if not isinstance(body, list) or not all(isinstance(item, dict) for item in body):
+        return errors + ["template-body"]
+    rendered = str(document).casefold()
+    for phrase in (
+        "non-authoritative",
+        "manually verify",
+        "personal student data",
+        "must not update catalog facts",
+        "must not be used as evidence or release approval",
+    ):
+        if phrase not in rendered:
+            errors.append("template-safety-notice")
+            break
+    return errors
+
+
 class WorkflowTest(unittest.TestCase):
     def load_ci(self) -> dict[str, Any]:
         self.assertTrue(CI_WORKFLOW.is_file(), ".github/workflows/ci.yml is missing")
         return _load_yaml_subset(CI_WORKFLOW.read_text(encoding="utf-8"))
+
+    def load_source_health(self) -> dict[str, Any]:
+        self.assertTrue(
+            SOURCE_HEALTH_WORKFLOW.is_file(),
+            ".github/workflows/source-health.yml is missing",
+        )
+        return _load_yaml_subset(SOURCE_HEALTH_WORKFLOW.read_text(encoding="utf-8"))
+
+    def load_source_health_template(self) -> dict[str, Any]:
+        self.assertTrue(
+            SOURCE_HEALTH_TEMPLATE.is_file(),
+            ".github/ISSUE_TEMPLATE/source-health.yml is missing",
+        )
+        return _load_yaml_subset(SOURCE_HEALTH_TEMPLATE.read_text(encoding="utf-8"))
 
     def test_ci_is_parseable_and_has_no_contract_errors(self) -> None:
         self.assertEqual(_workflow_errors(self.load_ci()), [])
@@ -297,6 +517,93 @@ class WorkflowTest(unittest.TestCase):
         cmd_shell = copy.deepcopy(ci)
         cmd_shell["jobs"]["test"]["steps"][2]["shell"] = "cmd"
         self.assertIn("portable-shell", _workflow_errors(cmd_shell))
+
+    def test_source_health_workflow_and_issue_template_are_strict_and_safe(self) -> None:
+        self.assertEqual(_source_health_errors(self.load_source_health()), [])
+        self.assertEqual(
+            _source_health_template_errors(self.load_source_health_template()),
+            [],
+        )
+
+    def test_source_health_schedule_permission_timeout_and_concurrency_mutations_fail(self) -> None:
+        workflow = self.load_source_health()
+        mutations = (
+            ("triggers", lambda item: item["on"].pop("workflow_dispatch")),
+            ("weekly-schedule", lambda item: item["on"]["schedule"][0].update(cron="* * * * *")),
+            ("permissions", lambda item: item["permissions"].update(contents="write")),
+            ("timeout", lambda item: item["jobs"]["monitor"].update({"timeout-minutes": 16})),
+            ("concurrency-group", lambda item: item["concurrency"].update(group="fixed")),
+            ("concurrency", lambda item: item["concurrency"].update({"cancel-in-progress": False})),
+        )
+        for expected, mutate in mutations:
+            with self.subTest(expected=expected):
+                changed = copy.deepcopy(workflow)
+                mutate(changed)
+                self.assertIn(expected, _source_health_errors(changed))
+
+    def test_source_health_execution_and_artifact_mutations_fail_closed(self) -> None:
+        workflow = self.load_source_health()
+        steps = workflow["jobs"]["monitor"]["steps"]
+
+        credentials = copy.deepcopy(workflow)
+        credentials["jobs"]["monitor"]["steps"][0]["with"]["persist-credentials"] = True
+        self.assertIn("checkout-credentials", _source_health_errors(credentials))
+
+        masked = copy.deepcopy(workflow)
+        masked["jobs"]["monitor"]["steps"][2]["continue-on-error"] = True
+        self.assertIn("failure-masking", _source_health_errors(masked))
+
+        direct_network = copy.deepcopy(workflow)
+        direct_network["jobs"]["monitor"]["steps"].insert(3, {"run": "curl example.invalid"})
+        self.assertIn("unsafe-command", _source_health_errors(direct_network))
+
+        incomplete_catalog = copy.deepcopy(workflow)
+        collector = next(
+            step for step in incomplete_catalog["jobs"]["monitor"]["steps"]
+            if step.get("id") == "collect"
+        )
+        collector["run"] = collector["run"].replace("for alias in aliases", "for alias in aliases[:1]")
+        self.assertIn("catalog-coverage", _source_health_errors(incomplete_catalog))
+
+        absolute_artifact = copy.deepcopy(workflow)
+        upload = next(
+            step for step in absolute_artifact["jobs"]["monitor"]["steps"]
+            if step.get("uses") == "actions/upload-artifact@v6"
+        )
+        upload["with"]["path"] = "/tmp/results.json"
+        self.assertIn("artifact", _source_health_errors(absolute_artifact))
+
+        self.assertEqual(len(steps), 6)
+
+    def test_source_health_issue_gating_and_template_notice_mutations_fail_closed(self) -> None:
+        workflow = self.load_source_health()
+        ungated = copy.deepcopy(workflow)
+        issue_step = next(
+            step for step in ungated["jobs"]["monitor"]["steps"]
+            if step.get("uses") == "actions/github-script@v8"
+        )
+        issue_step["with"]["script"] = issue_step["with"]["script"].replace(
+            "if (review.length === 0)",
+            "if (false)",
+        )
+        self.assertIn("issue-gating", _source_health_errors(ungated))
+
+        leaked_domain = copy.deepcopy(workflow)
+        issue_step = next(
+            step for step in leaked_domain["jobs"]["monitor"]["steps"]
+            if step.get("uses") == "actions/github-script@v8"
+        )
+        issue_step["with"]["script"] += "\ncore.info(result.requested_domain);"
+        self.assertIn("unsafe-issue-payload", _source_health_errors(leaked_domain))
+
+        template = self.load_source_health_template()
+        unsafe_template = copy.deepcopy(template)
+        unsafe_template["body"] = []
+        self.assertIn("template-safety-notice", _source_health_template_errors(unsafe_template))
+
+        divergent_title = copy.deepcopy(template)
+        divergent_title["title"] = "[source-health] Another thread"
+        self.assertIn("template-title", _source_health_template_errors(divergent_title))
 
 
 if __name__ == "__main__":

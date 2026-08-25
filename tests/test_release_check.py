@@ -384,9 +384,28 @@ class ReleaseEvaluationTest(unittest.TestCase):
             "missing-or-untracked:.github/workflows/ci.yml",
             by_name["future_release_artifacts"].details,
         )
-        self.assertIn(
+        self.assertNotIn(
             "missing-or-untracked:.github/workflows/source-health.yml",
             by_name["future_release_artifacts"].details,
+        )
+        self.assertNotIn(
+            "missing-or-untracked:.github/ISSUE_TEMPLATE/source-health.yml",
+            by_name["future_release_artifacts"].details,
+        )
+        self.assertEqual(
+            by_name["future_release_artifacts"].details,
+            (
+                "missing-or-untracked:.github/ISSUE_TEMPLATE/config.yml",
+                "missing-or-untracked:.github/ISSUE_TEMPLATE/bug.yml",
+                "missing-or-untracked:.github/ISSUE_TEMPLATE/data-correction.yml",
+                "missing-or-untracked:.github/ISSUE_TEMPLATE/source-request.yml",
+                "missing-or-untracked:.github/pull_request_template.md",
+                "missing-or-untracked:.github/dependabot.yml",
+                "missing-or-untracked:.github/workflows/release.yml",
+                "missing-or-untracked:scripts/build_release.py",
+                "missing-or-untracked:tests/test_build_release.py",
+                "missing-or-untracked:docs/release-process.md",
+            ),
         )
         serialized = json.dumps(report.to_dict(), ensure_ascii=False)
         self.assertNotIn(str(ROOT), serialized)

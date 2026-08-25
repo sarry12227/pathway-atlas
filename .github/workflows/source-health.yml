@@ -1,0 +1,235 @@
+name: Official source health
+
+on:
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: source-health-${{ github.repository }}
+  cancel-in-progress: true
+
+jobs:
+  monitor:
+    name: Bounded official-root telemetry
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository without write credentials
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Set up supported Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.10"
+      - name: Install core package only
+        run: python -m pip install -e .
+      - name: Collect bounded path-neutral health results
+        id: collect
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          import subprocess
+          import sys
+          from pathlib import Path
+
+          catalog_path = Path("references/provinces/index.json")
+          try:
+              catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
+              records = catalog["provinces"]
+          except (OSError, UnicodeError, json.JSONDecodeError, KeyError, TypeError) as error:
+              raise SystemExit("invalid province catalog") from error
+          if not isinstance(records, list) or len(records) != 29:
+              raise SystemExit("province catalog coverage changed")
+
+          results = []
+          seen_aliases = set()
+          for record in records:
+              if not isinstance(record, dict):
+                  raise SystemExit("invalid province record")
+              province = record.get("province")
+              aliases = record.get("aliases")
+              if (
+                  not isinstance(province, str)
+                  or not province
+                  or not isinstance(aliases, list)
+                  or not aliases
+                  or not all(isinstance(alias, str) and alias for alias in aliases)
+              ):
+                  raise SystemExit("invalid province aliases")
+              for alias in aliases:
+                  if alias in seen_aliases:
+                      raise SystemExit("duplicate province alias")
+                  seen_aliases.add(alias)
+                  try:
+                      completed = subprocess.run(
+                          [sys.executable, "scripts/live_smoke.py", "--province", alias],
+                          check=False,
+                          capture_output=True,
+                          text=True,
+                          encoding="utf-8",
+                          errors="strict",
+                          timeout=10,
+                      )
+                  except (OSError, UnicodeError, subprocess.TimeoutExpired) as error:
+                      raise SystemExit("live smoke invocation failed") from error
+                  if completed.returncode != 0 or completed.stderr:
+                      raise SystemExit("live smoke invocation failed")
+                  try:
+                      result = json.loads(completed.stdout)
+                  except (json.JSONDecodeError, TypeError) as error:
+                      raise SystemExit("invalid live smoke result") from error
+                  if (
+                      not isinstance(result, dict)
+                      or result.get("province") != province
+                      or result.get("status") not in {"healthy", "redirect_review", "unavailable"}
+                  ):
+                      raise SystemExit("invalid live smoke result")
+                  results.append(result)
+
+          artifact = Path("source-health/results.json")
+          artifact.parent.mkdir(exist_ok=False)
+          artifact.write_text(
+              json.dumps(
+                  {"schema_version": "1.0", "results": results},
+                  ensure_ascii=False,
+                  sort_keys=True,
+                  separators=(",", ":"),
+              ) + "\n",
+              encoding="utf-8",
+          )
+          PY
+      - name: Retain health telemetry for manual review
+        uses: actions/upload-artifact@v6
+        with:
+          name: source-health-${{ github.run_id }}
+          path: source-health/results.json
+          if-no-files-found: error
+          retention-days: 14
+      - name: Create or update the single manual-review issue when gated
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const fs = require("fs");
+            const payload = JSON.parse(fs.readFileSync("source-health/results.json", "utf8"));
+            if (payload.schema_version !== "1.0" || !Array.isArray(payload.results)) {
+              throw new Error("invalid source-health artifact");
+            }
+
+            const allowedReasons = new Set([
+              "timeout",
+              "dns_or_network",
+              "http_error",
+              "redirect_error",
+              "unsupported_content_type",
+              "response_too_large",
+              "security_rejection",
+              "storage_error",
+              "unlisted_redirect_domain",
+            ]);
+            const provincePattern = /^\p{Script=Han}{2,8}$/u;
+            for (const result of payload.results) {
+              if (
+                !result
+                || !provincePattern.test(result.province)
+                || !["healthy", "redirect_review", "unavailable"].includes(result.status)
+                || (result.reason_code !== null && !allowedReasons.has(result.reason_code))
+              ) {
+                throw new Error("unsafe source-health result");
+              }
+            }
+
+            const label = "source-health";
+            const title = "[source-health] Manual official-root review";
+            const unavailableMarker = province => `<!-- source-health:unavailable:${province} -->`;
+            const statusMarker = result => `<!-- source-health:${result.status}:${result.province} -->`;
+            const {data: openIssues} = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: "open",
+              labels: label,
+              per_page: 100,
+            });
+            const matching = openIssues.filter(
+              issue => !issue.pull_request && issue.title === title,
+            );
+            if (matching.length > 1) {
+              throw new Error("multiple source-health issues");
+            }
+            const existing = matching[0];
+            const priorBody = existing?.body || "";
+            const redirects = payload.results.filter(
+              result => result.status === "redirect_review",
+            );
+            const persistentUnavailable = payload.results.filter(
+              result => result.status === "unavailable"
+                && priorBody.includes(unavailableMarker(result.province)),
+            );
+            const review = [...redirects, ...persistentUnavailable];
+            if (review.length === 0) {
+              core.info("No issue update required; first unavailable observations remain in the artifact only.");
+              return;
+            }
+
+            try {
+              await github.rest.issues.getLabel({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                name: label,
+              });
+            } catch (error) {
+              if (error.status !== 404) {
+                throw new Error("source-health label lookup failed");
+              }
+              await github.rest.issues.createLabel({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                name: label,
+                color: "d4c5f9",
+                description: "Manual review of non-authoritative official-root telemetry",
+              });
+            }
+
+            const currentMarkers = [...new Set(
+              review.map(statusMarker),
+            )].sort();
+            const reviewLines = [...new Set(
+              review.map(result => `- ${result.province}: ${result.status}`),
+            )].sort();
+            const body = [
+              "Automated source-health telemetry is non-authoritative.",
+              "Maintainers must manually verify official domains before changing any catalog fact.",
+              "Do not add personal student data, raw URLs, local paths, or copied page content.",
+              "This issue is not evidence, release approval, or authorization to update catalog facts, evidence, or release status.",
+              "",
+              "Review required:",
+              ...reviewLines,
+              "",
+              "Machine-readable persistence markers:",
+              ...currentMarkers,
+            ].join("\n");
+
+            if (existing) {
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existing.number,
+                title,
+                body,
+                labels: [label],
+              });
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title,
+                body,
+                labels: [label],
+              });
+            }
