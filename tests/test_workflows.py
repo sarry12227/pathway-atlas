@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import copy
+import os
 import re
 import shlex
+import subprocess
+import sys
+import tempfile
 import unittest
 from pathlib import Path
 from typing import Any
@@ -519,6 +523,7 @@ def _release_workflow_errors(document: dict[str, Any]) -> list[str]:
             "--output", "$OUTPUT_DIRECTORY",
         ],
         "checksum": ["sha256sum", "--check", "$CHECKSUM_FILE"],
+        "notes": ["python", "scripts/build_release.py", "--extract-notes"],
         "publish": [
             "gh", "release", "create", "$RELEASE_TAG", "$ARCHIVE_PATH", "$CHECKSUM_PATH",
             "--verify-tag", "--title", "$RELEASE_TAG", "--notes-file", "$NOTES_PATH",
@@ -549,6 +554,7 @@ def _release_workflow_errors(document: dict[str, Any]) -> list[str]:
         "checksum": {"CHECKSUM_FILE": "SHA256SUMS"},
         "notes": {
             "RELEASE_VERSION": "${{ steps.metadata.outputs.version }}",
+            "CHANGELOG_PATH": "CHANGELOG.md",
             "NOTES_PATH": "dist/release-notes.md",
         },
         "publish": {
@@ -563,28 +569,6 @@ def _release_workflow_errors(document: dict[str, Any]) -> list[str]:
         if by_id.get(step_id, {}).get("env") != environment:
             errors.append(f"environment-{step_id}")
 
-    notes_command = by_id.get("notes", {}).get("run")
-    if not isinstance(notes_command, str):
-        errors.append("release-notes")
-    else:
-        lines = notes_command.splitlines()
-        if len(lines) < 3 or lines[0] != "python - <<'PY'" or lines[-1] != "PY":
-            errors.append("release-notes")
-        else:
-            script = "\n".join(lines[1:-1])
-            required_notes = (
-                'os.environ["RELEASE_VERSION"]',
-                'Path(os.environ["NOTES_PATH"])',
-                'heading = f"## v{version} — "',
-                "if len(matches) != 1:",
-                "if not notes:",
-            )
-            try:
-                compile(script, "release-notes", "exec")
-            except SyntaxError:
-                errors.append("release-notes")
-            if any(token not in script for token in required_notes):
-                errors.append("release-notes")
     lowered = rendered.casefold()
     if any(token in lowered for token in ("pypi", "twine", "--draft", "secrets.")):
         errors.append("forbidden-release-behavior")
@@ -592,6 +576,49 @@ def _release_workflow_errors(document: dict[str, Any]) -> list[str]:
     if token_steps != ["publish"]:
         errors.append("release-token")
     return errors
+
+
+def _execute_release_notes_step(step: dict[str, Any]) -> tuple[int, str | None]:
+    """Execute the workflow command against a real temporary changelog."""
+
+    command = step.get("run")
+    if not isinstance(command, str):
+        return 2, None
+    try:
+        arguments = shlex.split(command, comments=True, posix=True)
+    except ValueError:
+        return 2, None
+    if not arguments or arguments[0] != "python":
+        return 2, None
+    arguments[0] = sys.executable
+    if len(arguments) > 1 and arguments[1] == "scripts/build_release.py":
+        arguments[1] = str(ROOT / arguments[1])
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        changelog = root / "CHANGELOG.md"
+        notes = root / "release-notes.md"
+        changelog.write_text(
+            "# Changes\n\n## v0.2.0 — Later\n\nLater.\n\n"
+            "## v0.1.0 — Preview\n\nExact published notes.\n\n"
+            "## v0.0.1 — Earlier\n\nEarlier.\n",
+            encoding="utf-8",
+        )
+        environment = {
+            **os.environ,
+            "RELEASE_VERSION": "0.1.0",
+            "CHANGELOG_PATH": str(changelog),
+            "NOTES_PATH": str(notes),
+        }
+        completed = subprocess.run(
+            arguments,
+            cwd=root,
+            check=False,
+            capture_output=True,
+            env=environment,
+            timeout=30,
+        )
+        content = notes.read_text("utf-8") if notes.is_file() else None
+        return completed.returncode, content
 
 
 class WorkflowTest(unittest.TestCase):
@@ -915,6 +942,30 @@ class WorkflowTest(unittest.TestCase):
         token_value = "${{" + " github.token }}"
         metadata.setdefault("env", {})[token_key] = token_value
         self.assertIn("release-token", _release_workflow_errors(early_credentials))
+
+    def test_release_notes_step_executes_the_real_cli_and_cannot_be_faked_by_dead_code(self) -> None:
+        workflow = self.load_release()
+        notes = next(
+            step for step in workflow["jobs"]["release"]["steps"]
+            if step.get("id") == "notes"
+        )
+
+        exit_code, content = _execute_release_notes_step(notes)
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(content, "Exact published notes.\n")
+
+        mutations = (
+            'python -c "raise SystemExit(0)" # python scripts/build_release.py --extract-notes',
+            'python -c "import os; raise SystemExit(0); open(os.environ[\'NOTES_PATH\'], \'w\').write(\'unreachable\')"',
+        )
+        for command in mutations:
+            with self.subTest(command=command):
+                changed = copy.deepcopy(notes)
+                changed["run"] = command
+                changed_exit, changed_content = _execute_release_notes_step(changed)
+                self.assertEqual(changed_exit, 0)
+                self.assertIsNone(changed_content)
 
 
 if __name__ == "__main__":

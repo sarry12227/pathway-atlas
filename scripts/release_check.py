@@ -30,6 +30,7 @@ try:
         git_top_level,
         git_tracked_entries,
         load_policy,
+        missing_required_release_paths,
         safe_tracked_file,
         scan_text,
         scan_tracked,
@@ -44,6 +45,7 @@ except ImportError:  # pragma: no cover - direct script execution
         git_top_level,
         git_tracked_entries,
         load_policy,
+        missing_required_release_paths,
         safe_tracked_file,
         scan_text,
         scan_tracked,
@@ -66,17 +68,6 @@ _SENSITIVE_BASENAMES = frozenset(
 )
 _SENSITIVE_PREFIXES = ("private/", "reports/", "output/", "data/", "work/", "evidence/raw-downloads/")
 _BENIGN_IGNORED_COMPONENTS = frozenset({".superpowers", ".venv", "__pycache__", "node_modules"})
-_REQUIRED_COMMUNITY = (
-    "LICENSE",
-    "CONTRIBUTING.md",
-    "DATA_SOURCES.md",
-    "SECURITY.md",
-    "CODE_OF_CONDUCT.md",
-    "CHANGELOG.md",
-    "ROADMAP.md",
-)
-
-
 def _is_sensitive_untracked_name(relative: str) -> bool:
     folded = relative.casefold()
     path = PurePosixPath(folded)
@@ -501,9 +492,6 @@ def _check_repo_scope(root: Path) -> CheckResult:
 
 def _check_license_and_data_docs(root: Path, tracked: frozenset[str]) -> CheckResult:
     details: list[str] = []
-    for relative in _REQUIRED_COMMUNITY:
-        if relative not in tracked or not (root / relative).is_file():
-            details.append(f"missing-or-untracked:{relative}")
     try:
         license_text = (root / "LICENSE").read_text("utf-8")
         data_text = (root / "DATA_SOURCES.md").read_text("utf-8")
@@ -514,32 +502,6 @@ def _check_license_and_data_docs(root: Path, tracked: frozenset[str]) -> CheckRe
     if "MIT 不自动授予第三方数据的再分发权" not in data_text or "删除请求" not in data_text:
         details.append("data-rights-boundary-missing")
     return CheckResult("license_and_data_docs", not details, tuple(details), len(details))
-
-
-def _check_required_artifacts(
-    root: Path,
-    policy: ReleasePolicy,
-    tracked: frozenset[str],
-) -> CheckResult:
-    required = {
-        "pyproject.toml",
-        "release-policy.json",
-        "schemas/province-catalog.schema.json",
-        "references/provinces/index.json",
-        "scripts/compliance_scan.py",
-        "scripts/release_check.py",
-        "scripts/live_smoke.py",
-        *_REQUIRED_COMMUNITY,
-        *(module.replace(".", "/") + ".py" for module in policy.deterministic_test_modules),
-        *(module.replace(".", "/") + ".py" for module in policy.docx_test_modules),
-    }
-    details = tuple(
-        f"missing-or-untracked:{relative}"
-        for relative in sorted(required)
-        if relative not in tracked or not (root / relative).is_file()
-    )
-    return CheckResult("required_artifacts", not details, details, len(details))
-
 
 def _status_path(entry: str) -> str | None:
     if len(entry) < 4 or entry[2] != " ":
@@ -775,11 +737,9 @@ def _check_future_paths(
     policy: ReleasePolicy,
     tracked: Sequence[str],
 ) -> CheckResult:
-    tracked_set = frozenset(tracked)
     details = tuple(
         f"missing-or-untracked:{path}"
-        for path in policy.future_release_paths
-        if path not in tracked_set or not (root / path).is_file()
+        for path in missing_required_release_paths(policy, tracked)
     )
     return CheckResult("future_release_artifacts", not details, details, len(details))
 
@@ -864,10 +824,6 @@ def evaluate_release(context: ReleaseContext) -> ReleaseReport:
         _safe_run("path_identities", lambda: check_path_identities(root, tracked)),
         scan_result,
         check_project_version(root, context.expected_version, context.tag),
-        _safe_run(
-            "required_artifacts",
-            lambda: _check_required_artifacts(root, policy, tracked_set),
-        ),
         _safe_run("license_and_data_docs", lambda: _check_license_and_data_docs(root, tracked_set)),
         _safe_run(
             "clean_worktree",

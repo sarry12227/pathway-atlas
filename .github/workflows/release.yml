@@ -65,30 +65,9 @@ jobs:
         id: notes
         env:
           RELEASE_VERSION: ${{ steps.metadata.outputs.version }}
+          CHANGELOG_PATH: CHANGELOG.md
           NOTES_PATH: dist/release-notes.md
-        shell: bash
-        run: |
-          python - <<'PY'
-          import os
-          from pathlib import Path
-
-          version = os.environ["RELEASE_VERSION"]
-          notes_path = Path(os.environ["NOTES_PATH"])
-          lines = Path("CHANGELOG.md").read_text(encoding="utf-8").splitlines()
-          heading = f"## v{version} — "
-          matches = [index for index, line in enumerate(lines) if line.startswith(heading)]
-          if len(matches) != 1:
-              raise SystemExit("matching changelog section is not unique")
-          start = matches[0]
-          end = next(
-              (index for index in range(start + 1, len(lines)) if lines[index].startswith("## ")),
-              len(lines),
-          )
-          notes = "\n".join(lines[start + 1:end]).strip()
-          if not notes:
-              raise SystemExit("matching changelog section is empty")
-          notes_path.write_text(notes + "\n", encoding="utf-8", newline="\n")
-          PY
+        run: python scripts/build_release.py --extract-notes
       - name: Publish the non-draft GitHub Release
         id: publish
         env:

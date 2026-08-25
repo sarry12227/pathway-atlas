@@ -27,7 +27,7 @@ from scripts.release_check import (
     evaluate_release,
     main,
 )
-from scripts.compliance_scan import git_tracked_entries, load_policy
+from scripts.compliance_scan import git_tracked_entries, load_policy, missing_required_release_paths
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -245,6 +245,25 @@ class ReleaseComponentTest(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertIn("missing-or-untracked:.github/workflows/ci.yml", result.details)
 
+    def test_release_artifact_gate_uses_only_policy_exact_and_prefix_requirements(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            policy = replace(
+                load_policy(ROOT / "release-policy.json"),
+                required_release_paths=("custom-required.txt",),
+                required_release_prefixes=("custom-fixtures",),
+            )
+
+            result = _check_future_paths(root, policy, tracked=())
+
+        self.assertEqual(
+            result.details,
+            (
+                "missing-or-untracked:custom-required.txt",
+                "missing-or-untracked:custom-fixtures/**",
+            ),
+        )
+
     def test_offline_gate_installs_real_sentinel_and_does_not_trust_noop_name(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -378,13 +397,13 @@ class ReleaseEvaluationTest(unittest.TestCase):
         report = evaluate_release(context)
 
         by_name = {result.name: result for result in report.results}
+        self.assertNotIn("required_artifacts", by_name)
         future_result = by_name["future_release_artifacts"]
         tracked = {entry.path for entry in git_tracked_entries(ROOT)}
         policy = load_policy(ROOT / "release-policy.json")
         expected = tuple(
             f"missing-or-untracked:{path}"
-            for path in policy.future_release_paths
-            if path not in tracked
+            for path in missing_required_release_paths(policy, tracked)
         )
         self.assertIn(expected, ((), ("missing-or-untracked:docs/release-process.md",)))
         self.assertEqual(future_result.details, expected)

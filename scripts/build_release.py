@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
+import errno
 import hashlib
 import os
 import re
@@ -28,6 +30,7 @@ try:
         ReleasePolicy,
         canonical_repository_path,
         git_environment,
+        missing_required_release_paths,
         parse_policy_bytes,
         safe_tracked_file,
     )
@@ -37,6 +40,7 @@ except ImportError:  # pragma: no cover - direct script execution
         ReleasePolicy,
         canonical_repository_path,
         git_environment,
+        missing_required_release_paths,
         parse_policy_bytes,
         safe_tracked_file,
     )
@@ -60,19 +64,6 @@ _CACHE_COMPONENTS = frozenset(
     }
 )
 _SENSITIVE_SUFFIXES = frozenset({".key", ".p12", ".pem", ".pfx"})
-_REQUIRED_RELEASE_FILES = frozenset(
-    {
-        "CHANGELOG.md",
-        "CONTRIBUTING.md",
-        "DATA_SOURCES.md",
-        "LICENSE",
-        "README.md",
-        "SECURITY.md",
-        "SKILL.md",
-        "pyproject.toml",
-        "release-policy.json",
-    }
-)
 _ZIP_TIMESTAMP = (1980, 1, 1, 0, 0, 0)
 
 
@@ -200,8 +191,7 @@ def _validate_release_contract(blobs: Sequence[IndexBlob], policy: ReleasePolicy
     paths = {blob.path for blob in blobs}
     if any(_is_forbidden_release_path(path, policy) for path in paths):
         raise BuildReleaseError("forbidden tracked release path")
-    required = _REQUIRED_RELEASE_FILES | frozenset(policy.future_release_paths)
-    if not required <= paths or not any(path.startswith("tests/fixtures/") for path in paths):
+    if missing_required_release_paths(policy, paths):
         raise BuildReleaseError("incomplete release snapshot")
 
 
@@ -312,47 +302,70 @@ def _fsync_directory(path: Path) -> None:
         os.close(descriptor)
 
 
-def _same_file(first: Path, second: Path) -> bool:
+def _load_posix_library() -> object:
+    return ctypes.CDLL(None, use_errno=True)
+
+
+def _load_windows_library() -> object:
     try:
-        return os.path.samefile(first, second)
-    except OSError:
-        return False
+        return ctypes.WinDLL("kernel32", use_last_error=True)
+    except (AttributeError, OSError) as error:
+        raise BuildReleaseError("atomic publication unsupported") from error
 
 
-def _cleanup_owned_publication(output: Path, claimed: os.stat_result | None, links: Sequence[tuple[Path, Path]]) -> None:
-    for published, source in reversed(tuple(links)):
-        try:
-            if _same_file(published, source):
-                published.unlink()
-        except OSError:
-            pass
-    if claimed is None:
+def _linux_rename_noreplace(ready: Path, output: Path) -> None:
+    try:
+        function = getattr(_load_posix_library(), "renameat2")
+    except (AttributeError, OSError) as error:
+        raise BuildReleaseError("atomic publication unsupported") from error
+    function.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+    function.restype = ctypes.c_int
+    if function(-100, os.fsencode(ready), -100, os.fsencode(output), 1) == 0:
         return
-    try:
-        if os.path.samestat(output.lstat(), claimed):
-            output.rmdir()
-    except OSError:
-        pass
+    code = ctypes.get_errno()
+    if code in {errno.ENOSYS, errno.EINVAL, getattr(errno, "EOPNOTSUPP", errno.ENOTSUP)}:
+        raise BuildReleaseError("atomic publication unsupported")
+    raise BuildReleaseError("release publication failed")
 
 
-def _publish_exclusive(staging: Path, output: Path, names: Sequence[str]) -> None:
-    claimed: os.stat_result | None = None
-    links: list[tuple[Path, Path]] = []
+def _macos_rename_exclusive(ready: Path, output: Path) -> None:
     try:
-        output.mkdir(mode=0o700)
-        claimed = output.lstat()
-        if _is_link_or_reparse(claimed) or not stat.S_ISDIR(claimed.st_mode):
-            raise OSError
-        for name in names:
-            source = staging / name
-            published = output / name
-            os.link(source, published)
-            links.append((published, source))
-        _fsync_directory(output)
-        _fsync_directory(output.parent)
-    except OSError as error:
-        _cleanup_owned_publication(output, claimed, links)
-        raise BuildReleaseError("release publication failed") from error
+        function = getattr(_load_posix_library(), "renamex_np")
+    except (AttributeError, OSError) as error:
+        raise BuildReleaseError("atomic publication unsupported") from error
+    function.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
+    function.restype = ctypes.c_int
+    if function(os.fsencode(ready), os.fsencode(output), 4) == 0:
+        return
+    code = ctypes.get_errno()
+    if code in {errno.ENOSYS, errno.EINVAL, getattr(errno, "EOPNOTSUPP", errno.ENOTSUP)}:
+        raise BuildReleaseError("atomic publication unsupported")
+    raise BuildReleaseError("release publication failed")
+
+
+def _windows_rename_noreplace(ready: Path, output: Path) -> None:
+    function = getattr(_load_windows_library(), "MoveFileExW", None)
+    if function is None:
+        raise BuildReleaseError("atomic publication unsupported")
+    function.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint]
+    function.restype = ctypes.c_int
+    if function(str(ready), str(output), 8):
+        return
+    code = ctypes.get_last_error()
+    if code == 120:
+        raise BuildReleaseError("atomic publication unsupported")
+    raise BuildReleaseError("release publication failed")
+
+
+def _atomic_publish_directory(ready: Path, output: Path) -> None:
+    if sys.platform.startswith("linux"):
+        _linux_rename_noreplace(ready, output)
+    elif sys.platform == "darwin":
+        _macos_rename_exclusive(ready, output)
+    elif sys.platform == "win32":
+        _windows_rename_noreplace(ready, output)
+    else:
+        raise BuildReleaseError("atomic publication unsupported")
 
 
 def verify_release_ref(root: Path, tag: str, expected_commit: str, output: Path) -> str:
@@ -390,6 +403,44 @@ def verify_release_ref(root: Path, tag: str, expected_commit: str, output: Path)
     return version
 
 
+def extract_release_notes(changelog: str, version: str) -> str:
+    """Return the one nonempty changelog section for an exact release version."""
+
+    if not isinstance(changelog, str) or _VERSION_RE.fullmatch(version) is None:
+        raise BuildReleaseError("invalid release notes input")
+    lines = changelog.splitlines()
+    heading = f"## v{version} — "
+    matches = [index for index, line in enumerate(lines) if line.startswith(heading)]
+    if len(matches) != 1:
+        raise BuildReleaseError("release notes section is not unique")
+    start = matches[0]
+    end = next(
+        (index for index in range(start + 1, len(lines)) if lines[index].startswith("## ")),
+        len(lines),
+    )
+    notes = "\n".join(lines[start + 1 : end]).strip()
+    if not notes:
+        raise BuildReleaseError("release notes section is empty")
+    return notes + "\n"
+
+
+def _extract_release_notes_file(changelog_path: Path, notes_path: Path, version: str) -> None:
+    try:
+        raw = changelog_path.read_bytes()
+        if len(raw) > 1024 * 1024:
+            raise BuildReleaseError("release notes input is too large")
+        notes = extract_release_notes(raw.decode("utf-8", errors="strict"), version)
+        descriptor = os.open(notes_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(notes.encode("utf-8"))
+            handle.flush()
+            os.fsync(handle.fileno())
+    except BuildReleaseError:
+        raise
+    except (OSError, UnicodeError) as error:
+        raise BuildReleaseError("release notes extraction failed") from error
+
+
 def build_release(root: Path, version: str, output: str) -> ReleaseArtifacts:
     try:
         root = root.resolve(strict=True)
@@ -419,27 +470,29 @@ def build_release(root: Path, version: str, output: str) -> ReleaseArtifacts:
 
     archive_name = f"shengxue-skill-{version}.zip"
     checksum_name = "SHA256SUMS"
-    staging: Path | None = None
+    ready: Path | None = None
     try:
-        staging = Path(tempfile.mkdtemp(prefix=f".{output_path.name}.release-tmp-", dir=output_path.parent))
-        staging.chmod(0o700)
-        archive = staging / archive_name
-        checksums = staging / checksum_name
+        ready = Path(tempfile.mkdtemp(prefix=f".{output_path.name}.release-ready-", dir=output_path.parent))
+        ready.chmod(0o700)
+        archive = ready / archive_name
+        checksums = ready / checksum_name
         _write_archive(root, archive, blobs)
         digest = hashlib.sha256(archive.read_bytes()).hexdigest()
         _write_checksums(checksums, archive_name, digest)
-        _fsync_directory(staging)
+        _fsync_directory(ready)
         if _safe_output(root, output) != output_path:
             raise BuildReleaseError("unsafe output path")
-        _publish_exclusive(staging, output_path, (archive_name, checksum_name))
+        _atomic_publish_directory(ready, output_path)
+        ready = None
+        _fsync_directory(output_path.parent)
     except BuildReleaseError:
         raise
     except (OSError, UnicodeError) as error:
         raise BuildReleaseError("release publication failed") from error
     finally:
-        if staging is not None:
+        if ready is not None:
             try:
-                shutil.rmtree(staging)
+                shutil.rmtree(ready)
             except OSError:
                 pass
     return ReleaseArtifacts(output_path / archive_name, output_path / checksum_name)
@@ -460,8 +513,21 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--version")
     parser.add_argument("--output")
     parser.add_argument("--verify-ref", action="store_true")
+    parser.add_argument("--extract-notes", action="store_true")
     try:
         parsed = parser.parse_args(list(sys.argv[1:] if argv is None else argv))
+        if parsed.verify_ref and parsed.extract_notes:
+            raise BuildReleaseError("invalid release command")
+        if parsed.extract_notes:
+            if parsed.version is not None or parsed.output is not None:
+                raise BuildReleaseError("invalid release command")
+            version = os.environ.get("RELEASE_VERSION")
+            changelog_path = os.environ.get("CHANGELOG_PATH")
+            notes_path = os.environ.get("NOTES_PATH")
+            if version is None or changelog_path is None or notes_path is None:
+                raise BuildReleaseError("missing release notes metadata")
+            _extract_release_notes_file(Path(changelog_path), Path(notes_path), version)
+            return 0
         if parsed.verify_ref:
             if parsed.version is not None or parsed.output is not None:
                 raise BuildReleaseError("invalid release command")

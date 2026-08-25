@@ -9,6 +9,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from scripts import compliance_scan as compliance_policy
 from scripts.compliance_scan import (
     PolicyError,
     canonical_repository_path,
@@ -34,13 +35,14 @@ def _write_policy(
     path.write_text(
         json.dumps(
             {
-                "schema_version": "1.0",
+                "schema_version": "1.1",
                 "binary_extensions": [".png", ".xlsx"],
                 "max_text_bytes": 1048576,
                 "forbidden_tracked_directories": ["data", "output", "private"],
                 "allowlist": allowlist or [],
                 "file_allowlist": file_allowlist or [],
-                "future_release_paths": [],
+                "required_release_paths": ["README.md"],
+                "required_release_prefixes": ["tests/fixtures"],
                 "ci_generated_paths": ["build", "dist"],
                 "deterministic_test_modules": ["tests.test_replay_scenarios"],
                 "docx_test_modules": ["tests.test_docx_semantic_parity"],
@@ -52,6 +54,56 @@ def _write_policy(
 
 
 class ComplianceScanTest(unittest.TestCase):
+    def test_policy_owns_exact_and_prefix_release_requirements(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            policy_path = Path(temporary) / "policy.json"
+            _write_policy(policy_path)
+            payload = json.loads(policy_path.read_text("utf-8"))
+        payload["required_release_paths"] = [
+            "CODE_OF_CONDUCT.md",
+            "ROADMAP.md",
+            "docs/release-process.md",
+            "scripts/preflight.py",
+        ]
+        payload["required_release_prefixes"] = ["tests/fixtures"]
+
+        policy = compliance_policy.parse_policy_bytes(json.dumps(payload).encode("utf-8"))
+
+        self.assertEqual(policy.required_release_paths[0], "CODE_OF_CONDUCT.md")
+        self.assertEqual(policy.required_release_prefixes, ("tests/fixtures",))
+        self.assertEqual(
+            compliance_policy.missing_required_release_paths(
+                policy,
+                ("CODE_OF_CONDUCT.md", "ROADMAP.md", "scripts/preflight.py"),
+            ),
+            ("docs/release-process.md", "tests/fixtures/**"),
+        )
+
+    def test_repository_policy_covers_community_runtime_and_fixture_contract(self) -> None:
+        policy = load_policy(ROOT / "release-policy.json")
+
+        required = set(policy.required_release_paths)
+        self.assertTrue(
+            {
+                "CODE_OF_CONDUCT.md",
+                "ROADMAP.md",
+                "docs/release-process.md",
+                "scripts/preflight.py",
+                "scripts/release_check.py",
+                "schemas/province.schema.json",
+                "references/provinces/index.json",
+            }.issubset(required)
+        )
+        self.assertEqual(
+            set(policy.required_release_prefixes),
+            {
+                "tests/fixtures/evidence",
+                "tests/fixtures/profiles",
+                "tests/fixtures/provinces",
+                "tests/fixtures/replay",
+            },
+        )
+
     def test_shared_repository_path_policy_requires_canonical_posix_spelling(self) -> None:
         self.assertEqual(canonical_repository_path("tests/fixtures/example.json"), "tests/fixtures/example.json")
         for unsafe in (r"tests\fixtures\example.json", "../private.txt", "/absolute.txt", "Ａ.txt"):
@@ -186,7 +238,7 @@ class ComplianceScanTest(unittest.TestCase):
             policy_path = Path(temporary) / "policy.json"
             _write_policy(policy_path)
             valid = policy_path.read_text("utf-8")
-            policy_path.write_text(valid.replace('{"schema_version":', '{"schema_version":"1.0","schema_version":', 1), encoding="utf-8")
+            policy_path.write_text(valid.replace('{"schema_version":', '{"schema_version":"1.1","schema_version":', 1), encoding="utf-8")
             with self.assertRaises(PolicyError):
                 load_policy(policy_path)
 
@@ -409,7 +461,7 @@ class ComplianceScanTest(unittest.TestCase):
 
     def test_repository_policy_is_strict_and_loadable(self) -> None:
         policy = load_policy(ROOT / "release-policy.json")
-        self.assertEqual(policy.schema_version, "1.0")
+        self.assertEqual(policy.schema_version, "1.1")
         self.assertGreater(len(policy.binary_extensions), 3)
 
 

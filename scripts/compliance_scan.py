@@ -130,7 +130,8 @@ _POLICY_KEYS = frozenset(
         "forbidden_tracked_directories",
         "allowlist",
         "file_allowlist",
-        "future_release_paths",
+        "required_release_paths",
+        "required_release_prefixes",
         "ci_generated_paths",
         "deterministic_test_modules",
         "docx_test_modules",
@@ -178,7 +179,8 @@ class ReleasePolicy:
     forbidden_tracked_directories: tuple[str, ...]
     allowlist: tuple[AllowlistEntry, ...]
     file_allowlist: tuple[FileAllowlistEntry, ...]
-    future_release_paths: tuple[str, ...]
+    required_release_paths: tuple[str, ...]
+    required_release_prefixes: tuple[str, ...]
     ci_generated_paths: tuple[str, ...]
     deterministic_test_modules: tuple[str, ...]
     docx_test_modules: tuple[str, ...]
@@ -326,7 +328,7 @@ def parse_policy_bytes(raw: bytes) -> ReleasePolicy:
     payload = _strict_json(raw)
     if not isinstance(payload, dict) or set(payload) != _POLICY_KEYS:
         raise PolicyError("policy keys do not match the supported schema")
-    if payload["schema_version"] != "1.0":
+    if payload["schema_version"] != "1.1":
         raise PolicyError("unsupported policy schema version")
 
     extensions = _string_list(payload["binary_extensions"], "binary_extensions")
@@ -345,7 +347,13 @@ def parse_policy_bytes(raw: bytes) -> ReleasePolicy:
         raise PolicyError("max_text_bytes is outside the supported bound")
 
     directories = _policy_path_list(payload["forbidden_tracked_directories"], "forbidden_tracked_directories")
-    future_paths = _policy_path_list(payload["future_release_paths"], "future_release_paths")
+    required_paths = _policy_path_list(payload["required_release_paths"], "required_release_paths")
+    required_prefixes = _policy_path_list(
+        payload["required_release_prefixes"],
+        "required_release_prefixes",
+    )
+    if not required_paths or not required_prefixes:
+        raise PolicyError("release path requirements must not be empty")
     generated_paths = _policy_path_list(payload["ci_generated_paths"], "ci_generated_paths")
     modules = _string_list(payload["deterministic_test_modules"], "deterministic_test_modules")
     docx_modules = _string_list(payload["docx_test_modules"], "docx_test_modules")
@@ -406,13 +414,14 @@ def parse_policy_bytes(raw: bytes) -> ReleasePolicy:
         file_allowlist.append(FileAllowlistEntry(entry_path, kinds, digest, reason))
 
     return ReleasePolicy(
-        schema_version="1.0",
+        schema_version="1.1",
         binary_extensions=frozenset(normalized_extensions),
         max_text_bytes=max_text_bytes,
         forbidden_tracked_directories=directories,
         allowlist=tuple(allowlist),
         file_allowlist=tuple(file_allowlist),
-        future_release_paths=future_paths,
+        required_release_paths=required_paths,
+        required_release_prefixes=required_prefixes,
         ci_generated_paths=generated_paths,
         deterministic_test_modules=modules,
         docx_test_modules=docx_modules,
@@ -427,6 +436,21 @@ def load_policy(path: Path | str) -> ReleasePolicy:
     except OSError as error:
         raise PolicyError("policy cannot be read") from error
     return parse_policy_bytes(raw)
+
+
+def missing_required_release_paths(
+    policy: ReleasePolicy,
+    paths: Sequence[str],
+) -> tuple[str, ...]:
+    """Return unsatisfied exact paths and nonempty subtree requirements."""
+
+    inventory = frozenset(paths)
+    missing = [path for path in policy.required_release_paths if path not in inventory]
+    for prefix in policy.required_release_prefixes:
+        marker = prefix + "/"
+        if not any(path.startswith(marker) for path in inventory):
+            missing.append(prefix + "/**")
+    return tuple(missing)
 
 
 def _is_allowlisted(policy: ReleasePolicy | None, path: str | None, kind: str, line: str) -> bool:

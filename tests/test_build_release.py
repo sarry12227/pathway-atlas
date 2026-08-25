@@ -6,6 +6,8 @@ import json
 import os
 import subprocess
 import tempfile
+import threading
+import time
 import unittest
 import zipfile
 from pathlib import Path
@@ -28,10 +30,12 @@ class BuildReleaseTest(unittest.TestCase):
         )
         for document in (
             "CHANGELOG.md",
+            "CODE_OF_CONDUCT.md",
             "CONTRIBUTING.md",
             "DATA_SOURCES.md",
             "LICENSE",
             "README.md",
+            "ROADMAP.md",
             "SECURITY.md",
             "SKILL.md",
         ):
@@ -39,7 +43,7 @@ class BuildReleaseTest(unittest.TestCase):
         (self.root / "release-policy.json").write_text(
             json.dumps(
                 {
-                    "schema_version": "1.0",
+                    "schema_version": "1.1",
                     "binary_extensions": [".png"],
                     "max_text_bytes": 1048576,
                     "forbidden_tracked_directories": [
@@ -53,7 +57,21 @@ class BuildReleaseTest(unittest.TestCase):
                     ],
                     "allowlist": [],
                     "file_allowlist": [],
-                    "future_release_paths": [],
+                    "required_release_paths": [
+                        "CHANGELOG.md",
+                        "CODE_OF_CONDUCT.md",
+                        "CONTRIBUTING.md",
+                        "DATA_SOURCES.md",
+                        "LICENSE",
+                        "README.md",
+                        "ROADMAP.md",
+                        "SECURITY.md",
+                        "SKILL.md",
+                        "pyproject.toml",
+                        "release-policy.json",
+                        "scripts/release_check.py",
+                    ],
+                    "required_release_prefixes": ["tests/fixtures"],
                     "ci_generated_paths": ["build", "dist"],
                     "deterministic_test_modules": ["tests.test_replay_scenarios"],
                     "docx_test_modules": ["tests.test_docx_semantic_parity"],
@@ -94,10 +112,12 @@ class BuildReleaseTest(unittest.TestCase):
             self.assertEqual(names, sorted(names))
             required = {
                 "shengxue-skill/CHANGELOG.md",
+                "shengxue-skill/CODE_OF_CONDUCT.md",
                 "shengxue-skill/CONTRIBUTING.md",
                 "shengxue-skill/DATA_SOURCES.md",
                 "shengxue-skill/LICENSE",
                 "shengxue-skill/README.md",
+                "shengxue-skill/ROADMAP.md",
                 "shengxue-skill/SECURITY.md",
                 "shengxue-skill/SKILL.md",
                 "shengxue-skill/pyproject.toml",
@@ -240,10 +260,12 @@ class BuildReleaseTest(unittest.TestCase):
                     self._build(f"dist-{forbidden.replace('/', '-')}")
                 subprocess.run(["git", "rm", "-r", "--cached", "--", forbidden], cwd=self.root, check=True)
 
-        subprocess.run(["git", "rm", "--cached", "--", "SECURITY.md"], cwd=self.root, check=True)
-        with self.assertRaises(build_release.BuildReleaseError):
-            self._build("dist-missing-doc")
-        subprocess.run(["git", "add", "--", "SECURITY.md"], cwd=self.root, check=True)
+        for required in ("SECURITY.md", "CODE_OF_CONDUCT.md", "ROADMAP.md"):
+            with self.subTest(required=required):
+                subprocess.run(["git", "rm", "--cached", "--", required], cwd=self.root, check=True)
+                with self.assertRaises(build_release.BuildReleaseError):
+                    self._build(f"dist-missing-{required.casefold().replace('.', '-')}")
+                subprocess.run(["git", "add", "--", required], cwd=self.root, check=True)
         subprocess.run(["git", "rm", "-r", "--cached", "--", "tests/fixtures"], cwd=self.root, check=True)
         with self.assertRaises(build_release.BuildReleaseError):
             self._build("dist-missing-fixture")
@@ -283,6 +305,45 @@ class BuildReleaseTest(unittest.TestCase):
                 with self.assertRaises(build_release.BuildReleaseError):
                     build_release.verify_release_ref(self.root, hostile, commit, output)
 
+    def test_release_notes_api_extracts_one_exact_nonempty_section(self) -> None:
+        changelog = (
+            "# Changes\n\n"
+            "## v0.2.0 — Later\n\nLater notes.\n\n"
+            "## v0.1.0 — Preview\n\nFirst line.\n\n- Detail\n\n"
+            "## v0.0.1 — Earlier\n\nEarlier notes.\n"
+        )
+
+        self.assertEqual(
+            build_release.extract_release_notes(changelog, "0.1.0"),
+            "First line.\n\n- Detail\n",
+        )
+        for invalid in (
+            changelog + "\n## v0.1.0 — Duplicate\n\nDuplicate.\n",
+            "# Changes\n\n## v0.1.0 — Empty\n\n## v0.0.1 — Earlier\n",
+        ):
+            with self.subTest(invalid=invalid[-30:]):
+                with self.assertRaises(build_release.BuildReleaseError):
+                    build_release.extract_release_notes(invalid, "0.1.0")
+
+    def test_release_notes_cli_reads_only_declared_environment_and_writes_exact_content(self) -> None:
+        changelog = self.root / "notes-source.md"
+        notes = self.root / "notes-output.md"
+        changelog.write_text(
+            "# Changes\n\n## v0.1.0 — Preview\n\nPublished body.\n",
+            encoding="utf-8",
+        )
+        environment = {
+            "RELEASE_VERSION": "0.1.0",
+            "CHANGELOG_PATH": str(changelog),
+            "NOTES_PATH": str(notes),
+        }
+
+        with mock.patch.dict(os.environ, environment, clear=True):
+            exit_code = build_release.main(["--extract-notes"])
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(notes.read_text("utf-8"), "Published body.\n")
+
     def test_archive_failure_cleans_staging_and_never_publishes_a_partial_pair(self) -> None:
         with mock.patch.object(zipfile.ZipFile, "writestr", side_effect=OSError("private raw path")):
             with self.assertRaises(build_release.BuildReleaseError):
@@ -303,37 +364,157 @@ class BuildReleaseTest(unittest.TestCase):
         self.assertEqual(marker.read_text("utf-8"), "competitor\n")
         self.assertEqual(sorted(path.name for path in competitor.iterdir()), ["owner.txt"])
 
-    def test_link_race_preserves_competitor_and_reports_primary_publication_error(self) -> None:
-        real_link = os.link
+    def test_directory_race_preserves_competitor_and_cleans_owned_ready_directory(self) -> None:
+        real_publish = build_release._atomic_publish_directory
 
-        def race(source: str | bytes, destination: str | bytes, *args: object, **kwargs: object) -> None:
-            target = Path(destination)
-            target.write_text("competitor\n", encoding="utf-8")
-            real_link(source, destination, *args, **kwargs)
+        def race(ready: Path, output: Path) -> None:
+            output.mkdir()
+            (output / "owner.txt").write_text("competitor\n", encoding="utf-8")
+            real_publish(ready, output)
 
-        with mock.patch.object(build_release.os, "link", side_effect=race):
+        with mock.patch.object(build_release, "_atomic_publish_directory", side_effect=race):
             with self.assertRaisesRegex(build_release.BuildReleaseError, "release publication failed"):
                 self._build("dist")
 
-        competitor = self.root / "dist" / "shengxue-skill-0.1.0.zip"
+        competitor = self.root / "dist" / "owner.txt"
         self.assertEqual(competitor.read_text("utf-8"), "competitor\n")
-        self.assertFalse((self.root / "dist" / "SHA256SUMS").exists())
+        self.assertEqual({path.name for path in (self.root / "dist").iterdir()}, {"owner.txt"})
+        self.assertEqual(list(self.root.glob(".dist.release-ready-*")), [])
 
-    def test_owned_cleanup_failure_never_masks_the_primary_link_error(self) -> None:
-        real_link = os.link
-        calls = 0
-
-        def fail_second_link(source: str | bytes, destination: str | bytes, *args: object, **kwargs: object) -> None:
-            nonlocal calls
-            calls += 1
-            if calls == 2:
-                raise OSError("primary link failure")
-            real_link(source, destination, *args, **kwargs)
-
-        with mock.patch.object(build_release.os, "link", side_effect=fail_second_link):
-            with mock.patch.object(Path, "unlink", side_effect=OSError("cleanup failure")):
+    def test_owned_ready_cleanup_failure_never_masks_the_primary_publish_error(self) -> None:
+        with mock.patch.object(
+            build_release,
+            "_atomic_publish_directory",
+            side_effect=build_release.BuildReleaseError("release publication failed"),
+        ):
+            with mock.patch.object(build_release.shutil, "rmtree", side_effect=OSError("cleanup failure")):
                 with self.assertRaisesRegex(build_release.BuildReleaseError, "release publication failed"):
                     self._build("dist")
+
+    def test_final_output_never_exposes_only_half_of_the_artifact_pair(self) -> None:
+        real_link = os.link
+        calls = 0
+        failures: list[BaseException] = []
+        finished = threading.Event()
+
+        def widen_old_half_pair(source: str | bytes, destination: str | bytes, *args: object, **kwargs: object) -> None:
+            nonlocal calls
+            real_link(source, destination, *args, **kwargs)
+            calls += 1
+            if calls == 1:
+                threading.Event().wait(0.25)
+
+        def build() -> None:
+            try:
+                self._build("dist")
+            except BaseException as error:
+                failures.append(error)
+            finally:
+                finished.set()
+
+        half_visible = False
+        with mock.patch.object(build_release.os, "link", side_effect=widen_old_half_pair):
+            worker = threading.Thread(target=build)
+            worker.start()
+            deadline = time.monotonic() + 5
+            while not finished.is_set() and time.monotonic() < deadline:
+                output = self.root / "dist"
+                if output.exists():
+                    names = {path.name for path in output.iterdir()}
+                    if names != {"shengxue-skill-0.1.0.zip", "SHA256SUMS"}:
+                        half_visible = True
+                        break
+                threading.Event().wait(0.005)
+            worker.join(timeout=5)
+
+        self.assertEqual(failures, [])
+        self.assertFalse(half_visible)
+        self.assertEqual(
+            {path.name for path in (self.root / "dist").iterdir()},
+            {"shengxue-skill-0.1.0.zip", "SHA256SUMS"},
+        )
+
+    def test_atomic_directory_dispatch_uses_each_supported_platform_primitive(self) -> None:
+        ready = self.root / "ready"
+        output = self.root / "output"
+        for platform, helper_name in (
+            ("linux", "_linux_rename_noreplace"),
+            ("darwin", "_macos_rename_exclusive"),
+            ("win32", "_windows_rename_noreplace"),
+        ):
+            with self.subTest(platform=platform):
+                helper = mock.Mock()
+                with mock.patch.object(build_release.sys, "platform", platform):
+                    with mock.patch.object(build_release, helper_name, helper):
+                        build_release._atomic_publish_directory(ready, output)
+                helper.assert_called_once_with(ready, output)
+
+    def test_platform_rename_bindings_use_exclusive_atomic_flags(self) -> None:
+        class ForeignCall:
+            def __init__(self, result: int) -> None:
+                self.result = result
+                self.calls: list[tuple[object, ...]] = []
+                self.argtypes: object = None
+                self.restype: object = None
+
+            def __call__(self, *arguments: object) -> int:
+                self.calls.append(arguments)
+                return self.result
+
+        ready = self.root / "ready"
+        output = self.root / "output"
+
+        linux_call = ForeignCall(0)
+        linux_library = type("LinuxLibrary", (), {"renameat2": linux_call})()
+        with mock.patch.object(build_release, "_load_posix_library", return_value=linux_library):
+            build_release._linux_rename_noreplace(ready, output)
+        self.assertEqual(
+            linux_call.calls,
+            [(-100, os.fsencode(ready), -100, os.fsencode(output), 1)],
+        )
+
+        macos_call = ForeignCall(0)
+        macos_library = type("MacOSLibrary", (), {"renamex_np": macos_call})()
+        with mock.patch.object(build_release, "_load_posix_library", return_value=macos_library):
+            build_release._macos_rename_exclusive(ready, output)
+        self.assertEqual(macos_call.calls, [(os.fsencode(ready), os.fsencode(output), 4)])
+
+        windows_call = ForeignCall(1)
+        windows_library = type("WindowsLibrary", (), {"MoveFileExW": windows_call})()
+        with mock.patch.object(build_release, "_load_windows_library", return_value=windows_library):
+            build_release._windows_rename_noreplace(ready, output)
+        self.assertEqual(windows_call.calls, [(str(ready), str(output), 8)])
+
+    def test_unsupported_atomic_directory_platform_fails_closed_and_cleans_ready_directory(self) -> None:
+        with mock.patch.object(build_release.sys, "platform", "freebsd14"):
+            with self.assertRaisesRegex(build_release.BuildReleaseError, "atomic publication unsupported"):
+                self._build("dist")
+
+        self.assertFalse((self.root / "dist").exists())
+        self.assertEqual(list(self.root.glob(".dist.release-ready-*")), [])
+
+    def test_missing_atomic_platform_api_fails_closed(self) -> None:
+        empty_library = object()
+        with mock.patch.object(build_release, "_load_posix_library", return_value=empty_library):
+            for helper in (
+                build_release._linux_rename_noreplace,
+                build_release._macos_rename_exclusive,
+            ):
+                with self.subTest(helper=helper.__name__):
+                    with self.assertRaisesRegex(
+                        build_release.BuildReleaseError,
+                        "atomic publication unsupported",
+                    ):
+                        helper(self.root / "ready", self.root / "output")
+        with mock.patch.object(build_release, "_load_windows_library", return_value=empty_library):
+            with self.assertRaisesRegex(
+                build_release.BuildReleaseError,
+                "atomic publication unsupported",
+            ):
+                build_release._windows_rename_noreplace(
+                    self.root / "ready",
+                    self.root / "output",
+                )
 
     def test_output_rejects_an_intermediate_link_or_reparse_component(self) -> None:
         real = self.root / "real-output"

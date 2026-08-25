@@ -1,5 +1,5 @@
 {
-  "schema_version": "1.0",
+  "schema_version": "1.1",
   "binary_extensions": [
     ".7z",
     ".doc",
@@ -61,7 +61,7 @@
     {
       "path": "scripts/compliance_scan.py",
       "kinds": ["absolute_local_path", "pricing_or_sales"],
-      "file_sha256": "f2f2f84b92fc5bb45fdec0f0e873c7f3ddd80aead20e0a10cea3b9185cdca39c",
+      "file_sha256": "e75b36434e9cfb92dd46ba1512722576835321936421c8bf04547d82abad8379",
       "reason": "scanner rule literal"
     },
     {
@@ -73,7 +73,7 @@
     {
       "path": "tests/test_build_release.py",
       "kinds": ["secret"],
-      "file_sha256": "9287f77e674d45c49039f942a863930afd9415998a0b9711c436204da94c20ed",
+      "file_sha256": "ba3ee7868b3b208e6719b85e405b344c031cb63ca0ec7e56e2291d5425522696",
       "reason": "synthetic negative fixture"
     },
     {
@@ -91,7 +91,7 @@
     {
       "path": "tests/test_compliance_scan.py",
       "kinds": ["absolute_local_path", "identity_number", "phone", "pricing_or_sales", "private_system_reference", "secret", "student_pii"],
-      "file_sha256": "f017c894f3bcf394910178db7c589bf8571a45a8c881d605b2eb5425d98f09ec",
+      "file_sha256": "75e2b7b0231371a4f66d147e042093f601b3005bdeaecd8bb2ab67979e8d372b",
       "reason": "synthetic negative fixture"
     },
     {
@@ -151,7 +151,7 @@
     {
       "path": "tests/test_release_check.py",
       "kinds": ["absolute_local_path", "secret"],
-      "file_sha256": "bab7781a1a147680dbb52e6d177645273f9895b1a54381544bf8f2627b967d6e",
+      "file_sha256": "74ed01b87b71593eb3b1510adbf4d6fc380ce028722ede51824eed55109e5695",
       "reason": "synthetic negative fixture"
     },
     {
@@ -185,9 +185,22 @@
       "reason": "synthetic negative fixture"
     }
   ],
-  "future_release_paths": [
+  "required_release_paths": [
+    "SKILL.md",
+    "README.md",
+    "LICENSE",
+    "CONTRIBUTING.md",
+    "DATA_SOURCES.md",
+    "SECURITY.md",
+    "CODE_OF_CONDUCT.md",
+    "CHANGELOG.md",
+    "ROADMAP.md",
+    "pyproject.toml",
+    "release-policy.json",
+    "docs/release-process.md",
     ".github/workflows/ci.yml",
     ".github/workflows/source-health.yml",
+    ".github/workflows/release.yml",
     ".github/ISSUE_TEMPLATE/source-health.yml",
     ".github/ISSUE_TEMPLATE/config.yml",
     ".github/ISSUE_TEMPLATE/bug.yml",
@@ -195,11 +208,64 @@
     ".github/ISSUE_TEMPLATE/source-request.yml",
     ".github/pull_request_template.md",
     ".github/dependabot.yml",
-    ".github/workflows/release.yml",
+    "scripts/__init__.py",
+    "scripts/adapters/__init__.py",
+    "scripts/adapters/admission_bridge.py",
+    "scripts/adapters/html_table.py",
+    "scripts/adapters/ocr_rows.py",
+    "scripts/adapters/pdf_text.py",
+    "scripts/adapters/qr.py",
+    "scripts/adapters/spreadsheet.py",
     "scripts/build_release.py",
+    "scripts/compliance_scan.py",
+    "scripts/contracts.py",
+    "scripts/data_loader.py",
+    "scripts/docx_export.py",
+    "scripts/downloader.py",
+    "scripts/evidence.py",
+    "scripts/generate_report.py",
+    "scripts/live_smoke.py",
+    "scripts/path_recommend.py",
+    "scripts/preflight.py",
+    "scripts/province_registry.py",
+    "scripts/query_plan.py",
+    "scripts/rank_calc.py",
+    "scripts/release_check.py",
+    "scripts/report_model.py",
+    "scripts/school_recommend.py",
+    "scripts/source_health_state.py",
+    "scripts/source_policy.py",
+    "scripts/validate_data.py",
+    "scripts/validate_evidence.py",
+    "schemas/capability-report.schema.json",
+    "schemas/evidence-bundle.schema.json",
+    "schemas/pathway-policy.schema.json",
+    "schemas/province-catalog.schema.json",
+    "schemas/province.schema.json",
+    "schemas/query-plan.schema.json",
+    "schemas/rank-anchor.schema.json",
+    "references/hosts/claude-code.md",
+    "references/hosts/codex.md",
+    "references/hosts/generic.md",
+    "references/hosts/kimi.md",
+    "references/provinces/index.json",
+    "references/provinces/README.md",
+    "references/retrieval-playbook.md",
+    "references/source-policy.md",
     "tests/test_build_release.py",
-    "tests/test_workflows.py",
-    "docs/release-process.md"
+    "tests/test_compliance_scan.py",
+    "tests/test_release_check.py",
+    "tests/test_replay_scenarios.py",
+    "tests/test_structured_adapters.py",
+    "tests/test_unstructured_adapters.py",
+    "tests/test_docx_semantic_parity.py",
+    "tests/test_workflows.py"
+  ],
+  "required_release_prefixes": [
+    "tests/fixtures/evidence",
+    "tests/fixtures/profiles",
+    "tests/fixtures/provinces",
+    "tests/fixtures/replay"
   ],
   "ci_generated_paths": [
     "build",
