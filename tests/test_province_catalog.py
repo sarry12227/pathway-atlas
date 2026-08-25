@@ -15,6 +15,7 @@ CATALOG_PATH = ROOT / "references" / "provinces" / "index.json"
 README_PATH = ROOT / "references" / "provinces" / "README.md"
 SCHEMA_PATH = ROOT / "schemas" / "province-catalog.schema.json"
 TASK_DATE = date(2026, 8, 24)
+MAX_ALIASES_PER_PROVINCE = 3
 
 EXPECTED_ORDER = (
     "北京",
@@ -389,15 +390,27 @@ class ProvinceCatalogTest(unittest.TestCase):
         self.assertEqual(len(all_roots), len(set(map(_canonical_url, all_roots))))
 
     def test_aliases_are_nonempty_and_globally_unique_after_nfkc_casefold(self) -> None:
+        alias_schema = self.schema["properties"]["provinces"]["items"]["properties"]["aliases"]
+        self.assertEqual(alias_schema["maxItems"], MAX_ALIASES_PER_PROVINCE)
         aliases: dict[str, str] = {}
         for record in self.catalog["provinces"]:
             self.assertTrue(record["aliases"])
+            self.assertLessEqual(len(record["aliases"]), MAX_ALIASES_PER_PROVINCE)
             normalized = [_normalize_alias(alias) for alias in record["aliases"]]
             self.assertEqual(len(normalized), len(set(normalized)))
             self.assertIn(_normalize_alias(record["province"]), normalized)
             for alias in normalized:
                 self.assertNotIn(alias, aliases, f"alias shared by {aliases.get(alias)} and {record['province']}")
                 aliases[alias] = record["province"]
+        self.assertLessEqual(
+            len(aliases),
+            len(EXPECTED_ORDER) * MAX_ALIASES_PER_PROVINCE,
+        )
+
+        over_limit = json.loads(json.dumps(self.catalog, ensure_ascii=False))
+        over_limit["provinces"][0]["aliases"].extend(["京城", "首都地区"])
+        with self.assertRaises(AssertionError):
+            _assert_schema(over_limit, self.schema)
 
     def test_roots_and_evidence_are_public_https_urls(self) -> None:
         all_urls = list(self.catalog["mode_authority_urls"])

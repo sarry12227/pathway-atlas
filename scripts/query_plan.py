@@ -113,6 +113,7 @@ _GENERIC_KIND_SYNONYMS = {
     "joy_report": ("高中喜报", "高考光荣榜", "高中升学成果"),
 }
 _CATALOG_PATH = Path(__file__).parent.parent / "references" / "provinces" / "index.json"
+MAX_PROVINCE_ALIASES = 3
 _CATALOG_FIELDS = frozenset(
     {"schema_version", "verified_at", "coverage_note", "mode_authority_urls", "provinces"}
 )
@@ -299,6 +300,8 @@ class ProvinceDiscovery:
     def __post_init__(self) -> None:
         province = _public_text(self.province, "catalog province")
         aliases = _text_collection(self.aliases, "catalog aliases", nonempty=True)
+        if len(aliases) > MAX_PROVINCE_ALIASES:
+            raise ProvinceCatalogError("catalog aliases exceed the supported bound")
         if province not in aliases:
             raise ProvinceCatalogError("catalog aliases must contain the canonical province")
         if self.mode not in {"3+3", "3+1+2"}:
@@ -1433,6 +1436,7 @@ def _reconfigure_utf8() -> None:
 
 
 __all__ = [
+    "MAX_PROVINCE_ALIASES",
     "ProvinceCatalogError",
     "ProvinceCatalogSnapshot",
     "ProvinceDiscovery",

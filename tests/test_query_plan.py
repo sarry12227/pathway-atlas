@@ -26,6 +26,8 @@ if str(SCRIPTS) not in sys.path:
 from contracts import OrdinaryBatchPolicy, RecommendationProfile  # noqa: E402
 from province_registry import discover_provinces  # noqa: E402
 from query_plan import (  # noqa: E402
+    MAX_PROVINCE_ALIASES,
+    ProvinceCatalogError,
     ProvinceCatalogSnapshot,
     QueryPlan,
     QueryTask,
@@ -407,6 +409,32 @@ class QueryPlanTest(unittest.TestCase):
                     (TypeError, ValueError)
                 ):
                     load_province_catalog(path)
+
+    def test_catalog_loader_enforces_the_same_finite_alias_bound_as_schema(self):
+        self.assertEqual(MAX_PROVINCE_ALIASES, 3)
+        tracked = json.loads(
+            (ROOT / "references" / "provinces" / "index.json").read_text("utf-8")
+        )
+        within_limit = copy.deepcopy(tracked)
+        within_limit["provinces"][0]["aliases"].append("京城")
+        over_limit = copy.deepcopy(within_limit)
+        over_limit["provinces"][0]["aliases"].append("首都地区")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary).resolve()
+            accepted_path = directory / "accepted-catalog.json"
+            accepted_path.write_text(
+                json.dumps(within_limit, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            rejected_path = directory / "rejected-catalog.json"
+            rejected_path.write_text(
+                json.dumps(over_limit, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            self.assertEqual(load_province_catalog(accepted_path).provinces[0].aliases[-1], "京城")
+            with self.assertRaises(ProvinceCatalogError):
+                load_province_catalog(rejected_path)
 
     def test_structured_targets_are_bound_to_queries_and_ids(self):
         plan = self.build_312()

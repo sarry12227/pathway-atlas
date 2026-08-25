@@ -139,7 +139,7 @@
     {
       "path": "tests/test_query_plan.py",
       "kinds": ["absolute_local_path", "phone", "secret", "student_pii"],
-      "file_sha256": "17ca7eadb6677c7605e2e92b92c09e748d2fed9f8df3db15fae2de906dceb2e7",
+      "file_sha256": "91a445e4ed41f124a9c39dd53147f37c823209b6e0ed440bb91d53a8b039a249",
       "reason": "synthetic negative fixture"
     },
     {

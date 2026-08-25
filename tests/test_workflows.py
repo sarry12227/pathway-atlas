@@ -211,12 +211,16 @@ def _source_health_errors(document: dict[str, Any]) -> list[str]:
         return errors + ["steps"]
     if any("continue-on-error" in step for step in steps):
         errors.append("failure-masking")
+    if any("if" in step for step in steps if step.get("uses") != "actions/github-script@v8"):
+        errors.append("failure-masking")
 
     actions = [step.get("uses") for step in steps if "uses" in step]
     if actions != [
         "actions/checkout@v7",
         "actions/setup-python@v7",
+        "actions/cache/restore@v4",
         "actions/upload-artifact@v6",
+        "actions/cache/save@v4",
         "actions/github-script@v8",
     ]:
         errors.append("official-actions")
@@ -227,6 +231,27 @@ def _source_health_errors(document: dict[str, Any]) -> list[str]:
     setup = next((step for step in steps if step.get("uses") == "actions/setup-python@v7"), {})
     if setup.get("with") != {"python-version": "3.10"}:
         errors.append("supported-python")
+
+    cache_path = "source-health-cache/state.json"
+    cache_key = "source-health-state-${{ github.run_id }}"
+    restore = next(
+        (step for step in steps if step.get("uses") == "actions/cache/restore@v4"),
+        {},
+    )
+    restore_with = restore.get("with")
+    if (
+        not isinstance(restore_with, dict)
+        or restore_with.get("path") != cache_path
+        or restore_with.get("key") != cache_key
+        or str(restore_with.get("restore-keys", "")).strip() != "source-health-state-"
+    ):
+        errors.append("cache-restore")
+    save = next(
+        (step for step in steps if step.get("uses") == "actions/cache/save@v4"),
+        {},
+    )
+    if save.get("with") != {"path": cache_path, "key": cache_key} or "if" in save:
+        errors.append("cache-save")
 
     run_steps = [step for step in steps if "run" in step]
     install_steps = [step for step in run_steps if step.get("run") == "python -m pip install -e ."]
@@ -240,17 +265,24 @@ def _source_health_errors(document: dict[str, Any]) -> list[str]:
         collector = collect_steps[0]["run"]
 
     required_collector_contract = (
-        "references/provinces/index.json",
-        "len(records) != 29",
+        "MAX_PROVINCE_ALIASES",
+        "load_province_catalog",
+        "MAX_CATALOG_PROVINCES = 29",
+        "PROCESS_TIMEOUT_SECONDS = 6",
+        "COLLECTION_BUDGET_SECONDS = 600",
+        "max_calls = MAX_CATALOG_PROVINCES * MAX_PROVINCE_ALIASES",
+        "max_calls * PROCESS_TIMEOUT_SECONDS > COLLECTION_BUDGET_SECONDS",
+        "TOTAL_TIMEOUT_SECONDS != 5.0",
+        "MAX_RESPONSE_BYTES != 1_048_576",
         '"scripts/live_smoke.py"',
         '"--province"',
         "subprocess.run",
-        "timeout=10",
+        "timeout=PROCESS_TIMEOUT_SECONDS",
         '"source-health/results.json"',
     )
     if (
         any(token not in collector for token in required_collector_contract)
-        or re.search(r"(?m)^\s*for alias in aliases:\s*$", collector) is None
+        or re.search(r"(?m)^\s*for alias in discovery\.aliases:\s*$", collector) is None
     ):
         errors.append("catalog-coverage")
     lowered_commands = "\n".join(
@@ -278,6 +310,25 @@ def _source_health_errors(document: dict[str, Any]) -> list[str]:
     if set(live_entrypoints) != {"scripts/live_smoke.py"}:
         errors.append("live-entrypoint")
 
+    state_steps = [step for step in run_steps if step.get("id") == "state"]
+    if len(state_steps) != 1 or not isinstance(state_steps[0].get("run"), str):
+        errors.append("state-wiring")
+        state_runner = ""
+    else:
+        state_runner = state_steps[0]["run"]
+    required_state_wiring = (
+        "HealthObservation",
+        "state_from_payload",
+        "state_to_payload",
+        "transition_source_health",
+        'Path("source-health-cache/state.json")',
+        'Path("source-health/review.json")',
+        'os.environ["GITHUB_OUTPUT"]',
+        '"review=true\\n" if transition.review else "review=false\\n"',
+    )
+    if any(token not in state_runner for token in required_state_wiring):
+        errors.append("state-wiring")
+
     upload = next(
         (step for step in steps if step.get("uses") == "actions/upload-artifact@v6"),
         {},
@@ -304,16 +355,14 @@ def _source_health_errors(document: dict[str, Any]) -> list[str]:
     )
     issue_with = issue_step.get("with")
     issue_script = issue_with.get("script") if isinstance(issue_with, dict) else None
+    if issue_step.get("if") != "${{ steps.state.outputs.review == 'true' }}":
+        errors.append("issue-gating")
     if not isinstance(issue_script, str):
         errors.append("issue-gating")
     else:
         required_issue_contract = (
-            'status === "redirect_review"',
-            'status === "unavailable"',
-            "priorBody.includes(unavailableMarker(result.province))",
-            "if (review.length === 0)",
-            "first unavailable observations remain in the artifact only",
-            "review.map(statusMarker)",
+            'fs.readFileSync("source-health/review.json", "utf8")',
+            "if (!Array.isArray(review) || review.length === 0)",
             "matching.length > 1",
             "github.rest.issues.create",
             "github.rest.issues.update",
@@ -321,7 +370,7 @@ def _source_health_errors(document: dict[str, Any]) -> list[str]:
         )
         if any(token not in issue_script for token in required_issue_contract):
             errors.append("issue-gating")
-        gate_position = issue_script.find("if (review.length === 0)")
+        gate_position = issue_script.find("if (!Array.isArray(review) || review.length === 0)")
         mutation_positions = [
             issue_script.find("github.rest.issues.create"),
             issue_script.find("github.rest.issues.update"),
@@ -336,9 +385,13 @@ def _source_health_errors(document: dict[str, Any]) -> list[str]:
             "result.size_bytes",
             "http://",
             "https://",
+            "priorBody",
+            "unavailableMarker",
         )
         if any(token in issue_script for token in forbidden_payload_fields):
             errors.append("unsafe-issue-payload")
+    if save and issue_step and steps.index(save) >= steps.index(issue_step):
+        errors.append("cache-save-order")
     return errors
 
 
@@ -550,7 +603,7 @@ class WorkflowTest(unittest.TestCase):
         self.assertIn("checkout-credentials", _source_health_errors(credentials))
 
         masked = copy.deepcopy(workflow)
-        masked["jobs"]["monitor"]["steps"][2]["continue-on-error"] = True
+        masked["jobs"]["monitor"]["steps"][4]["continue-on-error"] = True
         self.assertIn("failure-masking", _source_health_errors(masked))
 
         direct_network = copy.deepcopy(workflow)
@@ -562,8 +615,22 @@ class WorkflowTest(unittest.TestCase):
             step for step in incomplete_catalog["jobs"]["monitor"]["steps"]
             if step.get("id") == "collect"
         )
-        collector["run"] = collector["run"].replace("for alias in aliases", "for alias in aliases[:1]")
+        collector["run"] = collector["run"].replace(
+            "for alias in discovery.aliases",
+            "for alias in discovery.aliases[:1]",
+        )
         self.assertIn("catalog-coverage", _source_health_errors(incomplete_catalog))
+
+        unbounded_catalog = copy.deepcopy(workflow)
+        collector = next(
+            step for step in unbounded_catalog["jobs"]["monitor"]["steps"]
+            if step.get("id") == "collect"
+        )
+        collector["run"] = collector["run"].replace(
+            "max_calls * PROCESS_TIMEOUT_SECONDS > COLLECTION_BUDGET_SECONDS",
+            "False",
+        )
+        self.assertIn("catalog-coverage", _source_health_errors(unbounded_catalog))
 
         absolute_artifact = copy.deepcopy(workflow)
         upload = next(
@@ -573,7 +640,15 @@ class WorkflowTest(unittest.TestCase):
         upload["with"]["path"] = "/tmp/results.json"
         self.assertIn("artifact", _source_health_errors(absolute_artifact))
 
-        self.assertEqual(len(steps), 6)
+        missing_save = copy.deepcopy(workflow)
+        missing_save["jobs"]["monitor"]["steps"] = [
+            step
+            for step in missing_save["jobs"]["monitor"]["steps"]
+            if step.get("uses") != "actions/cache/save@v4"
+        ]
+        self.assertIn("cache-save", _source_health_errors(missing_save))
+
+        self.assertEqual(len(steps), 9)
 
     def test_source_health_issue_gating_and_template_notice_mutations_fail_closed(self) -> None:
         workflow = self.load_source_health()
@@ -582,10 +657,7 @@ class WorkflowTest(unittest.TestCase):
             step for step in ungated["jobs"]["monitor"]["steps"]
             if step.get("uses") == "actions/github-script@v8"
         )
-        issue_step["with"]["script"] = issue_step["with"]["script"].replace(
-            "if (review.length === 0)",
-            "if (false)",
-        )
+        issue_step["if"] = "${{ always() }}"
         self.assertIn("issue-gating", _source_health_errors(ungated))
 
         leaked_domain = copy.deepcopy(workflow)

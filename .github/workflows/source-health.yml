@@ -27,6 +27,14 @@ jobs:
         uses: actions/setup-python@v7
         with:
           python-version: "3.10"
+      - name: Restore the latest minimal persistence state
+        id: restore-state
+        uses: actions/cache/restore@v4
+        with:
+          path: source-health-cache/state.json
+          key: source-health-state-${{ github.run_id }}
+          restore-keys: |
+            source-health-state-
       - name: Install core package only
         run: python -m pip install -e .
       - name: Collect bounded path-neutral health results
@@ -39,34 +47,34 @@ jobs:
           import sys
           from pathlib import Path
 
-          catalog_path = Path("references/provinces/index.json")
+          from scripts.live_smoke import MAX_RESPONSE_BYTES, TOTAL_TIMEOUT_SECONDS
+          from scripts.query_plan import MAX_PROVINCE_ALIASES, load_province_catalog
+
+          MAX_CATALOG_PROVINCES = 29
+          PROCESS_TIMEOUT_SECONDS = 6
+          COLLECTION_BUDGET_SECONDS = 600
+          max_calls = MAX_CATALOG_PROVINCES * MAX_PROVINCE_ALIASES
+          if max_calls * PROCESS_TIMEOUT_SECONDS > COLLECTION_BUDGET_SECONDS:
+              raise SystemExit("source-health call budget is unsafe")
+          if TOTAL_TIMEOUT_SECONDS != 5.0 or MAX_RESPONSE_BYTES != 1_048_576:
+              raise SystemExit("live smoke bounds changed")
+
           try:
-              catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
-              records = catalog["provinces"]
-          except (OSError, UnicodeError, json.JSONDecodeError, KeyError, TypeError) as error:
+              catalog = load_province_catalog()
+          except (OSError, UnicodeError, TypeError, ValueError) as error:
               raise SystemExit("invalid province catalog") from error
-          if not isinstance(records, list) or len(records) != 29:
+          if len(catalog.provinces) != MAX_CATALOG_PROVINCES:
               raise SystemExit("province catalog coverage changed")
+          actual_calls = sum(len(discovery.aliases) for discovery in catalog.provinces)
+          if (
+              actual_calls > max_calls
+              or any(len(discovery.aliases) > MAX_PROVINCE_ALIASES for discovery in catalog.provinces)
+          ):
+              raise SystemExit("province alias bound exceeded")
 
           results = []
-          seen_aliases = set()
-          for record in records:
-              if not isinstance(record, dict):
-                  raise SystemExit("invalid province record")
-              province = record.get("province")
-              aliases = record.get("aliases")
-              if (
-                  not isinstance(province, str)
-                  or not province
-                  or not isinstance(aliases, list)
-                  or not aliases
-                  or not all(isinstance(alias, str) and alias for alias in aliases)
-              ):
-                  raise SystemExit("invalid province aliases")
-              for alias in aliases:
-                  if alias in seen_aliases:
-                      raise SystemExit("duplicate province alias")
-                  seen_aliases.add(alias)
+          for discovery in catalog.provinces:
+              for alias in discovery.aliases:
                   try:
                       completed = subprocess.run(
                           [sys.executable, "scripts/live_smoke.py", "--province", alias],
@@ -75,7 +83,7 @@ jobs:
                           text=True,
                           encoding="utf-8",
                           errors="strict",
-                          timeout=10,
+                          timeout=PROCESS_TIMEOUT_SECONDS,
                       )
                   except (OSError, UnicodeError, subprocess.TimeoutExpired) as error:
                       raise SystemExit("live smoke invocation failed") from error
@@ -87,11 +95,13 @@ jobs:
                       raise SystemExit("invalid live smoke result") from error
                   if (
                       not isinstance(result, dict)
-                      or result.get("province") != province
+                      or result.get("province") != discovery.province
                       or result.get("status") not in {"healthy", "redirect_review", "unavailable"}
                   ):
                       raise SystemExit("invalid live smoke result")
                   results.append(result)
+          if len(results) != actual_calls:
+              raise SystemExit("incomplete live smoke results")
 
           artifact = Path("source-health/results.json")
           artifact.parent.mkdir(exist_ok=False)
@@ -105,6 +115,70 @@ jobs:
               encoding="utf-8",
           )
           PY
+      - name: Advance deterministic persistence state
+        id: state
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          from scripts.source_health_state import (
+              HealthObservation,
+              state_from_payload,
+              state_to_payload,
+              transition_source_health,
+          )
+
+          cache_path = Path("source-health-cache/state.json")
+          try:
+              previous_payload = (
+                  json.loads(cache_path.read_text(encoding="utf-8"))
+                  if cache_path.is_file()
+                  else []
+              )
+              previous = state_from_payload(previous_payload)
+              health_payload = json.loads(
+                  Path("source-health/results.json").read_text(encoding="utf-8")
+              )
+              raw_results = health_payload["results"]
+              if not isinstance(raw_results, list):
+                  raise ValueError("invalid health results")
+              observations = tuple(
+                  HealthObservation(result["province"], result["status"])
+                  for result in raw_results
+                  if isinstance(result, dict)
+              )
+              if len(observations) != len(raw_results):
+                  raise ValueError("invalid health results")
+              transition = transition_source_health(previous, observations)
+          except (OSError, UnicodeError, json.JSONDecodeError, KeyError, TypeError, ValueError) as error:
+              raise SystemExit("invalid source-health state input") from error
+
+          cache_path.parent.mkdir(parents=True, exist_ok=True)
+          cache_path.write_text(
+              json.dumps(
+                  state_to_payload(transition.state),
+                  ensure_ascii=False,
+                  sort_keys=True,
+                  separators=(",", ":"),
+              ) + "\n",
+              encoding="utf-8",
+          )
+          review_path = Path("source-health/review.json")
+          review_path.write_text(
+              json.dumps(
+                  [observation.to_dict() for observation in transition.review],
+                  ensure_ascii=False,
+                  sort_keys=True,
+                  separators=(",", ":"),
+              ) + "\n",
+              encoding="utf-8",
+          )
+          with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
+              output.write("review=true\n" if transition.review else "review=false\n")
+          PY
       - name: Retain health telemetry for manual review
         uses: actions/upload-artifact@v6
         with:
@@ -112,43 +186,35 @@ jobs:
           path: source-health/results.json
           if-no-files-found: error
           retention-days: 14
+      - name: Save this run's minimal persistence state
+        uses: actions/cache/save@v4
+        with:
+          path: source-health-cache/state.json
+          key: source-health-state-${{ github.run_id }}
       - name: Create or update the single manual-review issue when gated
+        if: ${{ steps.state.outputs.review == 'true' }}
         uses: actions/github-script@v8
         with:
           script: |
             const fs = require("fs");
-            const payload = JSON.parse(fs.readFileSync("source-health/results.json", "utf8"));
-            if (payload.schema_version !== "1.0" || !Array.isArray(payload.results)) {
-              throw new Error("invalid source-health artifact");
+            const review = JSON.parse(fs.readFileSync("source-health/review.json", "utf8"));
+            if (!Array.isArray(review) || review.length === 0) {
+              throw new Error("invalid source-health review decision");
             }
-
-            const allowedReasons = new Set([
-              "timeout",
-              "dns_or_network",
-              "http_error",
-              "redirect_error",
-              "unsupported_content_type",
-              "response_too_large",
-              "security_rejection",
-              "storage_error",
-              "unlisted_redirect_domain",
-            ]);
             const provincePattern = /^\p{Script=Han}{2,8}$/u;
-            for (const result of payload.results) {
+            for (const result of review) {
               if (
                 !result
+                || Object.keys(result).sort().join(",") !== "province,status"
                 || !provincePattern.test(result.province)
-                || !["healthy", "redirect_review", "unavailable"].includes(result.status)
-                || (result.reason_code !== null && !allowedReasons.has(result.reason_code))
+                || !["redirect_review", "unavailable"].includes(result.status)
               ) {
-                throw new Error("unsafe source-health result");
+                throw new Error("unsafe source-health review decision");
               }
             }
 
             const label = "source-health";
             const title = "[source-health] Manual official-root review";
-            const unavailableMarker = province => `<!-- source-health:unavailable:${province} -->`;
-            const statusMarker = result => `<!-- source-health:${result.status}:${result.province} -->`;
             const {data: openIssues} = await github.rest.issues.listForRepo({
               owner: context.repo.owner,
               repo: context.repo.repo,
@@ -163,19 +229,6 @@ jobs:
               throw new Error("multiple source-health issues");
             }
             const existing = matching[0];
-            const priorBody = existing?.body || "";
-            const redirects = payload.results.filter(
-              result => result.status === "redirect_review",
-            );
-            const persistentUnavailable = payload.results.filter(
-              result => result.status === "unavailable"
-                && priorBody.includes(unavailableMarker(result.province)),
-            );
-            const review = [...redirects, ...persistentUnavailable];
-            if (review.length === 0) {
-              core.info("No issue update required; first unavailable observations remain in the artifact only.");
-              return;
-            }
 
             try {
               await github.rest.issues.getLabel({
@@ -196,9 +249,6 @@ jobs:
               });
             }
 
-            const currentMarkers = [...new Set(
-              review.map(statusMarker),
-            )].sort();
             const reviewLines = [...new Set(
               review.map(result => `- ${result.province}: ${result.status}`),
             )].sort();
@@ -210,9 +260,6 @@ jobs:
               "",
               "Review required:",
               ...reviewLines,
-              "",
-              "Machine-readable persistence markers:",
-              ...currentMarkers,
             ].join("\n");
 
             if (existing) {
