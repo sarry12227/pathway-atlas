@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import os
 import re
@@ -87,6 +88,89 @@ _EXACT_CACHE_BINARY_SUFFIXES = frozenset(
 )
 _MAX_UNTRACKED_SCAN_FILES = 512
 _MAX_UNTRACKED_SCAN_BYTES = 16 * 1024 * 1024
+
+
+def _is_regular_nonreparse(metadata: os.stat_result) -> bool:
+    attributes = getattr(metadata, "st_file_attributes", 0)
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    return stat.S_ISREG(metadata.st_mode) and not bool(attributes & reparse_flag)
+
+
+def _same_file_identity(first: os.stat_result, *others: os.stat_result) -> bool:
+    return all(os.path.samestat(first, other) for other in others)
+
+
+def _read_state(metadata: os.stat_result) -> tuple[int, int, int]:
+    return (
+        metadata.st_size,
+        getattr(metadata, "st_mtime_ns", int(metadata.st_mtime * 1_000_000_000)),
+        getattr(metadata, "st_ctime_ns", int(metadata.st_ctime * 1_000_000_000)),
+    )
+
+
+def _open_nofollow(path: str, flags: int) -> int:
+    return os.open(
+        path,
+        flags
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_NOINHERIT", 0),
+    )
+
+
+def _verified_untracked_metadata(
+    root: Path,
+    canonical: str,
+    candidate: Path,
+) -> os.stat_result:
+    verified, finding = safe_tracked_file(root, canonical)
+    if finding is not None or verified != candidate:
+        raise OSError("untracked path identity changed")
+    metadata = candidate.lstat()
+    if not _is_regular_nonreparse(metadata):
+        raise OSError("untracked path identity changed")
+    return metadata
+
+
+def _read_untracked_bytes_bounded(
+    root: Path,
+    canonical: str,
+    candidate: Path,
+    limit: int,
+) -> bytes:
+    """Read at most ``limit + 1`` bytes from one identity-stable regular file."""
+
+    before_path = candidate.lstat()
+    if not _is_regular_nonreparse(before_path):
+        raise OSError("unsafe untracked file")
+    with io.open(candidate, "rb", buffering=0, opener=_open_nofollow) as stream:
+        opened = os.fstat(stream.fileno())
+        after_open_path = _verified_untracked_metadata(root, canonical, candidate)
+        if (
+            not _is_regular_nonreparse(opened)
+            or not _same_file_identity(before_path, opened, after_open_path)
+        ):
+            raise OSError("untracked path identity changed")
+
+        content = bytearray()
+        while len(content) <= limit:
+            requested = limit + 1 - len(content)
+            chunk = stream.read(requested)
+            if not isinstance(chunk, bytes) or len(chunk) > requested:
+                raise OSError("invalid untracked file read")
+            if not chunk:
+                break
+            content.extend(chunk)
+
+        after_read = os.fstat(stream.fileno())
+        after_read_path = _verified_untracked_metadata(root, canonical, candidate)
+        if (
+            not _is_regular_nonreparse(after_read)
+            or not _same_file_identity(opened, after_read, after_read_path)
+            or _read_state(opened) != _read_state(after_read)
+        ):
+            raise OSError("untracked file changed during read")
+    return bytes(content)
 
 
 def _is_sensitive_untracked_name(relative: str) -> bool:
@@ -408,6 +492,7 @@ def check_untracked_sensitive_paths(
     ignored_identities = {_path_identity(path.replace("\\", "/")) for path in ignored_paths}
     ordinary_set = set(paths)
     combined = tuple(paths) + tuple(path for path in ignored_paths if path not in ordinary_set)
+    resolved_root = root.resolve() if root is not None else None
     scanned_files = 0
     scanned_bytes = 0
     for raw in combined:
@@ -427,7 +512,8 @@ def check_untracked_sensitive_paths(
             continue
         if ignored and _is_exact_ignored_artifact(canonical, policy):
             continue
-        candidate, path_finding = safe_tracked_file(root.resolve(), canonical)
+        assert resolved_root is not None
+        candidate, path_finding = safe_tracked_file(resolved_root, canonical)
         if path_finding is not None:
             details.append(
                 "kind=untracked_path;"
@@ -435,36 +521,35 @@ def check_untracked_sensitive_paths(
             )
             continue
         assert candidate is not None
+        if scanned_files + 1 > max_scan_files:
+            details.append("kind=untracked_budget;rule=content-file-budget-exceeded;line=0")
+            break
+        scanned_files += 1
+        remaining_total = max_scan_bytes - scanned_bytes
+        read_limit = min(policy.max_text_bytes, remaining_total)
         try:
-            size = candidate.stat().st_size
-        except OSError:
+            raw = _read_untracked_bytes_bounded(
+                resolved_root,
+                canonical,
+                candidate,
+                read_limit,
+            )
+        except (OSError, ValueError):
             details.append(
                 "kind=untracked_path;rule=unreadable-untracked-file;line=0;"
                 f"path={_safe_relative(canonical)}"
             )
             continue
-        if size > policy.max_text_bytes:
+        if len(raw) > policy.max_text_bytes:
             details.append(
                 "kind=untracked_path;rule=untracked-file-too-large;line=0;"
                 f"path={_safe_relative(canonical)}"
             )
             continue
-        if scanned_files + 1 > max_scan_files:
-            details.append("kind=untracked_budget;rule=content-file-budget-exceeded;line=0")
-            break
-        if scanned_bytes + size > max_scan_bytes:
+        if len(raw) > remaining_total:
             details.append("kind=untracked_budget;rule=content-byte-budget-exceeded;line=0")
             break
-        scanned_files += 1
-        scanned_bytes += size
-        try:
-            raw = candidate.read_bytes()
-        except OSError:
-            details.append(
-                "kind=untracked_path;rule=unreadable-untracked-file;line=0;"
-                f"path={_safe_relative(canonical)}"
-            )
-            continue
+        scanned_bytes += len(raw)
         if b"\x00" in raw:
             details.append(
                 "kind=untracked_path;rule=undeclared-binary-content;line=0;"

@@ -42,6 +42,57 @@ from scripts.compliance_scan import (
 ROOT = Path(__file__).resolve().parents[1]
 
 
+class _ShortReadStream:
+    """Test-only real-file wrapper that exposes short reads and one read hook."""
+
+    def __init__(
+        self,
+        stream,
+        *,
+        max_chunk: int,
+        after_first_read=None,
+        requested_sizes: list[int] | None = None,
+    ):
+        self._stream = stream
+        self._max_chunk = max_chunk
+        self._after_first_read = after_first_read
+        self._requested_sizes = requested_sizes
+        self._read_once = False
+
+    def __enter__(self):
+        self._stream.__enter__()
+        return self
+
+    def __exit__(self, *arguments):
+        return self._stream.__exit__(*arguments)
+
+    def fileno(self):
+        return self._stream.fileno()
+
+    def read(self, size: int = -1):
+        if self._requested_sizes is not None:
+            self._requested_sizes.append(size)
+        bounded_size = self._max_chunk if size < 0 else min(size, self._max_chunk)
+        chunk = self._stream.read(bounded_size)
+        if not self._read_once:
+            self._read_once = True
+            if self._after_first_read is not None:
+                self._after_first_read()
+        return chunk
+
+
+@contextlib.contextmanager
+def _patch_binary_open(path: Path, side_effect):
+    """Intercept pathlib's version-specific binary-open seam for race fixtures."""
+
+    with contextlib.ExitStack() as stack:
+        stack.enter_context(mock.patch.object(io, "open", side_effect=side_effect))
+        accessor = getattr(path, "_accessor", None)
+        if accessor is not None:
+            stack.enter_context(mock.patch.object(accessor, "open", side_effect=side_effect))
+        yield
+
+
 class TrackedBoundaryTest(unittest.TestCase):
     def test_rejects_real_data_generated_private_and_noncanonical_paths(self) -> None:
         result = check_tracked_paths(
@@ -305,6 +356,225 @@ class ReleaseComponentTest(unittest.TestCase):
             bytes_result.details,
             ("kind=untracked_budget;rule=content-byte-budget-exceeded;line=0",),
         )
+
+    def test_ignored_open_growth_uses_bounded_actual_bytes_despite_short_reads(self) -> None:
+        cases = (
+            (
+                "per-file",
+                8,
+                64,
+                "kind=untracked_path;rule=untracked-file-too-large;line=0;path=.venv/cache.txt",
+            ),
+            (
+                "remaining-total",
+                64,
+                8,
+                "kind=untracked_budget;rule=content-byte-budget-exceeded;line=0",
+            ),
+        )
+        real_open = io.open
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            cache = root / ".venv" / "cache.txt"
+            cache.parent.mkdir()
+            base_policy = load_policy(ROOT / "release-policy.json")
+
+            for label, per_file_limit, total_limit, expected in cases:
+                with self.subTest(label=label):
+                    cache.write_bytes(b"safe")
+                    grew = False
+                    requested_sizes: list[int] = []
+
+                    def racing_open(file, *arguments, **keywords):
+                        nonlocal grew
+                        mode = arguments[0] if arguments else keywords.get("mode", "r")
+                        if Path(file) == cache and mode == "rb" and not grew:
+                            with real_open(cache, "ab") as writer:
+                                writer.write(b"0123456789")
+                            grew = True
+                            return _ShortReadStream(
+                                real_open(file, *arguments, **keywords),
+                                max_chunk=3,
+                                requested_sizes=requested_sizes,
+                            )
+                        return real_open(file, *arguments, **keywords)
+
+                    with _patch_binary_open(cache, racing_open):
+                        result = check_untracked_sensitive_paths(
+                            (),
+                            root=root,
+                            policy=replace(base_policy, max_text_bytes=per_file_limit),
+                            ignored_paths=(".venv/cache.txt",),
+                            max_scan_bytes=total_limit,
+                        )
+
+                    self.assertTrue(grew)
+                    self.assertTrue(requested_sizes)
+                    self.assertTrue(
+                        all(
+                            0 <= requested <= min(per_file_limit, total_limit) + 1
+                            for requested in requested_sizes
+                        ),
+                        requested_sizes,
+                    )
+                    self.assertEqual(result.details, (expected,))
+
+    def test_ignored_read_race_fails_closed_without_leaking_the_root(self) -> None:
+        real_open = io.open
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            cache = root / ".venv" / "cache.txt"
+            cache.parent.mkdir()
+            cache.write_bytes(b"safe")
+            mutated = False
+
+            def mutate_after_read() -> None:
+                nonlocal mutated
+                with real_open(cache, "ab") as writer:
+                    writer.write(b" growth")
+                mutated = True
+
+            def racing_open(file, *arguments, **keywords):
+                mode = arguments[0] if arguments else keywords.get("mode", "r")
+                stream = real_open(file, *arguments, **keywords)
+                if Path(file) == cache and mode == "rb":
+                    return _ShortReadStream(
+                        stream, max_chunk=64, after_first_read=mutate_after_read
+                    )
+                return stream
+
+            with _patch_binary_open(cache, racing_open):
+                result = check_untracked_sensitive_paths(
+                    (),
+                    root=root,
+                    policy=replace(
+                        load_policy(ROOT / "release-policy.json"), max_text_bytes=64
+                    ),
+                    ignored_paths=(".venv/cache.txt",),
+                    max_scan_bytes=64,
+                )
+
+        serialized = json.dumps(result.to_dict())
+        self.assertTrue(mutated)
+        self.assertEqual(
+            result.details,
+            (
+                "kind=untracked_path;rule=unreadable-untracked-file;line=0;"
+                "path=.venv/cache.txt",
+            ),
+        )
+        self.assertNotIn(str(root), serialized)
+
+    def test_ignored_identity_replacement_is_rejected_before_content_read(self) -> None:
+        private = "ghp_replacement_private_payload_1234567890"
+        real_open = io.open
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            cache = root / ".venv" / "cache.txt"
+            cache.parent.mkdir()
+            cache.write_bytes(b"safe")
+            archived = root / "original.txt"
+            replacement_path = root / "replacement.txt"
+            replacement_path.write_text(f"token={private}", encoding="utf-8")
+            replaced = False
+
+            def racing_open(file, *arguments, **keywords):
+                nonlocal replaced
+                mode = arguments[0] if arguments else keywords.get("mode", "r")
+                if Path(file) == cache and mode == "rb" and not replaced:
+                    os.replace(cache, archived)
+                    os.replace(replacement_path, cache)
+                    replaced = True
+                return real_open(file, *arguments, **keywords)
+
+            with _patch_binary_open(cache, racing_open):
+                result = check_untracked_sensitive_paths(
+                    (),
+                    root=root,
+                    policy=load_policy(ROOT / "release-policy.json"),
+                    ignored_paths=(".venv/cache.txt",),
+                )
+
+        serialized = json.dumps(result.to_dict())
+        self.assertTrue(replaced)
+        self.assertEqual(
+            result.details,
+            (
+                "kind=untracked_path;rule=unreadable-untracked-file;line=0;"
+                "path=.venv/cache.txt",
+            ),
+        )
+        self.assertNotIn(private, serialized)
+        self.assertNotIn(str(root), serialized)
+
+    def test_ignored_symlink_swap_is_rejected_without_opening_target_content(self) -> None:
+        private = "ghp_symlink_private_payload_1234567890"
+        real_open = io.open
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            target = root / "outside-private.txt"
+            target.write_text(f"token={private}", encoding="utf-8")
+            probe = root / "symlink-probe"
+            try:
+                probe.symlink_to(target)
+                probe.unlink()
+            except OSError as error:
+                self.skipTest(f"symlinks unavailable: {type(error).__name__}")
+            cache = root / ".venv" / "cache.txt"
+            cache.parent.mkdir()
+            cache.write_bytes(b"safe")
+            archived = root / "original.txt"
+            swapped = False
+
+            def racing_open(file, *arguments, **keywords):
+                nonlocal swapped
+                mode = arguments[0] if arguments else keywords.get("mode", "r")
+                if Path(file) == cache and mode == "rb" and not swapped:
+                    os.replace(cache, archived)
+                    cache.symlink_to(target)
+                    swapped = True
+                return real_open(file, *arguments, **keywords)
+
+            with _patch_binary_open(cache, racing_open):
+                result = check_untracked_sensitive_paths(
+                    (),
+                    root=root,
+                    policy=load_policy(ROOT / "release-policy.json"),
+                    ignored_paths=(".venv/cache.txt",),
+                )
+
+        serialized = json.dumps(result.to_dict())
+        self.assertTrue(swapped)
+        self.assertEqual(
+            result.details,
+            (
+                "kind=untracked_path;rule=unreadable-untracked-file;line=0;"
+                "path=.venv/cache.txt",
+            ),
+        )
+        self.assertNotIn(private, serialized)
+        self.assertNotIn(str(target), serialized)
+
+    def test_ignored_scan_accepts_exact_per_file_and_total_byte_boundaries(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            cache = root / ".venv"
+            cache.mkdir()
+            (cache / "first.txt").write_bytes(b"safe")
+            (cache / "second.txt").write_bytes(b"text")
+            result = check_untracked_sensitive_paths(
+                (),
+                root=root,
+                policy=replace(
+                    load_policy(ROOT / "release-policy.json"), max_text_bytes=4
+                ),
+                ignored_paths=(".venv/first.txt", ".venv/second.txt"),
+                max_scan_files=2,
+                max_scan_bytes=8,
+            )
+
+        self.assertTrue(result.ok, result.details)
+        self.assertEqual(result.details, ())
 
     def test_only_exact_cache_binaries_skip_ignored_content_scanning(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

@@ -163,7 +163,7 @@
     {
       "path": "tests/test_release_check.py",
       "kinds": ["absolute_local_path", "pricing_or_sales", "secret", "student_pii"],
-      "file_sha256": "091f198f33b7a4ea5a2298fb234e3f7f03f2b3a3a827cc3809207e5c66183d1b",
+      "file_sha256": "08c99ae92e8485104cdfc46508a17567e102d1a7a2b9f938cd5085a804f9872c",
       "reason": "synthetic negative fixture"
     },
     {
