@@ -18,7 +18,7 @@ import sys
 import unicodedata
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Optional, Sequence
+from typing import Callable, Optional, Sequence
 
 
 _FOREIGN_CURRENCY = r"(?:港币|澳门元)"
@@ -126,6 +126,7 @@ _POLICY_KEYS = frozenset(
     {
         "schema_version",
         "binary_extensions",
+        "binary_release_manifest",
         "max_text_bytes",
         "forbidden_tracked_directories",
         "allowlist",
@@ -139,6 +140,8 @@ _POLICY_KEYS = frozenset(
 )
 _ALLOWLIST_KEYS = frozenset({"path", "kind", "line_sha256", "reason"})
 _FILE_ALLOWLIST_KEYS = frozenset({"path", "kinds", "file_sha256", "reason"})
+_BINARY_MANIFEST_KEYS = frozenset({"path", "sha256", "classification"})
+_RIGHTS_REVIEWED_BINARY_MANIFEST_KEYS = _BINARY_MANIFEST_KEYS | {"rights_doc"}
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
 _PATH_DRIVE_RE = re.compile(r"^[A-Za-z]:")
 _EDUCATIONAL_PRICE_CONTEXT_RE = re.compile(
@@ -172,9 +175,18 @@ class FileAllowlistEntry:
 
 
 @dataclass(frozen=True)
+class BinaryReleaseManifestEntry:
+    path: str
+    sha256: str
+    classification: str
+    rights_doc: str | None = None
+
+
+@dataclass(frozen=True)
 class ReleasePolicy:
     schema_version: str
     binary_extensions: frozenset[str]
+    binary_release_manifest: tuple[BinaryReleaseManifestEntry, ...]
     max_text_bytes: int
     forbidden_tracked_directories: tuple[str, ...]
     allowlist: tuple[AllowlistEntry, ...]
@@ -231,6 +243,25 @@ class GitTrackedEntry:
 
     path: str
     mode: str
+    object_id: str
+
+
+@dataclass(frozen=True)
+class GitReplacementRef:
+    """One validated Git replacement mapping, retained only as object IDs."""
+
+    original_object_id: str
+    replacement_object_id: str
+
+
+@dataclass(frozen=True)
+class BinaryManifestValidation:
+    findings: tuple[Finding, ...]
+    approved_paths: frozenset[str]
+
+    @property
+    def ok(self) -> bool:
+        return not self.findings
 
 
 def find_price_text(text: object) -> Optional[str]:
@@ -328,7 +359,7 @@ def parse_policy_bytes(raw: bytes) -> ReleasePolicy:
     payload = _strict_json(raw)
     if not isinstance(payload, dict) or set(payload) != _POLICY_KEYS:
         raise PolicyError("policy keys do not match the supported schema")
-    if payload["schema_version"] != "1.1":
+    if payload["schema_version"] != "1.2":
         raise PolicyError("unsupported policy schema version")
 
     extensions = _string_list(payload["binary_extensions"], "binary_extensions")
@@ -337,6 +368,51 @@ def parse_policy_bytes(raw: bytes) -> ReleasePolicy:
         raise PolicyError("binary extensions must begin with a dot")
     if len(normalized_extensions) != len(set(normalized_extensions)):
         raise PolicyError("binary extensions collide after case folding")
+
+    manifest_payload = payload["binary_release_manifest"]
+    if not isinstance(manifest_payload, list):
+        raise PolicyError("binary_release_manifest must be a list")
+    binary_manifest: list[BinaryReleaseManifestEntry] = []
+    binary_identities: set[str] = set()
+    for item in manifest_payload:
+        if not isinstance(item, dict):
+            raise PolicyError("binary manifest entry must be an object")
+        classification = item.get("classification")
+        expected_keys = (
+            _BINARY_MANIFEST_KEYS
+            if classification == "synthetic"
+            else _RIGHTS_REVIEWED_BINARY_MANIFEST_KEYS
+            if classification == "rights-reviewed"
+            else frozenset()
+        )
+        if not expected_keys or set(item) != expected_keys:
+            raise PolicyError("binary manifest entry keys or classification are invalid")
+        entry_path = canonical_repository_path(item["path"], "binary_release_manifest.path")
+        digest = item["sha256"]
+        if PurePosixPath(entry_path).suffix.casefold() not in normalized_extensions:
+            raise PolicyError("binary manifest path must use a declared binary extension")
+        if not isinstance(digest, str) or _SHA256_RE.fullmatch(digest) is None:
+            raise PolicyError("binary manifest sha256 is invalid")
+        identity = unicodedata.normalize("NFKC", entry_path).casefold()
+        if identity in binary_identities:
+            raise PolicyError("binary manifest contains a duplicate path")
+        binary_identities.add(identity)
+        rights_doc = None
+        if classification == "rights-reviewed":
+            rights_doc = canonical_repository_path(
+                item["rights_doc"],
+                "binary_release_manifest.rights_doc",
+            )
+            if rights_doc == entry_path or PurePosixPath(rights_doc).suffix.casefold() in normalized_extensions:
+                raise PolicyError("binary rights document is invalid")
+        binary_manifest.append(
+            BinaryReleaseManifestEntry(
+                path=entry_path,
+                sha256=digest,
+                classification=classification,
+                rights_doc=rights_doc,
+            )
+        )
 
     max_text_bytes = payload["max_text_bytes"]
     if (
@@ -414,8 +490,9 @@ def parse_policy_bytes(raw: bytes) -> ReleasePolicy:
         file_allowlist.append(FileAllowlistEntry(entry_path, kinds, digest, reason))
 
     return ReleasePolicy(
-        schema_version="1.1",
+        schema_version="1.2",
         binary_extensions=frozenset(normalized_extensions),
+        binary_release_manifest=tuple(binary_manifest),
         max_text_bytes=max_text_bytes,
         forbidden_tracked_directories=directories,
         allowlist=tuple(allowlist),
@@ -451,6 +528,75 @@ def missing_required_release_paths(
         if not any(path.startswith(marker) for path in inventory):
             missing.append(prefix + "/**")
     return tuple(missing)
+
+
+def validate_binary_release_manifest(
+    policy: ReleasePolicy,
+    entries: Sequence[GitTrackedEntry],
+    read_bytes: Callable[[GitTrackedEntry], bytes],
+) -> BinaryManifestValidation:
+    """Validate the exact binary allowlist against one caller-owned snapshot."""
+
+    inventory = {entry.path: entry for entry in entries}
+    declared = {entry.path: entry for entry in policy.binary_release_manifest}
+    findings: list[Finding] = []
+    approved: set[str] = set()
+
+    for path, manifest in declared.items():
+        tracked = inventory.get(path)
+        if tracked is None:
+            findings.append(
+                Finding("binary_manifest", "binary-manifest-path-missing", 0, 0, _reported_path(path))
+            )
+            continue
+        if re.fullmatch(r"100[0-7]{3}", tracked.mode) is None:
+            findings.append(
+                Finding("binary_manifest", "binary-manifest-mode-invalid", 0, 0, _reported_path(path))
+            )
+            continue
+        if manifest.rights_doc is not None:
+            rights_entry = inventory.get(manifest.rights_doc)
+            if rights_entry is None or re.fullmatch(r"100[0-7]{3}", rights_entry.mode) is None:
+                findings.append(
+                    Finding(
+                        "binary_manifest",
+                        "binary-rights-document-missing",
+                        0,
+                        0,
+                        _reported_path(path),
+                    )
+                )
+                continue
+        try:
+            raw = read_bytes(tracked)
+        except (OSError, RuntimeError, ValueError):
+            findings.append(
+                Finding("binary_manifest", "binary-manifest-unreadable", 0, 0, _reported_path(path))
+            )
+            continue
+        if not isinstance(raw, bytes) or hashlib.sha256(raw).hexdigest() != manifest.sha256:
+            findings.append(
+                Finding("binary_manifest", "binary-manifest-hash-mismatch", 0, 0, _reported_path(path))
+            )
+            continue
+        approved.add(path)
+
+    for entry in entries:
+        if (
+            PurePosixPath(entry.path).suffix.casefold() in policy.binary_extensions
+            and entry.path not in declared
+        ):
+            findings.append(
+                Finding(
+                    "binary_manifest",
+                    "unmanifested-binary-path",
+                    0,
+                    0,
+                    _reported_path(entry.path),
+                )
+            )
+
+    return BinaryManifestValidation(tuple(findings), frozenset(approved))
 
 
 def _is_allowlisted(policy: ReleasePolicy | None, path: str | None, kind: str, line: str) -> bool:
@@ -538,16 +684,18 @@ def scan_text(
 def git_environment() -> dict[str, str]:
     """Return a child environment with every ambient Git control removed."""
 
-    return {
+    environment = {
         name: value
         for name, value in os.environ.items()
         if not name.upper().startswith("GIT_")
     }
+    environment["GIT_NO_REPLACE_OBJECTS"] = "1"
+    return environment
 
 
 def _run_git(root: Path, arguments: Sequence[str]) -> bytes:
     completed = subprocess.run(
-        ["git", *arguments],
+        ["git", "--no-replace-objects", *arguments],
         cwd=root,
         check=False,
         capture_output=True,
@@ -556,6 +704,85 @@ def _run_git(root: Path, arguments: Sequence[str]) -> bytes:
     if completed.returncode != 0:
         raise RuntimeError("git inventory failed")
     return completed.stdout
+
+
+def git_replacement_refs(root: Path) -> tuple[GitReplacementRef, ...]:
+    """Enumerate and validate the standard replacement namespace without dereferencing it."""
+
+    output = _run_git(
+        root,
+        ("for-each-ref", "--format=%(refname) %(objectname)", "refs/replace/"),
+    )
+    replacements: list[GitReplacementRef] = []
+    object_pattern = rb"(?:[0-9a-f]{40}|[0-9a-f]{64})"
+    for record in output.splitlines():
+        match = re.fullmatch(
+            rb"refs/replace/(" + object_pattern + rb") (" + object_pattern + rb")",
+            record,
+        )
+        if match is None:
+            raise RuntimeError("git replacement inventory is malformed")
+        replacements.append(
+            GitReplacementRef(
+                match.group(1).decode("ascii"),
+                match.group(2).decode("ascii"),
+            )
+        )
+    return tuple(replacements)
+
+
+def git_write_tree(root: Path) -> str:
+    """Freeze the stage-zero index and return one original tree object ID."""
+
+    try:
+        tree_oid = _run_git(root, ("write-tree",)).decode("ascii", errors="strict").strip()
+    except UnicodeError as error:
+        raise RuntimeError("git tree snapshot is malformed") from error
+    if _SHA256_RE.fullmatch(tree_oid) is None and re.fullmatch(r"[0-9a-f]{40}", tree_oid) is None:
+        raise RuntimeError("git tree snapshot is malformed")
+    return tree_oid
+
+
+def git_tree_entries(root: Path, tree_oid: str) -> tuple[GitTrackedEntry, ...]:
+    """Read one recursive immutable tree inventory without replacement dereferencing."""
+
+    if _SHA256_RE.fullmatch(tree_oid) is None and re.fullmatch(r"[0-9a-f]{40}", tree_oid) is None:
+        raise RuntimeError("git tree object ID is malformed")
+    records = _run_git(
+        root,
+        ("ls-tree", "-rz", "--full-tree", tree_oid, "--"),
+    ).split(b"\x00")
+    entries: list[GitTrackedEntry] = []
+    try:
+        for record in records:
+            if not record:
+                continue
+            metadata, encoded_path = record.split(b"\t", 1)
+            mode, object_type, object_id = metadata.split(b" ", 2)
+            if (
+                re.fullmatch(rb"[0-7]{6}", mode) is None
+                or object_type not in {b"blob", b"commit"}
+                or re.fullmatch(rb"(?:[0-9a-f]{40}|[0-9a-f]{64})", object_id) is None
+            ):
+                raise ValueError
+            entries.append(
+                GitTrackedEntry(
+                    path=encoded_path.decode("utf-8", errors="strict"),
+                    mode=mode.decode("ascii"),
+                    object_id=object_id.decode("ascii"),
+                )
+            )
+    except (UnicodeError, ValueError) as error:
+        raise RuntimeError("git tree inventory is malformed") from error
+    return tuple(entries)
+
+
+def git_blob_bytes(root: Path, object_id: str) -> bytes:
+    """Read an original blob by exact object ID."""
+
+    if _SHA256_RE.fullmatch(object_id) is None and re.fullmatch(r"[0-9a-f]{40}", object_id) is None:
+        raise RuntimeError("git blob object ID is malformed")
+    return _run_git(root, ("cat-file", "blob", object_id))
 
 
 def git_paths(root: Path, arguments: Sequence[str]) -> tuple[str, ...]:
@@ -602,6 +829,7 @@ def git_tracked_entries(root: Path) -> tuple[GitTrackedEntry, ...]:
                 GitTrackedEntry(
                     encoded_path.decode("utf-8", errors="strict"),
                     mode.decode("ascii"),
+                    object_id.decode("ascii"),
                 )
             )
     except (UnicodeError, ValueError) as error:
@@ -646,10 +874,35 @@ def scan_tracked(
     """Scan only Git-tracked, bounded UTF-8 text files beneath ``root``."""
 
     repo = Path(root).resolve()
+    replacements = git_replacement_refs(repo)
+    if replacements:
+        return ScanSummary(
+            (Finding("git_state", "replacement-refs-present", 0, 0, None),),
+            0,
+            0,
+        )
     inventory = tuple(entries) if entries is not None else git_tracked_entries(repo)
     findings: list[Finding] = []
     scanned = 0
     skipped = 0
+    binary_cache: dict[str, bytes] = {}
+
+    def read_worktree_entry(entry: GitTrackedEntry) -> bytes:
+        if entry.path in binary_cache:
+            return binary_cache[entry.path]
+        candidate, path_finding = safe_tracked_file(repo, entry.path)
+        if path_finding is not None or candidate is None:
+            raise OSError("unsafe tracked binary path")
+        raw = candidate.read_bytes()
+        binary_cache[entry.path] = raw
+        return raw
+
+    binary_validation = validate_binary_release_manifest(
+        policy,
+        inventory,
+        read_worktree_entry,
+    )
+    findings.extend(binary_validation.findings)
     for entry in inventory:
         relative = entry.path
         if re.fullmatch(r"100[0-7]{3}", entry.mode) is None:
@@ -661,7 +914,8 @@ def scan_tracked(
             continue
         assert candidate is not None
         if candidate.suffix.casefold() in policy.binary_extensions:
-            skipped += 1
+            if relative in binary_validation.approved_paths:
+                skipped += 1
             continue
         try:
             size = candidate.stat().st_size
@@ -693,6 +947,85 @@ def scan_tracked(
             scan_text(
                 content,
                 path=relative,
+                policy=policy,
+                _file_allowlisted_kinds=file_allowlisted_kinds,
+            )
+        )
+    return ScanSummary(tuple(findings), scanned, skipped)
+
+
+def scan_git_snapshot(
+    root: Path | str,
+    policy: ReleasePolicy,
+    entries: Sequence[GitTrackedEntry],
+) -> ScanSummary:
+    """Scan one immutable Git tree using only original blob object IDs."""
+
+    repo = Path(root).resolve()
+    inventory = tuple(entries)
+    findings: list[Finding] = []
+    scanned = 0
+    skipped = 0
+
+    binary_validation = validate_binary_release_manifest(
+        policy,
+        inventory,
+        lambda entry: git_blob_bytes(repo, entry.object_id),
+    )
+    findings.extend(binary_validation.findings)
+    for entry in inventory:
+        relative = entry.path
+        try:
+            canonical = canonical_repository_path(relative, "tracked path")
+        except PolicyError:
+            findings.append(Finding("tracked_path", "noncanonical-tracked-path", 0, 0, None))
+            continue
+        if re.fullmatch(r"100[0-7]{3}", entry.mode) is None:
+            findings.append(
+                Finding("tracked_path", "unsupported-tracked-mode", 0, 0, _reported_path(canonical))
+            )
+            continue
+        if PurePosixPath(canonical).suffix.casefold() in policy.binary_extensions:
+            if canonical in binary_validation.approved_paths:
+                skipped += 1
+            continue
+        try:
+            raw = git_blob_bytes(repo, entry.object_id)
+        except RuntimeError:
+            findings.append(
+                Finding("tracked_path", "unreadable-tracked-blob", 0, 0, _reported_path(canonical))
+            )
+            continue
+        if len(raw) > policy.max_text_bytes:
+            findings.append(
+                Finding("tracked_path", "tracked-text-too-large", 0, 0, _reported_path(canonical))
+            )
+            continue
+        if b"\x00" in raw:
+            findings.append(
+                Finding("tracked_path", "undeclared-binary-content", 0, 0, _reported_path(canonical))
+            )
+            continue
+        try:
+            content = raw.decode("utf-8", errors="strict")
+        except UnicodeError:
+            findings.append(
+                Finding("tracked_path", "tracked-text-not-utf8", 0, 0, _reported_path(canonical))
+            )
+            continue
+        scanned += 1
+        file_digest = _portable_text_digest(raw)
+        file_allowlisted_kinds = frozenset().union(
+            *(
+                item.kinds
+                for item in policy.file_allowlist
+                if item.path == canonical and item.file_sha256 == file_digest
+            )
+        )
+        findings.extend(
+            scan_text(
+                content,
+                path=canonical,
                 policy=policy,
                 _file_allowlisted_kinds=file_allowlisted_kinds,
             )

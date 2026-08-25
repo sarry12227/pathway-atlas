@@ -43,8 +43,9 @@ class BuildReleaseTest(unittest.TestCase):
         (self.root / "release-policy.json").write_text(
             json.dumps(
                 {
-                    "schema_version": "1.1",
+                    "schema_version": "1.2",
                     "binary_extensions": [".png"],
+                    "binary_release_manifest": [],
                     "max_text_bytes": 1048576,
                     "forbidden_tracked_directories": [
                         ".cache",
@@ -270,6 +271,49 @@ class BuildReleaseTest(unittest.TestCase):
         with self.assertRaises(build_release.BuildReleaseError):
             self._build("dist-missing-fixture")
 
+    def test_unmanifested_docx_pdf_and_xlsx_never_reach_an_archive(self) -> None:
+        policy_path = self.root / "release-policy.json"
+        payload = json.loads(policy_path.read_text("utf-8"))
+        payload["binary_extensions"] = [".docx", ".pdf", ".png", ".xlsx"]
+        policy_path.write_text(json.dumps(payload), encoding="utf-8")
+        for name in ("student.docx", "student.pdf", "student.xlsx"):
+            (self.root / name).write_bytes(b"unreviewed-binary\x00payload")
+        self._git_add_all()
+
+        with self.assertRaises(build_release.BuildReleaseError):
+            self._build("dist-unreviewed")
+
+        self.assertFalse((self.root / "dist-unreviewed").exists())
+
+    def test_exact_synthetic_binary_manifest_is_packaged_and_hash_drift_is_rejected(self) -> None:
+        binary = b"synthetic-binary\x00original"
+        fixture = self.root / "tests" / "fixtures" / "synthetic" / "sample.png"
+        fixture.write_bytes(binary)
+        policy_path = self.root / "release-policy.json"
+        payload = json.loads(policy_path.read_text("utf-8"))
+        payload["binary_release_manifest"] = [
+            {
+                "path": "tests/fixtures/synthetic/sample.png",
+                "sha256": hashlib.sha256(binary).hexdigest(),
+                "classification": "synthetic",
+            }
+        ]
+        policy_path.write_text(json.dumps(payload), encoding="utf-8")
+        self._git_add_all()
+
+        artifacts = self._build("dist-binary")
+        with zipfile.ZipFile(artifacts.archive) as archive:
+            self.assertEqual(
+                archive.read("shengxue-skill/tests/fixtures/synthetic/sample.png"),
+                binary,
+            )
+
+        fixture.write_bytes(b"synthetic-binary\x00drift")
+        subprocess.run(["git", "add", "--", "tests/fixtures/synthetic/sample.png"], cwd=self.root, check=True)
+        with self.assertRaises(build_release.BuildReleaseError):
+            self._build("dist-binary-drift")
+        self.assertFalse((self.root / "dist-binary-drift").exists())
+
     def test_git_environment_poison_is_ignored(self) -> None:
         poison = self.root / "poison-index"
         poison.write_bytes(b"")
@@ -284,6 +328,24 @@ class BuildReleaseTest(unittest.TestCase):
             artifact = self._build("dist")
 
         self.assertIn("shengxue-skill/SKILL.md", self._zip_names(artifact.archive))
+
+    def test_replacement_ref_is_rejected_and_private_blob_is_never_packaged(self) -> None:
+        private = b"token=ghp_builder_private_payload_1234567890\x00tail"
+        original = subprocess.run(
+            ["git", "rev-parse", ":README.md"], cwd=self.root, check=True,
+            capture_output=True, text=True,
+        ).stdout.strip()
+        replacement = subprocess.run(
+            ["git", "hash-object", "-w", "--stdin"], cwd=self.root, check=True,
+            input=private, capture_output=True,
+        ).stdout.decode("ascii").strip()
+        subprocess.run(["git", "replace", original, replacement], cwd=self.root, check=True)
+
+        with mock.patch.dict(os.environ, {"GIT_NO_REPLACE_OBJECTS": "0"}):
+            with self.assertRaises(build_release.BuildReleaseError):
+                self._build("dist-replacement")
+
+        self.assertFalse((self.root / "dist-replacement").exists())
 
     def test_ref_verifier_accepts_only_exact_annotated_ascii_semver_tag(self) -> None:
         subprocess.run(["git", "config", "user.name", "Synthetic"], cwd=self.root, check=True)

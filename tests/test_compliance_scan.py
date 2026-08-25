@@ -12,9 +12,11 @@ from unittest import mock
 from scripts import compliance_scan as compliance_policy
 from scripts.compliance_scan import (
     PolicyError,
+    _run_git,
     canonical_repository_path,
     contains_price_text,
     find_price_text,
+    git_environment,
     load_policy,
     parse_policy_bytes,
     main,
@@ -31,12 +33,14 @@ def _write_policy(
     *,
     allowlist: list[dict[str, str]] | None = None,
     file_allowlist: list[dict[str, object]] | None = None,
+    binary_release_manifest: list[dict[str, str]] | None = None,
 ) -> None:
     path.write_text(
         json.dumps(
             {
-                "schema_version": "1.1",
-                "binary_extensions": [".png", ".xlsx"],
+                "schema_version": "1.2",
+                "binary_extensions": [".docx", ".pdf", ".png", ".xlsx"],
+                "binary_release_manifest": binary_release_manifest or [],
                 "max_text_bytes": 1048576,
                 "forbidden_tracked_directories": ["data", "output", "private"],
                 "allowlist": allowlist or [],
@@ -54,6 +58,55 @@ def _write_policy(
 
 
 class ComplianceScanTest(unittest.TestCase):
+    def test_git_reads_original_objects_and_tracked_scan_rejects_replacement_refs(self) -> None:
+        public = b"synthetic-public-binary\x00fixture"
+        private = b"token=ghp_replacement_private_payload_1234567890\x00tail"
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = Path(temporary)
+            subprocess.run(["git", "init", "--quiet"], cwd=repo, check=True)
+            (repo / "fixture.png").write_bytes(public)
+            policy_path = repo / "policy.json"
+            _write_policy(
+                policy_path,
+                binary_release_manifest=[
+                    {
+                        "path": "fixture.png",
+                        "sha256": hashlib.sha256(public).hexdigest(),
+                        "classification": "synthetic",
+                    }
+                ],
+            )
+            subprocess.run(["git", "add", "--", "fixture.png", "policy.json"], cwd=repo, check=True)
+            original = subprocess.run(
+                ["git", "rev-parse", ":fixture.png"], cwd=repo, check=True,
+                capture_output=True, text=True,
+            ).stdout.strip()
+            replacement = subprocess.run(
+                ["git", "hash-object", "-w", "--stdin"], cwd=repo, check=True,
+                input=private, capture_output=True,
+            ).stdout.decode("ascii").strip()
+            subprocess.run(["git", "replace", original, replacement], cwd=repo, check=True)
+
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "GIT_NO_REPLACE_OBJECTS": "0",
+                    "GIT_REPLACE_REF_BASE": "refs/hidden-replacements",
+                    "GIT_INDEX_FILE": str(repo / "missing-index"),
+                },
+            ):
+                raw = _run_git(repo, ("cat-file", "blob", original))
+                summary = scan_tracked(repo, load_policy(policy_path))
+
+        self.assertEqual(git_environment()["GIT_NO_REPLACE_OBJECTS"], "1")
+        self.assertEqual(raw, public)
+        self.assertEqual(
+            {finding.rule_id for finding in summary.findings},
+            {"replacement-refs-present"},
+        )
+        serialized = json.dumps(summary.to_dict(), ensure_ascii=False)
+        self.assertNotIn(private.decode("utf-8", errors="ignore"), serialized)
+
     def test_policy_owns_exact_and_prefix_release_requirements(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             policy_path = Path(temporary) / "policy.json"
@@ -88,6 +141,7 @@ class ComplianceScanTest(unittest.TestCase):
                 "CODE_OF_CONDUCT.md",
                 "ROADMAP.md",
                 "docs/release-process.md",
+                ".gitattributes",
                 "scripts/preflight.py",
                 "scripts/release_check.py",
                 "schemas/province.schema.json",
@@ -126,6 +180,49 @@ class ComplianceScanTest(unittest.TestCase):
         )
         with self.assertRaises(PolicyError):
             parse_policy_bytes(duplicate)
+
+    def test_binary_manifest_schema_is_exact_and_rights_review_is_documented(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            policy_path = Path(temporary) / "policy.json"
+            _write_policy(
+                policy_path,
+                binary_release_manifest=[
+                    {
+                        "path": "tests/fixtures/synthetic.pdf",
+                        "sha256": "a" * 64,
+                        "classification": "synthetic",
+                    },
+                    {
+                        "path": "tests/fixtures/reviewed.xlsx",
+                        "sha256": "b" * 64,
+                        "classification": "rights-reviewed",
+                        "rights_doc": "DATA_SOURCES.md",
+                    },
+                ],
+            )
+            payload = json.loads(policy_path.read_text("utf-8"))
+            policy = load_policy(policy_path)
+
+        self.assertEqual(
+            tuple(entry.path for entry in policy.binary_release_manifest),
+            ("tests/fixtures/synthetic.pdf", "tests/fixtures/reviewed.xlsx"),
+        )
+        invalid_entries = (
+            [{"path": "tests/fixtures", "sha256": "a" * 64, "classification": "synthetic"}],
+            [{"path": "tests/fixtures/student.docx", "sha256": "a" * 64, "classification": "rights-reviewed"}],
+            [{
+                "path": "tests/fixtures/student.docx",
+                "sha256": "a" * 64,
+                "classification": "synthetic",
+                "rights_doc": "DATA_SOURCES.md",
+            }],
+        )
+        for manifest in invalid_entries:
+            with self.subTest(manifest=manifest):
+                mutated = dict(payload)
+                mutated["binary_release_manifest"] = manifest
+                with self.assertRaises(PolicyError):
+                    parse_policy_bytes(json.dumps(mutated).encode("utf-8"))
 
     def test_detects_every_required_category_without_retaining_values(self) -> None:
         secret = "ghp_abcdefghijklmnopqrstuvwxyz123456"
@@ -238,7 +335,7 @@ class ComplianceScanTest(unittest.TestCase):
             policy_path = Path(temporary) / "policy.json"
             _write_policy(policy_path)
             valid = policy_path.read_text("utf-8")
-            policy_path.write_text(valid.replace('{"schema_version":', '{"schema_version":"1.1","schema_version":', 1), encoding="utf-8")
+            policy_path.write_text(valid.replace('{"schema_version":', '{"schema_version":"1.2","schema_version":', 1), encoding="utf-8")
             with self.assertRaises(PolicyError):
                 load_policy(policy_path)
 
@@ -290,15 +387,25 @@ class ComplianceScanTest(unittest.TestCase):
 
         self.assertEqual({finding.kind for finding in findings}, {"phone"})
 
-    def test_tracked_scan_uses_git_inventory_and_skips_binary_by_extension(self) -> None:
+    def test_tracked_scan_skips_only_an_exact_path_hash_and_classification(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             repo = Path(temporary)
             subprocess.run(["git", "init", "--quiet"], cwd=repo, check=True)
             (repo / "clean.txt").write_text("AI 生成仅供参考", encoding="utf-8")
-            (repo / "fixture.png").write_bytes(b"token=ghp_abcdefghijklmnopqrstuvwxyz123456")
+            binary = b"token=ghp_abcdefghijklmnopqrstuvwxyz123456\x00synthetic"
+            (repo / "fixture.png").write_bytes(binary)
             (repo / "untracked.txt").write_text("手机号：13800138000", encoding="utf-8")
             policy_path = repo / "policy.json"
-            _write_policy(policy_path)
+            _write_policy(
+                policy_path,
+                binary_release_manifest=[
+                    {
+                        "path": "fixture.png",
+                        "sha256": hashlib.sha256(binary).hexdigest(),
+                        "classification": "synthetic",
+                    }
+                ],
+            )
             subprocess.run(
                 ["git", "add", "--", "clean.txt", "fixture.png", "policy.json"],
                 cwd=repo,
@@ -310,6 +417,41 @@ class ComplianceScanTest(unittest.TestCase):
         self.assertEqual(summary.findings, ())
         self.assertEqual(summary.scanned_files, 2)
         self.assertEqual(summary.skipped_binary_files, 1)
+
+    def test_unmanifested_binary_paths_and_hash_drift_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = Path(temporary)
+            subprocess.run(["git", "init", "--quiet"], cwd=repo, check=True)
+            binary = b"synthetic-binary\x00v1"
+            (repo / "student.docx").write_bytes(binary)
+            (repo / "fixture.pdf").write_bytes(binary)
+            (repo / "sheet.xlsx").write_bytes(binary)
+            policy_path = repo / "policy.json"
+            _write_policy(
+                policy_path,
+                binary_release_manifest=[
+                    {
+                        "path": "fixture.pdf",
+                        "sha256": hashlib.sha256(binary).hexdigest(),
+                        "classification": "synthetic",
+                    }
+                ],
+            )
+            subprocess.run(
+                ["git", "add", "--", "student.docx", "fixture.pdf", "sheet.xlsx", "policy.json"],
+                cwd=repo,
+                check=True,
+            )
+            unmanifested = scan_tracked(repo, load_policy(policy_path))
+            (repo / "fixture.pdf").write_bytes(b"synthetic-binary\x00drift")
+            drifted = scan_tracked(repo, load_policy(policy_path))
+
+        self.assertEqual(
+            sum(finding.rule_id == "unmanifested-binary-path" for finding in unmanifested.findings),
+            2,
+        )
+        self.assertIn("binary-manifest-hash-mismatch", {finding.rule_id for finding in drifted.findings})
+        self.assertEqual(unmanifested.skipped_binary_files, 1)
 
     def test_nul_in_undeclared_extension_fails_closed_instead_of_skipping(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -461,8 +603,23 @@ class ComplianceScanTest(unittest.TestCase):
 
     def test_repository_policy_is_strict_and_loadable(self) -> None:
         policy = load_policy(ROOT / "release-policy.json")
-        self.assertEqual(policy.schema_version, "1.1")
+        self.assertEqual(policy.schema_version, "1.2")
         self.assertGreater(len(policy.binary_extensions), 3)
+        self.assertEqual(
+            {(entry.path, entry.sha256, entry.classification) for entry in policy.binary_release_manifest},
+            {
+                (
+                    "tests/fixtures/replay/pdf/text-and-image.pdf",
+                    "870bd0bd74266cbb5c1900e404bda42f6f61581076496f296dd82decd78f000d",
+                    "synthetic",
+                ),
+                (
+                    "tests/fixtures/replay/structured/admission.xlsx",
+                    "0c02890fd3159d15f6846b15c5ef239d16b74acd9f4e3c68c5b0205d78cd67d7",
+                    "synthetic",
+                ),
+            },
+        )
 
 
 if __name__ == "__main__":

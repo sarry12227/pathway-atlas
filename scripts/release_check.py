@@ -26,14 +26,21 @@ try:
         PolicyError,
         ReleasePolicy,
         git_environment,
+        git_blob_bytes,
         git_paths,
+        git_replacement_refs,
         git_top_level,
         git_tracked_entries,
+        git_tree_entries,
+        git_write_tree,
         load_policy,
         missing_required_release_paths,
+        parse_policy_bytes,
         safe_tracked_file,
+        scan_git_snapshot,
         scan_text,
         scan_tracked,
+        validate_binary_release_manifest,
     )
 except ImportError:  # pragma: no cover - direct script execution
     from compliance_scan import (
@@ -41,14 +48,21 @@ except ImportError:  # pragma: no cover - direct script execution
         PolicyError,
         ReleasePolicy,
         git_environment,
+        git_blob_bytes,
         git_paths,
+        git_replacement_refs,
         git_top_level,
         git_tracked_entries,
+        git_tree_entries,
+        git_write_tree,
         load_policy,
         missing_required_release_paths,
+        parse_policy_bytes,
         safe_tracked_file,
+        scan_git_snapshot,
         scan_text,
         scan_tracked,
+        validate_binary_release_manifest,
     )
 
 
@@ -68,6 +82,13 @@ _SENSITIVE_BASENAMES = frozenset(
 )
 _SENSITIVE_PREFIXES = ("private/", "reports/", "output/", "data/", "work/", "evidence/raw-downloads/")
 _BENIGN_IGNORED_COMPONENTS = frozenset({".superpowers", ".venv", "__pycache__", "node_modules"})
+_EXACT_CACHE_BINARY_SUFFIXES = frozenset(
+    {".class", ".dll", ".dylib", ".exe", ".jar", ".node", ".pyc", ".pyd", ".pyo", ".so"}
+)
+_MAX_UNTRACKED_SCAN_FILES = 512
+_MAX_UNTRACKED_SCAN_BYTES = 16 * 1024 * 1024
+
+
 def _is_sensitive_untracked_name(relative: str) -> bool:
     folded = relative.casefold()
     path = PurePosixPath(folded)
@@ -76,6 +97,27 @@ def _is_sensitive_untracked_name(relative: str) -> bool:
         or path.name.startswith(".env.")
         or path.suffix in _SENSITIVE_SUFFIXES
         or any(folded.startswith(prefix) for prefix in _SENSITIVE_PREFIXES)
+    )
+
+
+def _is_exact_ignored_artifact(relative: str, policy: ReleasePolicy) -> bool:
+    """Return whether one ignored path is an exact non-text cache/build artifact."""
+
+    path = PurePosixPath(relative.casefold())
+    parts = path.parts
+    in_cache = any(
+        part in _BENIGN_IGNORED_COMPONENTS or part.endswith(".egg-info")
+        for part in parts
+    )
+    if in_cache and path.suffix in _EXACT_CACHE_BINARY_SUFFIXES:
+        return True
+    if not _is_under(relative, policy.ci_generated_paths):
+        return False
+    name = path.name
+    return bool(
+        name == "sha256sums"
+        or re.fullmatch(r"shengxue-skill-[0-9]+(?:\.[0-9]+){2}\.zip", name)
+        or re.fullmatch(r"shengxue_skill-[0-9]+(?:\.[0-9]+){2}-.+\.whl", name)
     )
 
 
@@ -199,6 +241,59 @@ def _check_tracked_modes(entries: Sequence[GitTrackedEntry]) -> CheckResult:
     return CheckResult("tracked_modes", not details, details, len(details))
 
 
+def check_replacement_refs(root: Path) -> CheckResult:
+    """Fail closed when the repository contains any object replacement mapping."""
+
+    try:
+        replacements = git_replacement_refs(root)
+    except RuntimeError:
+        return CheckResult(
+            "replacement_refs",
+            False,
+            ("replacement-ref-inventory-failed",),
+            1,
+        )
+    if not replacements:
+        return CheckResult("replacement_refs", True)
+    return CheckResult(
+        "replacement_refs",
+        False,
+        (f"replacement-ref-count={len(replacements)}",),
+        len(replacements),
+    )
+
+
+def check_binary_release_manifest(
+    root: Path,
+    policy: ReleasePolicy,
+    entries: Sequence[GitTrackedEntry],
+) -> CheckResult:
+    """Apply the shared exact-binary contract to one immutable Git tree."""
+
+    validation = validate_binary_release_manifest(
+        policy,
+        entries,
+        lambda entry: git_blob_bytes(root, entry.object_id),
+    )
+    details = tuple(
+        f"{finding.rule_id}:{_safe_relative(finding.path or 'unknown')}"
+        for finding in validation.findings[:200]
+    )
+    if len(validation.findings) > 200:
+        return CheckResult(
+            "binary_release_manifest",
+            False,
+            details + ("binary-manifest-output-truncated",),
+            len(validation.findings),
+        )
+    return CheckResult(
+        "binary_release_manifest",
+        validation.ok,
+        details,
+        len(validation.findings),
+    )
+
+
 def check_path_identities(root: Path, paths: Sequence[str]) -> CheckResult:
     """Reject symlink/reparse escapes and duplicate filesystem identities."""
 
@@ -292,11 +387,29 @@ def check_untracked_sensitive_paths(
     root: Path | None = None,
     policy: ReleasePolicy | None = None,
     ignored_paths: Sequence[str] = (),
+    max_scan_files: int = _MAX_UNTRACKED_SCAN_FILES,
+    max_scan_bytes: int = _MAX_UNTRACKED_SCAN_BYTES,
 ) -> CheckResult:
     details: list[str] = []
+    if (
+        not isinstance(max_scan_files, int)
+        or isinstance(max_scan_files, bool)
+        or max_scan_files < 1
+        or not isinstance(max_scan_bytes, int)
+        or isinstance(max_scan_bytes, bool)
+        or max_scan_bytes < 1
+    ):
+        return CheckResult(
+            "untracked_sensitive",
+            False,
+            ("kind=untracked_budget;rule=invalid-content-budget;line=0",),
+            1,
+        )
     ignored_identities = {_path_identity(path.replace("\\", "/")) for path in ignored_paths}
     ordinary_set = set(paths)
     combined = tuple(paths) + tuple(path for path in ignored_paths if path not in ordinary_set)
+    scanned_files = 0
+    scanned_bytes = 0
     for raw in combined:
         normalized_raw = raw.replace("\\", "/")
         ignored = _path_identity(normalized_raw) in ignored_identities
@@ -305,19 +418,14 @@ def check_untracked_sensitive_paths(
             details.append("untracked-noncanonical-path")
             continue
         sensitive_name = _is_sensitive_untracked_name(canonical)
-        raw_parts = PurePosixPath(canonical).parts
-        benign_ignored = any(
-            part.casefold() in _BENIGN_IGNORED_COMPONENTS or part.casefold().endswith(".egg-info")
-            for part in raw_parts
-        ) or (policy is not None and _is_under(canonical, policy.ci_generated_paths))
-        if ignored and benign_ignored and not sensitive_name:
-            continue
         if sensitive_name:
             details.append(
                 "kind=untracked_path;rule=sensitive-name;line=0;"
                 f"path={_safe_relative(canonical)}"
             )
         if root is None or policy is None:
+            continue
+        if ignored and _is_exact_ignored_artifact(canonical, policy):
             continue
         candidate, path_finding = safe_tracked_file(root.resolve(), canonical)
         if path_finding is not None:
@@ -328,20 +436,34 @@ def check_untracked_sensitive_paths(
             continue
         assert candidate is not None
         try:
-            raw = candidate.read_bytes()
+            size = candidate.stat().st_size
         except OSError:
             details.append(
                 "kind=untracked_path;rule=unreadable-untracked-file;line=0;"
                 f"path={_safe_relative(canonical)}"
             )
             continue
-        if len(raw) > policy.max_text_bytes:
+        if size > policy.max_text_bytes:
             details.append(
                 "kind=untracked_path;rule=untracked-file-too-large;line=0;"
                 f"path={_safe_relative(canonical)}"
             )
             continue
-        if candidate.suffix.casefold() in policy.binary_extensions:
+        if scanned_files + 1 > max_scan_files:
+            details.append("kind=untracked_budget;rule=content-file-budget-exceeded;line=0")
+            break
+        if scanned_bytes + size > max_scan_bytes:
+            details.append("kind=untracked_budget;rule=content-byte-budget-exceeded;line=0")
+            break
+        scanned_files += 1
+        scanned_bytes += size
+        try:
+            raw = candidate.read_bytes()
+        except OSError:
+            details.append(
+                "kind=untracked_path;rule=unreadable-untracked-file;line=0;"
+                f"path={_safe_relative(canonical)}"
+            )
             continue
         if b"\x00" in raw:
             details.append(
@@ -783,14 +905,27 @@ def evaluate_release(context: ReleaseContext) -> ReleaseReport:
     """Evaluate every gate and return a bounded JSON-serializable report."""
 
     root = context.root.absolute()
+    replacement_result = _safe_run(
+        "replacement_refs",
+        lambda: check_replacement_refs(root),
+    )
     try:
-        policy = load_policy(root / "release-policy.json")
-    except PolicyError:
-        return ReleaseReport((CheckResult("release_policy", False, ("invalid-release-policy",), 1),))
-    try:
-        tracked_entries = git_tracked_entries(root)
+        tree_oid = git_write_tree(root)
+        tracked_entries = git_tree_entries(root, tree_oid)
+        policy_entry = next(entry for entry in tracked_entries if entry.path == "release-policy.json")
+        policy = parse_policy_bytes(git_blob_bytes(root, policy_entry.object_id))
         tracked = tuple(entry.path for entry in tracked_entries)
         tracked_inventory_result = CheckResult("tracked_inventory", True, count=len(tracked))
+    except (PolicyError, RuntimeError, StopIteration):
+        return ReleaseReport(
+            (
+                replacement_result,
+                CheckResult("release_policy", False, ("invalid-release-policy",), 1),
+            )
+        )
+    try:
+        if not tracked_entries:
+            raise RuntimeError("empty tracked inventory")
     except RuntimeError:
         tracked_entries = ()
         tracked = ()
@@ -817,12 +952,17 @@ def evaluate_release(context: ReleaseContext) -> ReleaseReport:
     results = (
         _safe_run("repository_scope", lambda: _check_repo_scope(root)),
         CheckResult("release_policy", True),
+        replacement_result,
         tracked_inventory_result,
         untracked_inventory_result,
         check_tracked_paths(tracked, policy.forbidden_tracked_directories),
         _check_tracked_modes(tracked_entries),
         _safe_run("path_identities", lambda: check_path_identities(root, tracked)),
         scan_result,
+        _safe_run(
+            "binary_release_manifest",
+            lambda: check_binary_release_manifest(root, policy, tracked_entries),
+        ),
         check_project_version(root, context.expected_version, context.tag),
         _safe_run("license_and_data_docs", lambda: _check_license_and_data_docs(root, tracked_set)),
         _safe_run(
@@ -850,7 +990,9 @@ def _compliance_result(
     policy: ReleasePolicy,
     entries: Sequence[GitTrackedEntry] | None = None,
 ) -> CheckResult:
-    summary = scan_tracked(root, policy, entries)
+    if entries is None:
+        entries = git_tree_entries(root, git_write_tree(root))
+    summary = scan_git_snapshot(root, policy, entries)
     details = tuple(
         f"kind={finding.kind};rule={finding.rule_id};line={finding.line};"
         f"path={_safe_relative(finding.path or 'unknown')}"

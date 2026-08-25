@@ -30,9 +30,11 @@ try:
         ReleasePolicy,
         canonical_repository_path,
         git_environment,
+        git_replacement_refs,
         missing_required_release_paths,
         parse_policy_bytes,
         safe_tracked_file,
+        validate_binary_release_manifest,
     )
 except ImportError:  # pragma: no cover - direct script execution
     from compliance_scan import (
@@ -40,9 +42,11 @@ except ImportError:  # pragma: no cover - direct script execution
         ReleasePolicy,
         canonical_repository_path,
         git_environment,
+        git_replacement_refs,
         missing_required_release_paths,
         parse_policy_bytes,
         safe_tracked_file,
+        validate_binary_release_manifest,
     )
 
 
@@ -87,7 +91,7 @@ class ReleaseArtifacts:
 def _run_git(root: Path, arguments: Sequence[str]) -> bytes:
     try:
         completed = subprocess.run(
-            ["git", *arguments], cwd=root, check=False, capture_output=True,
+            ["git", "--no-replace-objects", *arguments], cwd=root, check=False, capture_output=True,
             env=git_environment(), timeout=60,
         )
     except (OSError, subprocess.TimeoutExpired) as error:
@@ -95,6 +99,15 @@ def _run_git(root: Path, arguments: Sequence[str]) -> bytes:
     if completed.returncode != 0:
         raise BuildReleaseError("git snapshot failed")
     return completed.stdout
+
+
+def _ensure_no_replacement_refs(root: Path) -> None:
+    try:
+        replacements = git_replacement_refs(root)
+    except RuntimeError as error:
+        raise BuildReleaseError("git replacement inventory failed") from error
+    if replacements:
+        raise BuildReleaseError("git replacement refs are forbidden")
 
 
 def _canonical_path(value: str) -> str:
@@ -187,12 +200,23 @@ def _is_forbidden_release_path(path: str, policy: ReleasePolicy) -> bool:
     )
 
 
-def _validate_release_contract(blobs: Sequence[IndexBlob], policy: ReleasePolicy) -> None:
+def _validate_release_contract(
+    root: Path,
+    blobs: Sequence[IndexBlob],
+    policy: ReleasePolicy,
+) -> None:
     paths = {blob.path for blob in blobs}
     if any(_is_forbidden_release_path(path, policy) for path in paths):
         raise BuildReleaseError("forbidden tracked release path")
     if missing_required_release_paths(policy, paths):
         raise BuildReleaseError("incomplete release snapshot")
+    binary_validation = validate_binary_release_manifest(
+        policy,
+        blobs,
+        lambda blob: _blob_bytes(root, blob.object_id),
+    )
+    if not binary_validation.ok:
+        raise BuildReleaseError("invalid binary release manifest")
 
 
 def _validate_worktree(root: Path, blobs: Sequence[IndexBlob]) -> None:
@@ -202,7 +226,7 @@ def _validate_worktree(root: Path, blobs: Sequence[IndexBlob]) -> None:
             raise BuildReleaseError("worktree does not match release snapshot")
     try:
         completed = subprocess.run(
-            ["git", "diff-files", "--quiet", "--"], cwd=root, check=False,
+            ["git", "--no-replace-objects", "diff-files", "--quiet", "--"], cwd=root, check=False,
             capture_output=True, env=git_environment(), timeout=60,
         )
     except (OSError, subprocess.TimeoutExpired) as error:
@@ -379,6 +403,7 @@ def verify_release_ref(root: Path, tag: str, expected_commit: str, output: Path)
         raise BuildReleaseError("invalid release tag")
     if not isinstance(expected_commit, str) or _OBJECT_ID_RE.fullmatch(expected_commit) is None:
         raise BuildReleaseError("invalid release commit")
+    _ensure_no_replacement_refs(root)
     tree_oid = _tree_oid(root)
     blobs = _tree_blobs(root, tree_oid)
     version = _project_version(_snapshot_bytes(root, blobs, "pyproject.toml"))
@@ -449,6 +474,7 @@ def build_release(root: Path, version: str, output: str) -> ReleaseArtifacts:
     if _VERSION_RE.fullmatch(version) is None:
         raise BuildReleaseError("invalid release version")
 
+    _ensure_no_replacement_refs(root)
     tree_oid = _tree_oid(root)
     blobs = _tree_blobs(root, tree_oid)
     try:
@@ -458,11 +484,12 @@ def build_release(root: Path, version: str, output: str) -> ReleaseArtifacts:
     project_version = _project_version(_snapshot_bytes(root, blobs, "pyproject.toml"))
     if project_version != version:
         raise BuildReleaseError("release version mismatch")
-    _validate_release_contract(blobs, policy)
+    _validate_release_contract(root, blobs, policy)
     _validate_worktree(root, blobs)
     output_path = _safe_output(root, output)
 
     _run_release_check(root, version)
+    _ensure_no_replacement_refs(root)
     if _tree_oid(root) != tree_oid:
         raise BuildReleaseError("release snapshot changed during gate")
     _validate_worktree(root, blobs)
@@ -482,6 +509,7 @@ def build_release(root: Path, version: str, output: str) -> ReleaseArtifacts:
         _fsync_directory(ready)
         if _safe_output(root, output) != output_path:
             raise BuildReleaseError("unsafe output path")
+        _ensure_no_replacement_refs(root)
         _atomic_publish_directory(ready, output_path)
         ready = None
         _fsync_directory(output_path.parent)

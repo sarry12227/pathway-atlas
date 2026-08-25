@@ -1,5 +1,5 @@
 {
-  "schema_version": "1.1",
+  "schema_version": "1.2",
   "binary_extensions": [
     ".7z",
     ".doc",
@@ -19,6 +19,18 @@
     ".xls",
     ".xlsx",
     ".zip"
+  ],
+  "binary_release_manifest": [
+    {
+      "path": "tests/fixtures/replay/pdf/text-and-image.pdf",
+      "sha256": "870bd0bd74266cbb5c1900e404bda42f6f61581076496f296dd82decd78f000d",
+      "classification": "synthetic"
+    },
+    {
+      "path": "tests/fixtures/replay/structured/admission.xlsx",
+      "sha256": "0c02890fd3159d15f6846b15c5ef239d16b74acd9f4e3c68c5b0205d78cd67d7",
+      "classification": "synthetic"
+    }
   ],
   "max_text_bytes": 4194304,
   "forbidden_tracked_directories": [
@@ -61,7 +73,7 @@
     {
       "path": "scripts/compliance_scan.py",
       "kinds": ["absolute_local_path", "pricing_or_sales"],
-      "file_sha256": "e75b36434e9cfb92dd46ba1512722576835321936421c8bf04547d82abad8379",
+      "file_sha256": "da847909c9a021c190f4e522c3df6230c354fca0b1af5ad252411888ef8734ff",
       "reason": "scanner rule literal"
     },
     {
@@ -73,7 +85,7 @@
     {
       "path": "tests/test_build_release.py",
       "kinds": ["secret"],
-      "file_sha256": "ba3ee7868b3b208e6719b85e405b344c031cb63ca0ec7e56e2291d5425522696",
+      "file_sha256": "3aa37eb924937f1a14983811b859a91e878401072f95570283b05bce6c3cde25",
       "reason": "synthetic negative fixture"
     },
     {
@@ -91,7 +103,7 @@
     {
       "path": "tests/test_compliance_scan.py",
       "kinds": ["absolute_local_path", "identity_number", "phone", "pricing_or_sales", "private_system_reference", "secret", "student_pii"],
-      "file_sha256": "75e2b7b0231371a4f66d147e042093f601b3005bdeaecd8bb2ab67979e8d372b",
+      "file_sha256": "f59d4156022d1f83e3b36898c599a68baaf5b139b0c24e46ed4a26ed385eaa55",
       "reason": "synthetic negative fixture"
     },
     {
@@ -150,8 +162,8 @@
     },
     {
       "path": "tests/test_release_check.py",
-      "kinds": ["absolute_local_path", "secret"],
-      "file_sha256": "74ed01b87b71593eb3b1510adbf4d6fc380ce028722ede51824eed55109e5695",
+      "kinds": ["absolute_local_path", "pricing_or_sales", "secret", "student_pii"],
+      "file_sha256": "091f198f33b7a4ea5a2298fb234e3f7f03f2b3a3a827cc3809207e5c66183d1b",
       "reason": "synthetic negative fixture"
     },
     {
@@ -186,6 +198,7 @@
     }
   ],
   "required_release_paths": [
+    ".gitattributes",
     "SKILL.md",
     "README.md",
     "LICENSE",

@@ -1,5 +1,7 @@
 import pathlib
+import os
 import subprocess
+import tempfile
 import unittest
 
 try:
@@ -12,6 +14,77 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 
 class ProjectMetadataTest(unittest.TestCase):
+    def test_git_attributes_force_lf_text_and_explicit_binary_modes(self):
+        text = subprocess.run(
+            ["git", "check-attr", "text", "eol", "--", "README.md"],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        ).stdout
+        self.assertIn("README.md: text: auto", text)
+        self.assertIn("README.md: eol: lf", text)
+
+        for path in (
+            "fixture.xlsx",
+            "fixture.pdf",
+            "fixture.docx",
+            "fixture.png",
+            "fixture.jpg",
+            "fixture.jpeg",
+            "fixture.zip",
+        ):
+            with self.subTest(path=path):
+                attributes = subprocess.run(
+                    ["git", "check-attr", "text", "--", path],
+                    cwd=ROOT,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                ).stdout.strip()
+                self.assertEqual(attributes, f"{path}: text: unset")
+
+    def test_autocrlf_windows_style_checkout_keeps_text_lf_and_binary_bytes_exact(self):
+        text_bytes = b"first line\nsecond line\n"
+        binary_bytes = b"%PDF-1.7\r\n\x00synthetic\r\n"
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = pathlib.Path(temporary)
+            subprocess.run(["git", "init", "--quiet"], cwd=repo, check=True)
+            (repo / ".gitattributes").write_bytes((ROOT / ".gitattributes").read_bytes())
+            (repo / "sample.txt").write_bytes(text_bytes)
+            (repo / "sample.pdf").write_bytes(binary_bytes)
+            subprocess.run(
+                ["git", "-c", "core.autocrlf=false", "add", "--", ".gitattributes", "sample.txt", "sample.pdf"],
+                cwd=repo,
+                check=True,
+            )
+            checkout = repo / "checkout"
+            checkout.mkdir()
+            subprocess.run(
+                [
+                    "git",
+                    "-c",
+                    "core.autocrlf=true",
+                    "-c",
+                    "core.eol=crlf",
+                    "checkout-index",
+                    "--all",
+                    "--force",
+                    f"--prefix=checkout{os.sep}",
+                ],
+                cwd=repo,
+                check=True,
+            )
+
+            checked_text = (checkout / "sample.txt").read_bytes()
+            checked_binary = (checkout / "sample.pdf").read_bytes()
+
+        self.assertEqual(checked_text, text_bytes)
+        self.assertNotIn(b"\r\n", checked_text)
+        self.assertEqual(checked_binary, binary_bytes)
+
     def test_python_floor_and_optional_dependencies(self):
         data = tomllib.loads((ROOT / "pyproject.toml").read_text("utf-8"))
 

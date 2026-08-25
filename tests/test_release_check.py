@@ -1,4 +1,5 @@
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -19,6 +20,7 @@ from scripts.release_check import (
     _check_docx_tests,
     _check_future_paths,
     _check_tracked_modes,
+    check_replacement_refs,
     check_markdown_links,
     check_path_identities,
     check_project_version,
@@ -27,7 +29,14 @@ from scripts.release_check import (
     evaluate_release,
     main,
 )
-from scripts.compliance_scan import git_tracked_entries, load_policy, missing_required_release_paths
+from scripts.compliance_scan import (
+    BinaryReleaseManifestEntry,
+    git_tracked_entries,
+    git_tree_entries,
+    git_write_tree,
+    load_policy,
+    missing_required_release_paths,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -99,6 +108,63 @@ class TrackedBoundaryTest(unittest.TestCase):
 
 
 class ReleaseComponentTest(unittest.TestCase):
+    def test_binary_manifest_validation_reads_the_immutable_index_tree(self) -> None:
+        original = b"synthetic-docx\x00original"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            subprocess.run(["git", "init", "--quiet"], cwd=root, check=True)
+            path = root / "student.docx"
+            path.write_bytes(original)
+            subprocess.run(["git", "add", "--", "student.docx"], cwd=root, check=True)
+            policy = replace(
+                load_policy(ROOT / "release-policy.json"),
+                binary_extensions=frozenset({".docx"}),
+                binary_release_manifest=(
+                    BinaryReleaseManifestEntry(
+                        path="student.docx",
+                        sha256=hashlib.sha256(original).hexdigest(),
+                        classification="synthetic",
+                        rights_doc=None,
+                    ),
+                ),
+            )
+            frozen_entries = git_tree_entries(root, git_write_tree(root))
+            path.write_bytes(b"synthetic-docx\x00worktree-drift")
+
+            frozen = release_gate.check_binary_release_manifest(root, policy, frozen_entries)
+            subprocess.run(["git", "add", "--", "student.docx"], cwd=root, check=True)
+            changed_entries = git_tree_entries(root, git_write_tree(root))
+            changed = release_gate.check_binary_release_manifest(root, policy, changed_entries)
+
+        self.assertTrue(frozen.ok, frozen.details)
+        self.assertFalse(changed.ok)
+        self.assertEqual(changed.details, ("binary-manifest-hash-mismatch:student.docx",))
+
+    def test_replacement_refs_are_an_explicit_value_free_release_failure(self) -> None:
+        private = b"token=ghp_release_private_payload_1234567890"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            subprocess.run(["git", "init", "--quiet"], cwd=root, check=True)
+            (root / "safe.txt").write_bytes(b"safe\n")
+            subprocess.run(["git", "add", "--", "safe.txt"], cwd=root, check=True)
+            original = subprocess.run(
+                ["git", "rev-parse", ":safe.txt"], cwd=root, check=True,
+                capture_output=True, text=True,
+            ).stdout.strip()
+            replacement = subprocess.run(
+                ["git", "hash-object", "-w", "--stdin"], cwd=root, check=True,
+                input=private, capture_output=True,
+            ).stdout.decode("ascii").strip()
+            subprocess.run(["git", "replace", original, replacement], cwd=root, check=True)
+
+            with mock.patch.dict(os.environ, {"GIT_NO_REPLACE_OBJECTS": "0"}):
+                result = check_replacement_refs(root)
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.count, 1)
+        self.assertEqual(result.details, ("replacement-ref-count=1",))
+        self.assertNotIn(private.decode("ascii"), json.dumps(result.to_dict()))
+
     def test_version_must_match_expected_and_tag(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -186,6 +252,80 @@ class ReleaseComponentTest(unittest.TestCase):
         self.assertIn("rule=github-token", serialized)
         self.assertNotIn(secret, serialized)
         self.assertNotIn("cache.pyc", serialized)
+
+    def test_ignored_venv_regular_text_is_scanned_for_secret_pii_and_pricing(self) -> None:
+        payloads = (
+            ("token=ghp_ignored_private_payload_1234567890", "kind=secret"),
+            ("学生姓名：虚构测试学生", "kind=student_pii"),
+            ("咨询服务报价 30600元", "kind=pricing_or_sales"),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            cache = root / ".venv" / "cache.txt"
+            cache.parent.mkdir()
+            policy = load_policy(ROOT / "release-policy.json")
+            for payload, expected_kind in payloads:
+                with self.subTest(expected_kind=expected_kind):
+                    cache.write_text(payload, encoding="utf-8")
+                    result = check_untracked_sensitive_paths(
+                        (),
+                        root=root,
+                        policy=policy,
+                        ignored_paths=(".venv/cache.txt",),
+                    )
+                    serialized = json.dumps(result.to_dict(), ensure_ascii=False)
+                    self.assertFalse(result.ok)
+                    self.assertIn(expected_kind, serialized)
+                    self.assertNotIn(payload, serialized)
+
+    def test_ignored_regular_text_scan_has_total_file_and_byte_budgets(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            cache = root / ".venv"
+            cache.mkdir()
+            for index in range(3):
+                (cache / f"safe-{index}.txt").write_text("safe text", encoding="utf-8")
+            paths = tuple(f".venv/safe-{index}.txt" for index in range(3))
+            policy = load_policy(ROOT / "release-policy.json")
+
+            files_result = check_untracked_sensitive_paths(
+                (), root=root, policy=policy, ignored_paths=paths,
+                max_scan_files=2, max_scan_bytes=1024,
+            )
+            bytes_result = check_untracked_sensitive_paths(
+                (), root=root, policy=policy, ignored_paths=paths,
+                max_scan_files=10, max_scan_bytes=10,
+            )
+
+        self.assertEqual(
+            files_result.details,
+            ("kind=untracked_budget;rule=content-file-budget-exceeded;line=0",),
+        )
+        self.assertEqual(
+            bytes_result.details,
+            ("kind=untracked_budget;rule=content-byte-budget-exceeded;line=0",),
+        )
+
+    def test_only_exact_cache_binaries_skip_ignored_content_scanning(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            cache = root / ".venv"
+            cache.mkdir()
+            (cache / "cache.pyc").write_bytes(b"\x00compiled-cache")
+            (cache / "cache.bin").write_bytes(b"\x00unknown-binary")
+
+            result = check_untracked_sensitive_paths(
+                (),
+                root=root,
+                policy=load_policy(ROOT / "release-policy.json"),
+                ignored_paths=(".venv/cache.pyc", ".venv/cache.bin"),
+            )
+
+        serialized = json.dumps(result.to_dict())
+        self.assertFalse(result.ok)
+        self.assertNotIn("cache.pyc", serialized)
+        self.assertIn("undeclared-binary-content", serialized)
+        self.assertIn("cache.bin", serialized)
 
     def test_ignored_benign_roots_never_hide_sensitive_suffixes(self) -> None:
         sensitive_paths = (
