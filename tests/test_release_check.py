@@ -52,11 +52,13 @@ class _ShortReadStream:
         max_chunk: int,
         after_first_read=None,
         requested_sizes: list[int] | None = None,
+        actual_sizes: list[int] | None = None,
     ):
         self._stream = stream
         self._max_chunk = max_chunk
         self._after_first_read = after_first_read
         self._requested_sizes = requested_sizes
+        self._actual_sizes = actual_sizes
         self._read_once = False
 
     def __enter__(self):
@@ -74,6 +76,8 @@ class _ShortReadStream:
             self._requested_sizes.append(size)
         bounded_size = self._max_chunk if size < 0 else min(size, self._max_chunk)
         chunk = self._stream.read(bounded_size)
+        if self._actual_sizes is not None:
+            self._actual_sizes.append(len(chunk))
         if not self._read_once:
             self._read_once = True
             if self._after_first_read is not None:
@@ -575,6 +579,115 @@ class ReleaseComponentTest(unittest.TestCase):
 
         self.assertTrue(result.ok, result.details)
         self.assertEqual(result.details, ())
+
+    def test_multiple_oversize_files_cannot_read_past_aggregate_plus_one(self) -> None:
+        real_open = io.open
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            cache = root / ".venv"
+            cache.mkdir()
+            candidates = tuple(cache / f"oversize-{index}.txt" for index in range(3))
+            for candidate in candidates:
+                candidate.write_bytes(b"12345")
+            candidate_set = set(candidates)
+            opened: list[str] = []
+            actual_sizes: list[int] = []
+
+            def observed_open(file, *arguments, **keywords):
+                mode = arguments[0] if arguments else keywords.get("mode", "r")
+                stream = real_open(file, *arguments, **keywords)
+                candidate = Path(file)
+                if candidate in candidate_set and mode == "rb":
+                    opened.append(candidate.name)
+                    return _ShortReadStream(
+                        stream,
+                        max_chunk=2,
+                        actual_sizes=actual_sizes,
+                    )
+                return stream
+
+            with _patch_binary_open(candidates[0], observed_open):
+                result = check_untracked_sensitive_paths(
+                    (),
+                    root=root,
+                    policy=replace(
+                        load_policy(ROOT / "release-policy.json"), max_text_bytes=4
+                    ),
+                    ignored_paths=tuple(
+                        f".venv/oversize-{index}.txt" for index in range(3)
+                    ),
+                    max_scan_bytes=4,
+                )
+
+        serialized = json.dumps(result.to_dict())
+        self.assertLessEqual(sum(actual_sizes), 5, actual_sizes)
+        self.assertEqual(opened, ["oversize-0.txt"])
+        self.assertEqual(
+            result.details,
+            (
+                "kind=untracked_path;rule=untracked-file-too-large;line=0;"
+                "path=.venv/oversize-0.txt",
+            ),
+        )
+        self.assertNotIn(str(root), serialized)
+
+    def test_multiple_post_read_mutations_cannot_read_past_aggregate_plus_one(self) -> None:
+        real_open = io.open
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            cache = root / ".venv"
+            cache.mkdir()
+            candidates = tuple(cache / f"race-{index}.txt" for index in range(3))
+            for candidate in candidates:
+                candidate.write_bytes(b"safe")
+            candidate_set = set(candidates)
+            opened: list[str] = []
+            mutated: list[str] = []
+            actual_sizes: list[int] = []
+
+            def observed_open(file, *arguments, **keywords):
+                mode = arguments[0] if arguments else keywords.get("mode", "r")
+                stream = real_open(file, *arguments, **keywords)
+                candidate = Path(file)
+                if candidate not in candidate_set or mode != "rb":
+                    return stream
+
+                def mutate() -> None:
+                    with real_open(candidate, "ab") as writer:
+                        writer.write(b"x")
+                    mutated.append(candidate.name)
+
+                opened.append(candidate.name)
+                return _ShortReadStream(
+                    stream,
+                    max_chunk=4,
+                    after_first_read=mutate,
+                    actual_sizes=actual_sizes,
+                )
+
+            with _patch_binary_open(candidates[0], observed_open):
+                result = check_untracked_sensitive_paths(
+                    (),
+                    root=root,
+                    policy=replace(
+                        load_policy(ROOT / "release-policy.json"), max_text_bytes=64
+                    ),
+                    ignored_paths=tuple(f".venv/race-{index}.txt" for index in range(3)),
+                    max_scan_bytes=4,
+                )
+
+        serialized = json.dumps(result.to_dict())
+        self.assertLessEqual(sum(actual_sizes), 5, actual_sizes)
+        self.assertEqual(opened, ["race-0.txt"])
+        self.assertEqual(mutated, ["race-0.txt"])
+        self.assertEqual(
+            result.details,
+            (
+                "kind=untracked_path;rule=unreadable-untracked-file;line=0;"
+                "path=.venv/race-0.txt",
+            ),
+        )
+        self.assertNotIn(str(root), serialized)
 
     def test_only_exact_cache_binaries_skip_ignored_content_scanning(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

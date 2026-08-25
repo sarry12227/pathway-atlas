@@ -539,13 +539,13 @@ def check_untracked_sensitive_paths(
                 "kind=untracked_path;rule=unreadable-untracked-file;line=0;"
                 f"path={_safe_relative(canonical)}"
             )
-            continue
+            break
         if len(raw) > policy.max_text_bytes:
             details.append(
                 "kind=untracked_path;rule=untracked-file-too-large;line=0;"
                 f"path={_safe_relative(canonical)}"
             )
-            continue
+            break
         if len(raw) > remaining_total:
             details.append("kind=untracked_budget;rule=content-byte-budget-exceeded;line=0")
             break
