@@ -1,1 +1,8 @@
 blank_issues_enabled: false
+contact_links:
+  - name: "安全漏洞私密报告"
+    url: "https://github.com/sarry12227/shengxue-skill/security/advisories/new"
+    about: "按 SECURITY.md 通过私密渠道报告漏洞；不要在公开 Issue 提交个人信息或漏洞细节。"
+  - name: "数据删除与权利请求"
+    url: "https://github.com/sarry12227/shengxue-skill/blob/main/DATA_SOURCES.md"
+    about: "按 DATA_SOURCES.md 提交删除或数据权利请求；不要在公开 Issue 提交个人信息或权利证明。"

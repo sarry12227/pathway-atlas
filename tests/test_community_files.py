@@ -97,6 +97,12 @@ ISSUE_FORM_POLICY_LINKS = {
 PR_TEMPLATE = ROOT / ".github" / "pull_request_template.md"
 DEPENDABOT_CONFIG = ROOT / ".github" / "dependabot.yml"
 ISSUE_CHOOSER_CONFIG = ISSUE_TEMPLATE_DIR / "config.yml"
+SECURITY_CONTACT_URL = (
+    "https://github.com/sarry12227/shengxue-skill/security/advisories/new"
+)
+DATA_RIGHTS_CONTACT_URL = (
+    "https://github.com/sarry12227/shengxue-skill/blob/main/DATA_SOURCES.md"
+)
 
 
 class _StrictYamlLoader(yaml.SafeLoader):
@@ -153,61 +159,178 @@ def has_chinese_text(value):
 
 
 def issue_form_errors(document, expected_fields, policy_link):
-    """Validate rendered issue-form behavior instead of matching source snippets."""
+    """Validate the finite GitHub form subset and this repository's stricter policy."""
 
     errors = []
-    if set(document) != {"name", "description", "title", "labels", "body"}:
-        errors.append("top-level-shape")
+    top_level_allowed = {
+        "name", "description", "title", "labels", "projects", "assignees", "type", "body"
+    }
+    top_level_required = {"name", "description", "title", "labels", "body"}
+    if not isinstance(document, dict):
+        return ["top-level-type"]
+    if not top_level_required.issubset(document) or not set(document).issubset(top_level_allowed):
+        errors.append("top-level-keys")
     for key in ("name", "description", "title"):
-        if not has_chinese_text(document.get(key)):
+        value = document.get(key)
+        if not isinstance(value, str):
+            errors.append(f"top-level-type:{key}")
+        elif not has_chinese_text(value):
             errors.append(f"chinese-{key}")
-    labels = document.get("labels")
-    if not isinstance(labels, list) or not labels or not all(isinstance(label, str) for label in labels):
-        errors.append("labels")
+    if isinstance(document.get("name"), str) and len(document["name"]) <= 3:
+        errors.append("name-length")
+    for key in ("labels", "projects", "assignees"):
+        if key not in document:
+            continue
+        value = document[key]
+        if (
+            not isinstance(value, list)
+            or not all(isinstance(item, str) and item for item in value)
+            or len(value) != len(set(value))
+            or (key == "labels" and not value)
+        ):
+            errors.append(f"top-level-type:{key}")
+    if "type" in document and (
+        not isinstance(document["type"], str) or not document["type"]
+    ):
+        errors.append("top-level-type:type")
 
     body = document.get("body")
-    if not isinstance(body, list) or not all(isinstance(item, dict) for item in body):
+    if not isinstance(body, list) or not body or not all(isinstance(item, dict) for item in body):
         return errors + ["body"]
-    markdown_items = [item for item in body if item.get("type") == "markdown"]
-    fields = [item for item in body if item.get("type") != "markdown"]
+
+    supported_types = {"markdown", "textarea", "input", "dropdown", "checkboxes"}
+    allowed_attributes = {
+        "markdown": {"value"},
+        "textarea": {"label", "description", "placeholder", "value", "render"},
+        "input": {"label", "description", "placeholder", "value"},
+        "dropdown": {"label", "description", "multiple", "options", "default"},
+        "checkboxes": {"label", "description", "options"},
+    }
+    required_attributes = {
+        "markdown": {"value"},
+        "textarea": {"label", "description", "render"},
+        "input": {"label", "description"},
+        "dropdown": {"label", "description", "options"},
+        "checkboxes": {"label", "description", "options"},
+    }
+    markdown_items = []
+    fields = []
+    for index, item in enumerate(body):
+        field_type = item.get("type")
+        field_id = item.get("id")
+        identity = field_id if isinstance(field_id, str) else f"index-{index}"
+        if not isinstance(field_type, str) or field_type not in supported_types:
+            errors.append(f"element-type:{identity}")
+        if field_type == "markdown":
+            markdown_items.append(item)
+            if set(item) != {"type", "attributes"}:
+                errors.append(f"element-keys:markdown-{index}")
+        else:
+            fields.append(item)
+            if set(item) != {"type", "id", "attributes", "validations"}:
+                errors.append(f"element-keys:{identity}")
+
     ids = [item.get("id") for item in fields]
-    if len(ids) != len(set(ids)) or any(
-        not isinstance(field_id, str) or re.fullmatch(r"[A-Za-z0-9_-]+", field_id) is None
-        for field_id in ids
+    valid_ids = [field_id for field_id in ids if isinstance(field_id, str)]
+    if (
+        len(valid_ids) != len(ids)
+        or len(valid_ids) != len(set(valid_ids))
+        or any(re.fullmatch(r"[A-Za-z0-9_-]+", field_id) is None for field_id in valid_ids)
     ):
         errors.append("field-identities")
-    if set(ids) != set(expected_fields):
+    if set(valid_ids) != set(expected_fields):
         errors.append("field-set")
 
-    for item in fields:
-        field_id = item.get("id")
+    for index, item in enumerate(body):
         field_type = item.get("type")
-        if field_type != expected_fields.get(field_id):
-            errors.append(f"field-type:{field_id}")
-        attributes = item.get("attributes")
-        validations = item.get("validations")
-        if not isinstance(attributes, dict):
-            errors.append(f"attributes:{field_id}")
+        field_id = item.get("id")
+        identity = field_id if isinstance(field_id, str) else f"index-{index}"
+        if not isinstance(field_type, str) or field_type not in supported_types:
             continue
+        attributes = item.get("attributes")
+        if not isinstance(attributes, dict):
+            errors.append(f"attributes:{identity}")
+            continue
+        if (
+            not required_attributes[field_type].issubset(attributes)
+            or not set(attributes).issubset(allowed_attributes[field_type])
+        ):
+            errors.append(f"attribute-keys:{identity}")
+
+        if field_type == "markdown":
+            if not isinstance(attributes.get("value"), str) or not attributes.get("value"):
+                errors.append(f"attribute-type:{identity}:value")
+            continue
+
+        if not isinstance(field_id, str) or field_type != expected_fields.get(field_id):
+            errors.append(f"field-type:{identity}")
+        for key in ("label", "description", "placeholder", "value", "render"):
+            if key in attributes and not isinstance(attributes[key], str):
+                errors.append(f"attribute-type:{identity}:{key}")
         if not has_chinese_text(attributes.get("label")):
-            errors.append(f"chinese-label:{field_id}")
+            errors.append(f"chinese-label:{identity}")
         if not has_chinese_text(attributes.get("description")):
-            errors.append(f"chinese-description:{field_id}")
-        if validations != {"required": True}:
-            errors.append(f"required:{field_id}")
+            errors.append(f"chinese-description:{identity}")
+
+        validations = item.get("validations")
+        if not isinstance(validations, dict):
+            errors.append(f"validation-type:{identity}")
+        else:
+            if set(validations) != {"required"}:
+                errors.append(f"validation-keys:{identity}")
+            required = validations.get("required")
+            if not isinstance(required, bool):
+                errors.append(f"validation-type:{identity}")
+            elif required is not True:
+                errors.append(f"required:{identity}")
+
         if field_type == "textarea" and attributes.get("render") != "text":
-            errors.append(f"attachments-disabled:{field_id}")
+            errors.append(f"attachments-disabled:{identity}")
+        if field_type == "dropdown":
+            options = attributes.get("options")
+            options_valid = (
+                isinstance(options, list)
+                and bool(options)
+                and all(isinstance(option, str) and option for option in options)
+                and len(options) == len(set(options))
+            )
+            if not options_valid:
+                errors.append(f"dropdown-options:{identity}")
+            if "multiple" in attributes and not isinstance(attributes["multiple"], bool):
+                errors.append(f"dropdown-multiple:{identity}")
+            if "default" in attributes:
+                default = attributes["default"]
+                if (
+                    not isinstance(default, int)
+                    or isinstance(default, bool)
+                    or not options_valid
+                    or not 0 <= default < len(options)
+                ):
+                    errors.append(f"dropdown-default:{identity}")
         if field_type == "checkboxes":
             options = attributes.get("options")
+            option_labels = []
             if not isinstance(options, list) or not options:
-                errors.append(f"checkbox-options:{field_id}")
-            elif any(
-                not isinstance(option, dict)
-                or not has_chinese_text(option.get("label"))
-                or option.get("required") is not True
-                for option in options
-            ):
-                errors.append(f"checkbox-required:{field_id}")
+                errors.append(f"checkbox-options:{identity}")
+                options = []
+            for option_index, option in enumerate(options):
+                if not isinstance(option, dict):
+                    errors.append(f"checkbox-option-type:{identity}:{option_index}")
+                    continue
+                if set(option) != {"label", "required"}:
+                    errors.append(f"checkbox-option-keys:{identity}:{option_index}")
+                label = option.get("label")
+                if not isinstance(label, str) or not has_chinese_text(label):
+                    errors.append(f"checkbox-option-label:{identity}:{option_index}")
+                else:
+                    option_labels.append(label)
+                option_required = option.get("required")
+                if not isinstance(option_required, bool):
+                    errors.append(f"checkbox-option-required:{identity}:{option_index}")
+                elif option_required is not True:
+                    errors.append(f"checkbox-required:{identity}")
+            if len(option_labels) != len(set(option_labels)):
+                errors.append(f"checkbox-options:{identity}")
 
     privacy = next((item for item in fields if item.get("id") == "privacy_confirmation"), None)
     privacy_text = str(privacy.get("attributes", {}).get("options", [])) if privacy else ""
@@ -224,6 +347,62 @@ def issue_form_errors(document, expected_fields, policy_link):
         errors.append("policy-link")
     if not has_chinese_text(markdown_text):
         errors.append("chinese-markdown")
+    return errors
+
+
+def issue_chooser_errors(document):
+    errors = []
+    if not isinstance(document, dict):
+        return ["chooser-type"]
+    if set(document) != {"blank_issues_enabled", "contact_links"}:
+        errors.append("chooser-keys")
+    if document.get("blank_issues_enabled") is not False:
+        errors.append("blank-issues")
+    contact_links = document.get("contact_links")
+    if not isinstance(contact_links, list) or len(contact_links) != 2:
+        return errors + ["contact-links"]
+
+    names = []
+    urls = []
+    for index, link in enumerate(contact_links):
+        if not isinstance(link, dict):
+            errors.append(f"contact-type:{index}")
+            continue
+        if set(link) != {"name", "url", "about"}:
+            errors.append(f"contact-keys:{index}")
+        name = link.get("name")
+        url = link.get("url")
+        about = link.get("about")
+        if not has_chinese_text(name):
+            errors.append(f"contact-name:{index}")
+        if not isinstance(url, str) or re.fullmatch(r"https://[^\s]+", url) is None:
+            errors.append(f"contact-url:{index}")
+        if not has_chinese_text(about) or not all(
+            phrase in about for phrase in ("公开 Issue", "个人信息")
+        ):
+            errors.append(f"contact-about:{index}")
+        if isinstance(name, str):
+            names.append(name)
+        if isinstance(url, str):
+            urls.append(url)
+
+    if len(names) != len(set(names)) or len(urls) != len(set(urls)):
+        errors.append("contact-unique")
+    actual_urls = [
+        link.get("url") if isinstance(link, dict) else None for link in contact_links
+    ]
+    if actual_urls != [SECURITY_CONTACT_URL, DATA_RIGHTS_CONTACT_URL]:
+        errors.append("contact-destinations")
+    security_about = contact_links[0].get("about", {}) if isinstance(contact_links[0], dict) else ""
+    if not isinstance(security_about, str) or not all(
+        phrase in security_about for phrase in ("SECURITY.md", "漏洞", "私密")
+    ):
+        errors.append("security-guidance")
+    data_about = contact_links[1].get("about", {}) if isinstance(contact_links[1], dict) else ""
+    if not isinstance(data_about, str) or not all(
+        phrase in data_about for phrase in ("删除", "数据权利", "DATA_SOURCES.md")
+    ):
+        errors.append("data-guidance")
     return errors
 
 
@@ -812,11 +991,290 @@ class CommunityFilesTest(unittest.TestCase):
             ),
         )
 
+    def test_issue_form_schema_rejects_unknown_keys_duplicate_ids_and_bad_validations(self):
+        document = load_strict_yaml(ISSUE_FORMS["bug"].read_text(encoding="utf-8"))
+
+        unknown_top_level = copy.deepcopy(document)
+        unknown_top_level["future_schema_key"] = True
+        self.assertIn(
+            "top-level-keys",
+            issue_form_errors(
+                unknown_top_level,
+                ISSUE_FORM_FIELDS["bug"],
+                ISSUE_FORM_POLICY_LINKS["bug"],
+            ),
+        )
+
+        bad_top_level_type = copy.deepcopy(document)
+        bad_top_level_type["labels"] = "bug"
+        self.assertIn(
+            "top-level-type:labels",
+            issue_form_errors(
+                bad_top_level_type,
+                ISSUE_FORM_FIELDS["bug"],
+                ISSUE_FORM_POLICY_LINKS["bug"],
+            ),
+        )
+
+        malformed_label_item = copy.deepcopy(document)
+        malformed_label_item["labels"] = [{"name": "bug"}]
+        self.assertIn(
+            "top-level-type:labels",
+            issue_form_errors(
+                malformed_label_item,
+                ISSUE_FORM_FIELDS["bug"],
+                ISSUE_FORM_POLICY_LINKS["bug"],
+            ),
+        )
+
+        malformed_element_type = copy.deepcopy(document)
+        malformed_element_type["body"][1]["type"] = ["input"]
+        self.assertIn(
+            "element-type:summary",
+            issue_form_errors(
+                malformed_element_type,
+                ISSUE_FORM_FIELDS["bug"],
+                ISSUE_FORM_POLICY_LINKS["bug"],
+            ),
+        )
+
+        malformed_id = copy.deepcopy(document)
+        malformed_id["body"][1]["id"] = {"unsafe": "mapping"}
+        self.assertIn(
+            "field-identities",
+            issue_form_errors(
+                malformed_id,
+                ISSUE_FORM_FIELDS["bug"],
+                ISSUE_FORM_POLICY_LINKS["bug"],
+            ),
+        )
+
+        unknown_sibling = copy.deepcopy(document)
+        unknown_sibling["body"][1]["help"] = "not-a-schema-key"
+        self.assertIn(
+            "element-keys:summary",
+            issue_form_errors(
+                unknown_sibling,
+                ISSUE_FORM_FIELDS["bug"],
+                ISSUE_FORM_POLICY_LINKS["bug"],
+            ),
+        )
+
+        unknown_attribute = copy.deepcopy(document)
+        unknown_attribute["body"][1]["attributes"]["help"] = "not-a-schema-key"
+        self.assertIn(
+            "attribute-keys:summary",
+            issue_form_errors(
+                unknown_attribute,
+                ISSUE_FORM_FIELDS["bug"],
+                ISSUE_FORM_POLICY_LINKS["bug"],
+            ),
+        )
+
+        bad_attribute_type = copy.deepcopy(document)
+        bad_attribute_type["body"][1]["attributes"]["placeholder"] = 7
+        self.assertIn(
+            "attribute-type:summary:placeholder",
+            issue_form_errors(
+                bad_attribute_type,
+                ISSUE_FORM_FIELDS["bug"],
+                ISSUE_FORM_POLICY_LINKS["bug"],
+            ),
+        )
+
+        unsupported_type = copy.deepcopy(document)
+        next(item for item in unsupported_type["body"] if item.get("id") == "environment")[
+            "type"
+        ] = "radio"
+        self.assertIn(
+            "element-type:environment",
+            issue_form_errors(
+                unsupported_type,
+                ISSUE_FORM_FIELDS["bug"],
+                ISSUE_FORM_POLICY_LINKS["bug"],
+            ),
+        )
+
+        duplicate_id = copy.deepcopy(document)
+        duplicate_id["body"][4]["id"] = "summary"
+        self.assertIn(
+            "field-identities",
+            issue_form_errors(
+                duplicate_id,
+                ISSUE_FORM_FIELDS["bug"],
+                ISSUE_FORM_POLICY_LINKS["bug"],
+            ),
+        )
+
+        bad_validation = copy.deepcopy(document)
+        bad_validation["body"][1]["validations"] = {"required": "true"}
+        self.assertIn(
+            "validation-type:summary",
+            issue_form_errors(
+                bad_validation,
+                ISSUE_FORM_FIELDS["bug"],
+                ISSUE_FORM_POLICY_LINKS["bug"],
+            ),
+        )
+
+        unknown_validation = copy.deepcopy(document)
+        unknown_validation["body"][1]["validations"]["pattern"] = ".+"
+        self.assertIn(
+            "validation-keys:summary",
+            issue_form_errors(
+                unknown_validation,
+                ISSUE_FORM_FIELDS["bug"],
+                ISSUE_FORM_POLICY_LINKS["bug"],
+            ),
+        )
+
+    def test_issue_form_dropdown_and_checkbox_option_mutations_fail_closed(self):
+        document = load_strict_yaml(ISSUE_FORMS["bug"].read_text(encoding="utf-8"))
+        dropdown = copy.deepcopy(document)
+        environment = next(item for item in dropdown["body"] if item.get("id") == "environment")
+        environment["type"] = "dropdown"
+        environment["attributes"] = {
+            "label": "运行平台",
+            "description": "请选择用于复现问题的运行平台。",
+            "multiple": False,
+            "options": ["Windows", "Linux"],
+            "default": 0,
+        }
+        fields = dict(ISSUE_FORM_FIELDS["bug"], environment="dropdown")
+        self.assertEqual(
+            issue_form_errors(dropdown, fields, ISSUE_FORM_POLICY_LINKS["bug"]),
+            [],
+        )
+
+        duplicate_dropdown = copy.deepcopy(dropdown)
+        environment = next(
+            item for item in duplicate_dropdown["body"] if item.get("id") == "environment"
+        )
+        environment["attributes"]["options"] = ["Windows", "Windows"]
+        self.assertIn(
+            "dropdown-options:environment",
+            issue_form_errors(
+                duplicate_dropdown,
+                fields,
+                ISSUE_FORM_POLICY_LINKS["bug"],
+            ),
+        )
+
+        bad_multiple = copy.deepcopy(dropdown)
+        environment = next(item for item in bad_multiple["body"] if item.get("id") == "environment")
+        environment["attributes"]["multiple"] = "false"
+        self.assertIn(
+            "dropdown-multiple:environment",
+            issue_form_errors(bad_multiple, fields, ISSUE_FORM_POLICY_LINKS["bug"]),
+        )
+
+        duplicate_checkbox = copy.deepcopy(document)
+        privacy = next(
+            item for item in duplicate_checkbox["body"] if item.get("id") == "privacy_confirmation"
+        )
+        privacy["attributes"]["options"].append(
+            copy.deepcopy(privacy["attributes"]["options"][0])
+        )
+        self.assertIn(
+            "checkbox-options:privacy_confirmation",
+            issue_form_errors(
+                duplicate_checkbox,
+                ISSUE_FORM_FIELDS["bug"],
+                ISSUE_FORM_POLICY_LINKS["bug"],
+            ),
+        )
+
+        unknown_option_key = copy.deepcopy(document)
+        privacy = next(
+            item for item in unknown_option_key["body"] if item.get("id") == "privacy_confirmation"
+        )
+        privacy["attributes"]["options"][0]["selected"] = False
+        self.assertIn(
+            "checkbox-option-keys:privacy_confirmation:0",
+            issue_form_errors(
+                unknown_option_key,
+                ISSUE_FORM_FIELDS["bug"],
+                ISSUE_FORM_POLICY_LINKS["bug"],
+            ),
+        )
+
+        bad_option_required = copy.deepcopy(document)
+        privacy = next(
+            item for item in bad_option_required["body"] if item.get("id") == "privacy_confirmation"
+        )
+        privacy["attributes"]["options"][0]["required"] = "true"
+        self.assertIn(
+            "checkbox-option-required:privacy_confirmation:0",
+            issue_form_errors(
+                bad_option_required,
+                ISSUE_FORM_FIELDS["bug"],
+                ISSUE_FORM_POLICY_LINKS["bug"],
+            ),
+        )
+
+    def test_issue_form_schema_accepts_documented_optional_safe_controls(self):
+        document = load_strict_yaml(ISSUE_FORMS["bug"].read_text(encoding="utf-8"))
+        controlled = copy.deepcopy(document)
+        controlled["assignees"] = []
+        controlled["projects"] = []
+        controlled["type"] = "缺陷"
+        summary = next(item for item in controlled["body"] if item.get("id") == "summary")
+        summary["attributes"]["placeholder"] = "请使用虚构样例"
+        summary["attributes"]["value"] = "匿名摘要"
+        environment = next(item for item in controlled["body"] if item.get("id") == "environment")
+        environment["attributes"]["value"] = "v0.1.0、Windows、Python 3.10"
+        self.assertEqual(
+            issue_form_errors(
+                controlled,
+                ISSUE_FORM_FIELDS["bug"],
+                ISSUE_FORM_POLICY_LINKS["bug"],
+            ),
+            [],
+        )
+
     def test_issue_chooser_disables_blank_issues_and_no_funding_is_solicited(self):
         self.assertTrue(ISSUE_CHOOSER_CONFIG.is_file(), ".github/ISSUE_TEMPLATE/config.yml is missing")
         config = load_strict_yaml(ISSUE_CHOOSER_CONFIG.read_text(encoding="utf-8"))
-        self.assertEqual(config, {"blank_issues_enabled": False})
+        self.assertEqual(issue_chooser_errors(config), [])
         self.assertFalse((ROOT / ".github" / "FUNDING.yml").exists())
+
+    def test_issue_chooser_mutations_reject_unknown_duplicate_or_non_https_contacts(self):
+        safe = {
+            "blank_issues_enabled": False,
+            "contact_links": [
+                {
+                    "name": "安全漏洞私密报告",
+                    "url": SECURITY_CONTACT_URL,
+                    "about": "按 SECURITY.md 私密报告漏洞；不要在公开 Issue 提交个人信息。",
+                },
+                {
+                    "name": "数据删除与权利请求",
+                    "url": DATA_RIGHTS_CONTACT_URL,
+                    "about": "按 DATA_SOURCES.md 提交删除或数据权利请求；不要在公开 Issue 提交个人信息。",
+                },
+            ],
+        }
+        self.assertEqual(issue_chooser_errors(safe), [])
+
+        unknown_key = copy.deepcopy(safe)
+        unknown_key["contact_links"][0]["description"] = "unsupported"
+        self.assertIn("contact-keys:0", issue_chooser_errors(unknown_key))
+
+        duplicate = copy.deepcopy(safe)
+        duplicate["contact_links"][1]["url"] = SECURITY_CONTACT_URL
+        self.assertIn("contact-unique", issue_chooser_errors(duplicate))
+
+        insecure = copy.deepcopy(safe)
+        insecure["contact_links"][0]["url"] = SECURITY_CONTACT_URL.replace("https://", "http://")
+        self.assertIn("contact-url:0", issue_chooser_errors(insecure))
+
+        wrong_type = copy.deepcopy(safe)
+        wrong_type["contact_links"][0]["url"] = {"unsafe": "mapping"}
+        self.assertIn("contact-url:0", issue_chooser_errors(wrong_type))
+
+        safe_control = copy.deepcopy(safe)
+        safe_control["contact_links"][0]["about"] += " 请先阅读仓库安全说明。"
+        self.assertEqual(issue_chooser_errors(safe_control), [])
 
     def test_dependabot_has_two_bounded_weekly_public_ecosystems(self):
         self.assertTrue(DEPENDABOT_CONFIG.is_file(), ".github/dependabot.yml is missing")
