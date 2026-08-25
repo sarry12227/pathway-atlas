@@ -366,7 +366,7 @@ class ReleaseEvaluationTest(unittest.TestCase):
         self.assertTrue(by_name["tracked_inventory"].ok)
         self.assertGreater(by_name["tracked_inventory"].count, 100)
 
-    def test_current_tree_tracks_ci_and_reports_later_task_gaps_without_nested_suite(self) -> None:
+    def test_future_artifact_gate_allows_only_the_task8_transition_without_nested_suite(self) -> None:
         context = ReleaseContext(
             root=ROOT,
             expected_version="0.1.0",
@@ -378,31 +378,22 @@ class ReleaseEvaluationTest(unittest.TestCase):
         report = evaluate_release(context)
 
         by_name = {result.name: result for result in report.results}
-        self.assertFalse(report.ok)
-        self.assertFalse(by_name["future_release_artifacts"].ok)
-        self.assertNotIn(
-            "missing-or-untracked:.github/workflows/ci.yml",
-            by_name["future_release_artifacts"].details,
+        future_result = by_name["future_release_artifacts"]
+        tracked = {entry.path for entry in git_tracked_entries(ROOT)}
+        policy = load_policy(ROOT / "release-policy.json")
+        expected = tuple(
+            f"missing-or-untracked:{path}"
+            for path in policy.future_release_paths
+            if path not in tracked
         )
-        self.assertNotIn(
-            "missing-or-untracked:.github/workflows/source-health.yml",
-            by_name["future_release_artifacts"].details,
-        )
-        self.assertNotIn(
-            "missing-or-untracked:.github/ISSUE_TEMPLATE/source-health.yml",
-            by_name["future_release_artifacts"].details,
-        )
-        self.assertEqual(
-            by_name["future_release_artifacts"].details,
-            (
-                "missing-or-untracked:docs/release-process.md",
-            ),
-        )
+        self.assertIn(expected, ((), ("missing-or-untracked:docs/release-process.md",)))
+        self.assertEqual(future_result.details, expected)
+        self.assertEqual(future_result.ok, not expected)
         serialized = json.dumps(report.to_dict(), ensure_ascii=False)
         self.assertNotIn(str(ROOT), serialized)
         self.assertNotIn("ghp_", serialized)
 
-    def test_cli_always_emits_json_and_nonzero_for_known_pending_gates(self) -> None:
+    def test_cli_always_emits_json_across_the_known_task8_transition(self) -> None:
         stdout = io.StringIO()
         stderr = io.StringIO()
         with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr), mock.patch.dict(
@@ -420,8 +411,12 @@ class ReleaseEvaluationTest(unittest.TestCase):
             )
 
         payload = json.loads(stdout.getvalue())
-        self.assertNotEqual(exit_code, 0)
-        self.assertFalse(payload["ok"])
+        self.assertEqual(exit_code == 0, payload["ok"])
+        future = next(result for result in payload["results"] if result["name"] == "future_release_artifacts")
+        self.assertIn(
+            tuple(future["details"]),
+            ((), ("missing-or-untracked:docs/release-process.md",)),
+        )
         self.assertEqual(stderr.getvalue(), "")
         self.assertNotIn(str(ROOT), stdout.getvalue())
 
