@@ -25,6 +25,7 @@ class ProjectMetadataTest(unittest.TestCase):
         self.assertIn("openpyxl", " ".join(extras["spreadsheets"]))
         self.assertIn("pdfplumber", " ".join(extras["pdf"]))
         self.assertIn("coverage", " ".join(extras["test"]))
+        self.assertIn("PyYAML>=6,<7", extras["test"])
         self.assertTrue(
             any("tomli" in requirement for requirement in extras["test"]),
             "Python 3.10 must have a tomli fallback in the test extra",

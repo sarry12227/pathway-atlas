@@ -1,129 +1,84 @@
 from __future__ import annotations
 
 import copy
-import json
+import re
 import unittest
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+import yaml
 
 
 ROOT = Path(__file__).resolve().parents[1]
 CI_WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
+EXPECTED_CONCURRENCY_GROUP = "deterministic-ci-${{ github.workflow }}-${{ github.ref }}"
 
 
-@dataclass(frozen=True)
-class _YamlLine:
-    indent: int
-    content: str
+class _StrictWorkflowLoader(yaml.SafeLoader):
+    pass
 
 
-def _scalar(value: str) -> Any:
-    if value.startswith('"'):
-        return json.loads(value)
-    if value.startswith("'") and value.endswith("'"):
-        return value[1:-1].replace("''", "'")
-    if value == "true":
-        return True
-    if value == "false":
-        return False
-    if value == "null":
-        return None
-    try:
-        return int(value)
-    except ValueError:
-        return value
+_StrictWorkflowLoader.yaml_implicit_resolvers = {
+    initial: list(resolvers)
+    for initial, resolvers in yaml.SafeLoader.yaml_implicit_resolvers.items()
+}
+for _initial, _resolvers in tuple(_StrictWorkflowLoader.yaml_implicit_resolvers.items()):
+    _StrictWorkflowLoader.yaml_implicit_resolvers[_initial] = [
+        resolver
+        for resolver in _resolvers
+        if resolver[0] != "tag:yaml.org,2002:bool"
+    ]
+_StrictWorkflowLoader.add_implicit_resolver(
+    "tag:yaml.org,2002:bool",
+    re.compile(r"^(?:true|false)$", re.IGNORECASE),
+    list("tTfF"),
+)
 
 
-def _key_value(content: str) -> tuple[str, str]:
-    if ":" not in content:
-        raise ValueError(f"expected mapping entry: {content}")
-    key, value = content.split(":", 1)
-    if not key or key != key.strip():
-        raise ValueError(f"invalid mapping key: {content}")
-    return key, value.strip()
+def _construct_unique_mapping(
+    loader: _StrictWorkflowLoader,
+    node: yaml.nodes.MappingNode,
+    deep: bool = False,
+) -> dict[Any, Any]:
+    loader.flatten_mapping(node)
+    mapping: dict[Any, Any] = {}
+    for key_node, value_node in node.value:
+        key = loader.construct_object(key_node, deep=deep)
+        try:
+            duplicate = key in mapping
+        except TypeError as error:
+            raise yaml.constructor.ConstructorError(
+                "while constructing a mapping",
+                node.start_mark,
+                "found an unhashable key",
+                key_node.start_mark,
+            ) from error
+        if duplicate:
+            raise yaml.constructor.ConstructorError(
+                "while constructing a mapping",
+                node.start_mark,
+                f"found duplicate key {key!r}",
+                key_node.start_mark,
+            )
+        mapping[key] = loader.construct_object(value_node, deep=deep)
+    return mapping
+
+
+_StrictWorkflowLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
+    _construct_unique_mapping,
+)
 
 
 def _load_yaml_subset(text: str) -> dict[str, Any]:
-    """Parse the conservative YAML subset used by deterministic CI.
+    """Parse workflow YAML with real syntax and strict duplicate-key checks."""
 
-    The test suite deliberately has no YAML runtime dependency. This parser
-    handles nested mappings, sequences, quoted scalars, booleans, integers,
-    and null values, and rejects aliases, tags, tabs, flow collections, and
-    multiline scalars that could conceal a materially different workflow.
-    """
-
-    lines: list[_YamlLine] = []
-    for number, raw in enumerate(text.splitlines(), start=1):
-        if not raw.strip() or raw.lstrip().startswith("#"):
-            continue
-        if "\t" in raw:
-            raise ValueError(f"tabs are not allowed on line {number}")
-        indent = len(raw) - len(raw.lstrip(" "))
-        if indent % 2:
-            raise ValueError(f"indentation must use two-space levels on line {number}")
-        content = raw[indent:]
-        if content.startswith(("&", "*", "!", "|", ">", "[", "{")):
-            raise ValueError(f"unsupported YAML feature on line {number}")
-        lines.append(_YamlLine(indent, content))
-    if not lines:
-        raise ValueError("workflow is empty")
-
-    def parse_block(index: int, indent: int) -> tuple[Any, int]:
-        if index >= len(lines) or lines[index].indent != indent:
-            raise ValueError("invalid block indentation")
-        if lines[index].content.startswith("- "):
-            return parse_sequence(index, indent)
-        return parse_mapping(index, indent)
-
-    def parse_mapping(index: int, indent: int) -> tuple[dict[str, Any], int]:
-        result: dict[str, Any] = {}
-        while index < len(lines) and lines[index].indent == indent:
-            line = lines[index]
-            if line.content.startswith("- "):
-                break
-            key, value = _key_value(line.content)
-            if key in result:
-                raise ValueError(f"duplicate mapping key: {key}")
-            index += 1
-            if value:
-                result[key] = _scalar(value)
-            elif index < len(lines) and lines[index].indent > indent:
-                if lines[index].indent != indent + 2:
-                    raise ValueError(f"invalid child indentation for {key}")
-                result[key], index = parse_block(index, indent + 2)
-            else:
-                result[key] = None
-        return result, index
-
-    def parse_sequence(index: int, indent: int) -> tuple[list[Any], int]:
-        result: list[Any] = []
-        while index < len(lines) and lines[index].indent == indent:
-            line = lines[index]
-            if not line.content.startswith("- "):
-                break
-            item = line.content[2:].strip()
-            if not item:
-                raise ValueError("empty sequence entries are not supported")
-            index += 1
-            if ":" not in item:
-                result.append(_scalar(item))
-                continue
-            key, value = _key_value(item)
-            mapping: dict[str, Any] = {key: _scalar(value) if value else None}
-            if index < len(lines) and lines[index].indent > indent:
-                if lines[index].indent != indent + 2:
-                    raise ValueError(f"invalid sequence mapping indentation for {key}")
-                continuation, index = parse_mapping(index, indent + 2)
-                overlap = set(mapping).intersection(continuation)
-                if overlap:
-                    raise ValueError(f"duplicate sequence mapping key: {sorted(overlap)[0]}")
-                mapping.update(continuation)
-            result.append(mapping)
-        return result, index
-
-    document, consumed = parse_block(0, lines[0].indent)
-    if lines[0].indent != 0 or consumed != len(lines) or not isinstance(document, dict):
+    try:
+        yaml.safe_load(text)
+        document = yaml.load(text, Loader=_StrictWorkflowLoader)
+    except yaml.YAMLError as error:
+        raise ValueError("invalid workflow YAML") from error
+    if not isinstance(document, dict):
         raise ValueError("workflow must be one top-level mapping")
     return document
 
@@ -139,8 +94,13 @@ def _workflow_errors(document: dict[str, Any]) -> list[str]:
         errors.append("utf8-environment")
 
     concurrency = document.get("concurrency")
-    if not isinstance(concurrency, dict) or concurrency.get("cancel-in-progress") is not True:
+    if not isinstance(concurrency, dict):
         errors.append("concurrency")
+    else:
+        if concurrency.get("group") != EXPECTED_CONCURRENCY_GROUP:
+            errors.append("concurrency-group")
+        if concurrency.get("cancel-in-progress") is not True:
+            errors.append("concurrency")
 
     jobs = document.get("jobs")
     job = jobs.get("test") if isinstance(jobs, dict) else None
@@ -148,11 +108,15 @@ def _workflow_errors(document: dict[str, Any]) -> list[str]:
         return errors + ["test-job"]
     if "permissions" in job:
         errors.append("job-permissions")
+    if job.get("runs-on") != "${{ matrix.os }}":
+        errors.append("runs-on")
     timeout = job.get("timeout-minutes")
     if not isinstance(timeout, int) or not 1 <= timeout <= 30:
         errors.append("timeout")
 
     strategy = job.get("strategy")
+    if not isinstance(strategy, dict) or strategy.get("fail-fast") is not False:
+        errors.append("fail-fast")
     matrix = strategy.get("matrix") if isinstance(strategy, dict) else None
     if not isinstance(matrix, dict) or set(matrix) != {"os", "python-version"}:
         errors.append("matrix-shape")
@@ -168,6 +132,22 @@ def _workflow_errors(document: dict[str, Any]) -> list[str]:
     actions = [step.get("uses") for step in steps if "uses" in step]
     if actions != ["actions/checkout@v7", "actions/setup-python@v7"]:
         errors.append("official-actions")
+    if any("if" in step or "continue-on-error" in step for step in steps):
+        errors.append("critical-step-bypass")
+
+    default_shells: list[Any] = []
+    for container in (document, job):
+        defaults = container.get("defaults")
+        run_defaults = defaults.get("run") if isinstance(defaults, dict) else None
+        if isinstance(run_defaults, dict) and "shell" in run_defaults:
+            default_shells.append(run_defaults["shell"])
+    default_shells.extend(step.get("shell") for step in steps if "run" in step and "shell" in step)
+    if any(
+        isinstance(shell, str)
+        and re.match(r"^cmd(?:\.exe)?(?:\s|$)", shell.strip(), re.IGNORECASE)
+        for shell in default_shells
+    ):
+        errors.append("portable-shell")
 
     release_steps = [
         step
@@ -258,6 +238,12 @@ class WorkflowTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             _load_yaml_subset("name: CI\njobs\n  test:\n")
 
+    def test_yaml_parser_rejects_unterminated_quotes_and_duplicate_keys(self) -> None:
+        with self.assertRaises(ValueError):
+            _load_yaml_subset("name: 'unterminated\n")
+        with self.assertRaises(ValueError):
+            _load_yaml_subset("name: first\nname: second\n")
+
     def test_structure_mutation_canaries_catch_unsafe_workflow_changes(self) -> None:
         ci = self.load_ci()
 
@@ -272,6 +258,45 @@ class WorkflowTest(unittest.TestCase):
         bypassed_release = copy.deepcopy(ci)
         bypassed_release["jobs"]["test"]["steps"][-1]["continue-on-error"] = True
         self.assertIn("release-gate-bypass", _workflow_errors(bypassed_release))
+
+    def test_execution_structure_mutation_canaries_reject_matrix_drift(self) -> None:
+        ci = self.load_ci()
+
+        wrong_runner = copy.deepcopy(ci)
+        wrong_runner["jobs"]["test"]["runs-on"] = "ubuntu-latest"
+        self.assertIn("runs-on", _workflow_errors(wrong_runner))
+
+        fail_fast = copy.deepcopy(ci)
+        fail_fast["jobs"]["test"]["strategy"]["fail-fast"] = True
+        self.assertIn("fail-fast", _workflow_errors(fail_fast))
+
+    def test_concurrency_mutation_canaries_reject_unstable_or_uncancellable_groups(self) -> None:
+        ci = self.load_ci()
+
+        for unsafe_group in ("", "fixed-group"):
+            with self.subTest(group=unsafe_group):
+                mutated = copy.deepcopy(ci)
+                mutated["concurrency"]["group"] = unsafe_group
+                self.assertIn("concurrency-group", _workflow_errors(mutated))
+
+        uncancellable = copy.deepcopy(ci)
+        uncancellable["concurrency"]["cancel-in-progress"] = False
+        self.assertIn("concurrency", _workflow_errors(uncancellable))
+
+    def test_critical_step_mutation_canaries_reject_bypasses_and_cmd_shell(self) -> None:
+        ci = self.load_ci()
+
+        skipped_step = copy.deepcopy(ci)
+        skipped_step["jobs"]["test"]["steps"][2]["if"] = False
+        self.assertIn("critical-step-bypass", _workflow_errors(skipped_step))
+
+        tolerated_failure = copy.deepcopy(ci)
+        tolerated_failure["jobs"]["test"]["steps"][2]["continue-on-error"] = True
+        self.assertIn("critical-step-bypass", _workflow_errors(tolerated_failure))
+
+        cmd_shell = copy.deepcopy(ci)
+        cmd_shell["jobs"]["test"]["steps"][2]["shell"] = "cmd"
+        self.assertIn("portable-shell", _workflow_errors(cmd_shell))
 
 
 if __name__ == "__main__":
