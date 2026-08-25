@@ -300,6 +300,10 @@ def issue_form_errors(document, expected_fields, policy_link):
                 errors.append(f"dropdown-multiple:{identity}")
             if "default" in attributes:
                 default = attributes["default"]
+                if options_valid and any(
+                    option.strip().casefold() in {"none", "n/a"} for option in options
+                ):
+                    errors.append(f"dropdown-reserved-option:{identity}")
                 if (
                     not isinstance(default, int)
                     or isinstance(default, bool)
@@ -1211,6 +1215,60 @@ class CommunityFilesTest(unittest.TestCase):
                 ISSUE_FORM_POLICY_LINKS["bug"],
             ),
         )
+
+    def test_dropdown_default_rejects_only_exact_reserved_none_options(self):
+        document = load_strict_yaml(ISSUE_FORMS["bug"].read_text(encoding="utf-8"))
+        dropdown = copy.deepcopy(document)
+        environment = next(item for item in dropdown["body"] if item.get("id") == "environment")
+        environment["type"] = "dropdown"
+        environment["attributes"] = {
+            "label": "运行平台",
+            "description": "请选择用于复现问题的运行平台。",
+            "options": ["Windows", "Linux"],
+            "default": 0,
+        }
+        fields = dict(ISSUE_FORM_FIELDS["bug"], environment="dropdown")
+
+        for reserved in (" None ", " N/A "):
+            with self.subTest(reserved=reserved):
+                mutated = copy.deepcopy(dropdown)
+                field = next(
+                    item for item in mutated["body"] if item.get("id") == "environment"
+                )
+                field["attributes"]["options"].append(reserved)
+                self.assertIn(
+                    "dropdown-reserved-option:environment",
+                    issue_form_errors(
+                        mutated,
+                        fields,
+                        ISSUE_FORM_POLICY_LINKS["bug"],
+                    ),
+                )
+
+        descriptive = copy.deepcopy(dropdown)
+        field = next(item for item in descriptive["body"] if item.get("id") == "environment")
+        field["attributes"]["options"].append("None available")
+        self.assertEqual(
+            issue_form_errors(descriptive, fields, ISSUE_FORM_POLICY_LINKS["bug"]),
+            [],
+        )
+
+        for reserved in ("None", "n/a"):
+            with self.subTest(no_default=reserved):
+                no_default = copy.deepcopy(dropdown)
+                field = next(
+                    item for item in no_default["body"] if item.get("id") == "environment"
+                )
+                field["attributes"].pop("default")
+                field["attributes"]["options"].append(reserved)
+                self.assertEqual(
+                    issue_form_errors(
+                        no_default,
+                        fields,
+                        ISSUE_FORM_POLICY_LINKS["bug"],
+                    ),
+                    [],
+                )
 
     def test_issue_form_schema_accepts_documented_optional_safe_controls(self):
         document = load_strict_yaml(ISSUE_FORMS["bug"].read_text(encoding="utf-8"))

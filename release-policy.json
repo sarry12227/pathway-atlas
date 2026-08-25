@@ -79,7 +79,7 @@
     {
       "path": "tests/test_community_files.py",
       "kinds": ["absolute_local_path", "pricing_or_sales", "private_system_reference"],
-      "file_sha256": "d3b17fa342b623b5417f1050d37012e6db1165fff8636e02e9cd3f4ea6c13d47",
+      "file_sha256": "74610841f3be44311248d467b92d5ab5d32986cdbcac99880269984b76f9ff8c",
       "reason": "synthetic negative fixture"
     },
     {
