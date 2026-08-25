@@ -71,6 +71,12 @@
       "reason": "numeric parser rule literal"
     },
     {
+      "path": "tests/test_build_release.py",
+      "kinds": ["secret"],
+      "file_sha256": "19d58bf8f50563387c0743ad09d5972833363ca12702405c71691db14953851c",
+      "reason": "synthetic negative fixture"
+    },
+    {
       "path": "tests/test_cli_smoke.py",
       "kinds": ["absolute_local_path", "phone", "pricing_or_sales"],
       "file_sha256": "8a125a4d39c59745bca7a79407d3a727097128d9bbb086ce30213dff9b5d0a15",
@@ -145,7 +151,7 @@
     {
       "path": "tests/test_release_check.py",
       "kinds": ["absolute_local_path", "secret"],
-      "file_sha256": "0eb8795b1b992d5303398981f94e626c7e6ff37ab2ef47af33bdcd4f525211e5",
+      "file_sha256": "570feca19ecb6ae9bcf99bbacd4655c4358aea328c070f9175a95f4960e5f13c",
       "reason": "synthetic negative fixture"
     },
     {

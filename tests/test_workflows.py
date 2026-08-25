@@ -13,8 +13,10 @@ ROOT = Path(__file__).resolve().parents[1]
 CI_WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
 SOURCE_HEALTH_WORKFLOW = ROOT / ".github" / "workflows" / "source-health.yml"
 SOURCE_HEALTH_TEMPLATE = ROOT / ".github" / "ISSUE_TEMPLATE" / "source-health.yml"
+RELEASE_WORKFLOW = ROOT / ".github" / "workflows" / "release.yml"
 EXPECTED_CONCURRENCY_GROUP = "deterministic-ci-${{ github.workflow }}-${{ github.ref }}"
 EXPECTED_SOURCE_HEALTH_CONCURRENCY_GROUP = "source-health-${{ github.repository }}"
+EXPECTED_RELEASE_CONCURRENCY_GROUP = "release-${{ github.ref }}"
 
 
 class _StrictWorkflowLoader(yaml.SafeLoader):
@@ -420,6 +422,88 @@ def _source_health_template_errors(document: dict[str, Any]) -> list[str]:
     return errors
 
 
+def _release_workflow_errors(document: dict[str, Any]) -> list[str]:
+    errors: list[str] = []
+    triggers = document.get("on")
+    if triggers != {"push": {"tags": ["v*"]}}:
+        errors.append("tag-trigger")
+    if document.get("permissions") != {"contents": "write"}:
+        errors.append("permissions")
+    concurrency = document.get("concurrency")
+    if not isinstance(concurrency, dict):
+        errors.append("concurrency")
+    else:
+        if concurrency.get("group") != EXPECTED_RELEASE_CONCURRENCY_GROUP:
+            errors.append("concurrency-group")
+        if concurrency.get("cancel-in-progress") is not False:
+            errors.append("concurrency")
+
+    jobs = document.get("jobs")
+    job = jobs.get("release") if isinstance(jobs, dict) and set(jobs) == {"release"} else None
+    if not isinstance(job, dict):
+        return errors + ["release-job"]
+    if job.get("runs-on") != "ubuntu-latest":
+        errors.append("runs-on")
+    timeout = job.get("timeout-minutes")
+    if not isinstance(timeout, int) or isinstance(timeout, bool) or not 1 <= timeout <= 30:
+        errors.append("timeout")
+    steps = job.get("steps")
+    if not isinstance(steps, list) or not all(isinstance(step, dict) for step in steps):
+        return errors + ["steps"]
+    if any("continue-on-error" in step or "if" in step for step in steps):
+        errors.append("critical-step-bypass")
+    actions = [step.get("uses") for step in steps if "uses" in step]
+    if actions != ["actions/checkout@v7", "actions/setup-python@v7"]:
+        errors.append("official-actions")
+    checkout = next((step for step in steps if step.get("uses") == "actions/checkout@v7"), {})
+    if checkout.get("with") != {"fetch-depth": 0, "persist-credentials": False}:
+        errors.append("checkout-history")
+    setup = next((step for step in steps if step.get("uses") == "actions/setup-python@v7"), {})
+    if setup.get("with") != {"python-version": "3.10", "cache": "pip", "cache-dependency-path": "pyproject.toml"}:
+        errors.append("supported-python")
+
+    run_steps = [step for step in steps if "run" in step]
+    rendered = "\n".join(str(step.get("run", "")) for step in run_steps)
+    required = (
+        'git cat-file -t "$GITHUB_REF_NAME"',
+        'git rev-list -n 1 "$GITHUB_REF_NAME"',
+        '"v$version"',
+        'python -m pip install -e ".[all,test]"',
+        "python -m unittest discover -s tests -v",
+        "scripts/release_check.py --ci",
+        '--tag "${{ github.ref_name }}"',
+        "scripts/build_release.py",
+        "sha256sum --check SHA256SUMS",
+        'heading = f"## v{version} — "',
+        "gh release create",
+        "--notes-file dist/release-notes.md",
+        "dist/SHA256SUMS",
+    )
+    if any(token not in rendered for token in required):
+        errors.append("release-contract")
+    metadata = next((step for step in steps if step.get("id") == "metadata"), {})
+    install_index = next(
+        (index for index, step in enumerate(steps) if step.get("run") == 'python -m pip install -e ".[all,test]"'),
+        -1,
+    )
+    metadata_index = steps.index(metadata) if metadata else -1
+    if (
+        install_index < 0
+        or metadata_index < 0
+        or install_index >= metadata_index
+        or "except ModuleNotFoundError:" not in str(metadata.get("run", ""))
+        or "import tomli as tomllib" not in str(metadata.get("run", ""))
+    ):
+        errors.append("python-310-metadata")
+    lowered = rendered.casefold()
+    if any(token in lowered for token in ("pypi", "twine", "--draft", "secrets.")):
+        errors.append("forbidden-release-behavior")
+    publish = next((step for step in run_steps if "gh release create" in str(step.get("run"))), {})
+    if publish.get("env") != {"GH_TOKEN": "${{ github.token }}"}:
+        errors.append("release-token")
+    return errors
+
+
 class WorkflowTest(unittest.TestCase):
     def load_ci(self) -> dict[str, Any]:
         self.assertTrue(CI_WORKFLOW.is_file(), ".github/workflows/ci.yml is missing")
@@ -438,6 +522,10 @@ class WorkflowTest(unittest.TestCase):
             ".github/ISSUE_TEMPLATE/source-health.yml is missing",
         )
         return _load_yaml_subset(SOURCE_HEALTH_TEMPLATE.read_text(encoding="utf-8"))
+
+    def load_release(self) -> dict[str, Any]:
+        self.assertTrue(RELEASE_WORKFLOW.is_file(), ".github/workflows/release.yml is missing")
+        return _load_yaml_subset(RELEASE_WORKFLOW.read_text(encoding="utf-8"))
 
     def test_ci_is_parseable_and_has_no_contract_errors(self) -> None:
         self.assertEqual(_workflow_errors(self.load_ci()), [])
@@ -676,6 +764,32 @@ class WorkflowTest(unittest.TestCase):
         divergent_title = copy.deepcopy(template)
         divergent_title["title"] = "[source-health] Another thread"
         self.assertIn("template-title", _source_health_template_errors(divergent_title))
+
+    def test_release_workflow_is_strict_annotated_tag_to_non_draft_artifacts(self) -> None:
+        self.assertEqual(_release_workflow_errors(self.load_release()), [])
+
+    def test_release_workflow_mutation_canaries_fail_closed(self) -> None:
+        workflow = self.load_release()
+        mutations = (
+            ("tag-trigger", lambda item: item["on"]["push"].update(tags=["*"])),
+            ("permissions", lambda item: item["permissions"].update(contents="read")),
+            ("checkout-history", lambda item: item["jobs"]["release"]["steps"][0]["with"].update({"fetch-depth": 1})),
+            ("concurrency", lambda item: item["concurrency"].update({"cancel-in-progress": True})),
+        )
+        for expected, mutate in mutations:
+            with self.subTest(expected=expected):
+                changed = copy.deepcopy(workflow)
+                mutate(changed)
+                self.assertIn(expected, _release_workflow_errors(changed))
+
+        third_party = copy.deepcopy(workflow)
+        third_party["jobs"]["release"]["steps"][0]["uses"] = "vendor/checkout@v7"
+        self.assertIn("official-actions", _release_workflow_errors(third_party))
+
+        draft = copy.deepcopy(workflow)
+        publish = next(step for step in draft["jobs"]["release"]["steps"] if "gh release create" in str(step.get("run")))
+        publish["run"] += " --draft"
+        self.assertIn("forbidden-release-behavior", _release_workflow_errors(draft))
 
 
 if __name__ == "__main__":
