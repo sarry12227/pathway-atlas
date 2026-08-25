@@ -278,14 +278,17 @@ def _strict_json(raw: bytes) -> object:
         raise PolicyError("policy is not valid JSON") from error
 
 
-def _policy_path(value: object, field: str) -> str:
+def canonical_repository_path(value: object, field: str = "repository path") -> str:
+    """Return one canonical, normalized POSIX repository path."""
+
     if (
         not isinstance(value, str)
         or not value
+        or "\\" in value
         or any(ord(character) < 32 or ord(character) == 127 for character in value)
     ):
         raise PolicyError(f"{field} must be a non-empty repository-relative path")
-    normalized = value.replace("\\", "/")
+    normalized = value
     if unicodedata.normalize("NFKC", normalized) != normalized:
         raise PolicyError(f"{field} must use normalized Unicode spelling")
     pure = PurePosixPath(normalized)
@@ -306,20 +309,18 @@ def _string_list(value: object, field: str) -> tuple[str, ...]:
 
 
 def _policy_path_list(value: object, field: str) -> tuple[str, ...]:
-    paths = tuple(_policy_path(item, field) for item in _string_list(value, field))
+    paths = tuple(canonical_repository_path(item, field) for item in _string_list(value, field))
     identities = tuple(unicodedata.normalize("NFKC", item).casefold() for item in paths)
     if len(identities) != len(set(identities)):
         raise PolicyError(f"{field} contains colliding path identities")
     return paths
 
 
-def load_policy(path: Path | str) -> ReleasePolicy:
-    """Load one strict policy; unknown fields fail closed."""
+def parse_policy_bytes(raw: bytes) -> ReleasePolicy:
+    """Parse one strict policy snapshot; unknown fields fail closed."""
 
-    try:
-        raw = Path(path).read_bytes()
-    except OSError as error:
-        raise PolicyError("policy cannot be read") from error
+    if not isinstance(raw, bytes):
+        raise PolicyError("policy must be bytes")
     if len(raw) > 1024 * 1024:
         raise PolicyError("policy is too large")
     payload = _strict_json(raw)
@@ -364,7 +365,7 @@ def load_policy(path: Path | str) -> ReleasePolicy:
     for item in allowlist_payload:
         if not isinstance(item, dict) or set(item) != _ALLOWLIST_KEYS:
             raise PolicyError("allowlist entry keys do not match the supported schema")
-        entry_path = _policy_path(item["path"], "allowlist.path")
+        entry_path = canonical_repository_path(item["path"], "allowlist.path")
         kind = item["kind"]
         digest = item["line_sha256"]
         reason = item["reason"]
@@ -388,7 +389,7 @@ def load_policy(path: Path | str) -> ReleasePolicy:
     for item in file_allowlist_payload:
         if not isinstance(item, dict) or set(item) != _FILE_ALLOWLIST_KEYS:
             raise PolicyError("file_allowlist entry keys do not match the supported schema")
-        entry_path = _policy_path(item["path"], "file_allowlist.path")
+        entry_path = canonical_repository_path(item["path"], "file_allowlist.path")
         kinds = frozenset(_string_list(item["kinds"], "file_allowlist.kinds"))
         digest = item["file_sha256"]
         reason = item["reason"]
@@ -416,6 +417,16 @@ def load_policy(path: Path | str) -> ReleasePolicy:
         deterministic_test_modules=modules,
         docx_test_modules=docx_modules,
     )
+
+
+def load_policy(path: Path | str) -> ReleasePolicy:
+    """Load one strict policy file through the snapshot parser."""
+
+    try:
+        raw = Path(path).read_bytes()
+    except OSError as error:
+        raise PolicyError("policy cannot be read") from error
+    return parse_policy_bytes(raw)
 
 
 def _is_allowlisted(policy: ReleasePolicy | None, path: str | None, kind: str, line: str) -> bool:
@@ -578,7 +589,7 @@ def safe_tracked_file(root: Path, relative: str) -> tuple[Path | None, Finding |
     """Validate every component of one tracked path without following reparses."""
 
     try:
-        canonical = _policy_path(relative, "tracked path")
+        canonical = canonical_repository_path(relative, "tracked path")
     except PolicyError:
         return None, Finding("tracked_path", "noncanonical-tracked-path", 0, 0, None)
     candidate = root

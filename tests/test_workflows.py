@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import re
+import shlex
 import unittest
 from pathlib import Path
 from typing import Any
@@ -16,7 +17,7 @@ SOURCE_HEALTH_TEMPLATE = ROOT / ".github" / "ISSUE_TEMPLATE" / "source-health.ym
 RELEASE_WORKFLOW = ROOT / ".github" / "workflows" / "release.yml"
 EXPECTED_CONCURRENCY_GROUP = "deterministic-ci-${{ github.workflow }}-${{ github.ref }}"
 EXPECTED_SOURCE_HEALTH_CONCURRENCY_GROUP = "source-health-${{ github.repository }}"
-EXPECTED_RELEASE_CONCURRENCY_GROUP = "release-${{ github.ref }}"
+EXPECTED_RELEASE_CONCURRENCY_GROUP = "release-tags"
 
 
 class _StrictWorkflowLoader(yaml.SafeLoader):
@@ -452,6 +453,25 @@ def _release_workflow_errors(document: dict[str, Any]) -> list[str]:
         return errors + ["steps"]
     if any("continue-on-error" in step or "if" in step for step in steps):
         errors.append("critical-step-bypass")
+    expected_ids = [
+        "checkout",
+        "setup",
+        "install",
+        "metadata",
+        "tests",
+        "release_gate",
+        "build",
+        "checksum",
+        "notes",
+        "publish",
+    ]
+    if [step.get("id") for step in steps] != expected_ids:
+        errors.append("step-order")
+    by_id = {
+        step.get("id"): step
+        for step in steps
+        if isinstance(step.get("id"), str)
+    }
     actions = [step.get("uses") for step in steps if "uses" in step]
     if actions != ["actions/checkout@v7", "actions/setup-python@v7"]:
         errors.append("official-actions")
@@ -464,42 +484,112 @@ def _release_workflow_errors(document: dict[str, Any]) -> list[str]:
 
     run_steps = [step for step in steps if "run" in step]
     rendered = "\n".join(str(step.get("run", "")) for step in run_steps)
-    required = (
-        'git cat-file -t "$GITHUB_REF_NAME"',
-        'git rev-list -n 1 "$GITHUB_REF_NAME"',
-        '"v$version"',
-        'python -m pip install -e ".[all,test]"',
-        "python -m unittest discover -s tests -v",
-        "scripts/release_check.py --ci",
-        '--tag "${{ github.ref_name }}"',
-        "scripts/build_release.py",
-        "sha256sum --check SHA256SUMS",
-        'heading = f"## v{version} — "',
-        "gh release create",
-        "--notes-file dist/release-notes.md",
-        "dist/SHA256SUMS",
-    )
-    if any(token not in rendered for token in required):
-        errors.append("release-contract")
-    metadata = next((step for step in steps if step.get("id") == "metadata"), {})
-    install_index = next(
-        (index for index, step in enumerate(steps) if step.get("run") == 'python -m pip install -e ".[all,test]"'),
-        -1,
-    )
-    metadata_index = steps.index(metadata) if metadata else -1
-    if (
-        install_index < 0
-        or metadata_index < 0
-        or install_index >= metadata_index
-        or "except ModuleNotFoundError:" not in str(metadata.get("run", ""))
-        or "import tomli as tomllib" not in str(metadata.get("run", ""))
-    ):
-        errors.append("python-310-metadata")
+    if any("${{" in str(step.get("run", "")) for step in run_steps):
+        errors.append("expression-in-command")
+    def contains_expression(value: object) -> bool:
+        if isinstance(value, str):
+            return "${{" in value
+        if isinstance(value, dict):
+            return any(contains_expression(item) for item in value.values())
+        if isinstance(value, list):
+            return any(contains_expression(item) for item in value)
+        return False
+
+    expression_outside_env = any(
+        contains_expression(value)
+        for step in steps
+        for key, value in step.items()
+        if key != "env"
+    ) or contains_expression(
+        {key: value for key, value in document.items() if key != "jobs"}
+    ) or contains_expression({key: value for key, value in job.items() if key != "steps"})
+    if expression_outside_env:
+        errors.append("expression-outside-step-env")
+
+    expected_argv = {
+        "install": ["python", "-m", "pip", "install", "-e", ".[all,test]"],
+        "metadata": ["python", "scripts/build_release.py", "--verify-ref"],
+        "tests": ["python", "-m", "unittest", "discover", "-s", "tests", "-v"],
+        "release_gate": [
+            "python", "scripts/release_check.py", "--ci", "--expected-version",
+            "$RELEASE_VERSION", "--tag", "$RELEASE_TAG",
+        ],
+        "build": [
+            "python", "scripts/build_release.py", "--version", "$RELEASE_VERSION",
+            "--output", "$OUTPUT_DIRECTORY",
+        ],
+        "checksum": ["sha256sum", "--check", "$CHECKSUM_FILE"],
+        "publish": [
+            "gh", "release", "create", "$RELEASE_TAG", "$ARCHIVE_PATH", "$CHECKSUM_PATH",
+            "--verify-tag", "--title", "$RELEASE_TAG", "--notes-file", "$NOTES_PATH",
+        ],
+    }
+    for step_id, argv in expected_argv.items():
+        command = by_id.get(step_id, {}).get("run")
+        try:
+            actual = shlex.split(command, posix=True) if isinstance(command, str) and "\n" not in command else []
+        except ValueError:
+            actual = []
+        if actual != argv:
+            errors.append(f"command-{step_id}")
+
+    expected_env = {
+        "metadata": {
+            "RELEASE_TAG": "${{ github.ref_name }}",
+            "EXPECTED_COMMIT": "${{ github.sha }}",
+        },
+        "release_gate": {
+            "RELEASE_VERSION": "${{ steps.metadata.outputs.version }}",
+            "RELEASE_TAG": "${{ github.ref_name }}",
+        },
+        "build": {
+            "RELEASE_VERSION": "${{ steps.metadata.outputs.version }}",
+            "OUTPUT_DIRECTORY": "dist",
+        },
+        "checksum": {"CHECKSUM_FILE": "SHA256SUMS"},
+        "notes": {
+            "RELEASE_VERSION": "${{ steps.metadata.outputs.version }}",
+            "NOTES_PATH": "dist/release-notes.md",
+        },
+        "publish": {
+            "GH_TOKEN": "${{ github.token }}",
+            "RELEASE_TAG": "${{ github.ref_name }}",
+            "ARCHIVE_PATH": "dist/shengxue-skill-${{ steps.metadata.outputs.version }}.zip",
+            "CHECKSUM_PATH": "dist/SHA256SUMS",
+            "NOTES_PATH": "dist/release-notes.md",
+        },
+    }
+    for step_id, environment in expected_env.items():
+        if by_id.get(step_id, {}).get("env") != environment:
+            errors.append(f"environment-{step_id}")
+
+    notes_command = by_id.get("notes", {}).get("run")
+    if not isinstance(notes_command, str):
+        errors.append("release-notes")
+    else:
+        lines = notes_command.splitlines()
+        if len(lines) < 3 or lines[0] != "python - <<'PY'" or lines[-1] != "PY":
+            errors.append("release-notes")
+        else:
+            script = "\n".join(lines[1:-1])
+            required_notes = (
+                'os.environ["RELEASE_VERSION"]',
+                'Path(os.environ["NOTES_PATH"])',
+                'heading = f"## v{version} — "',
+                "if len(matches) != 1:",
+                "if not notes:",
+            )
+            try:
+                compile(script, "release-notes", "exec")
+            except SyntaxError:
+                errors.append("release-notes")
+            if any(token not in script for token in required_notes):
+                errors.append("release-notes")
     lowered = rendered.casefold()
     if any(token in lowered for token in ("pypi", "twine", "--draft", "secrets.")):
         errors.append("forbidden-release-behavior")
-    publish = next((step for step in run_steps if "gh release create" in str(step.get("run"))), {})
-    if publish.get("env") != {"GH_TOKEN": "${{ github.token }}"}:
+    token_steps = [step.get("id") for step in steps if "GH_TOKEN" in step.get("env", {})]
+    if token_steps != ["publish"]:
         errors.append("release-token")
     return errors
 
@@ -790,6 +880,41 @@ class WorkflowTest(unittest.TestCase):
         publish = next(step for step in draft["jobs"]["release"]["steps"] if "gh release create" in str(step.get("run")))
         publish["run"] += " --draft"
         self.assertIn("forbidden-release-behavior", _release_workflow_errors(draft))
+
+    def test_release_workflow_behavior_canaries_enforce_order_argv_and_token_seam(self) -> None:
+        workflow = self.load_release()
+
+        early_publish = copy.deepcopy(workflow)
+        steps = early_publish["jobs"]["release"]["steps"]
+        publish = steps.pop()
+        steps.insert(4, publish)
+        self.assertIn("step-order", _release_workflow_errors(early_publish))
+
+        echoed_tests = copy.deepcopy(workflow)
+        tests_step = next(
+            step for step in echoed_tests["jobs"]["release"]["steps"]
+            if step.get("id") == "tests"
+        )
+        tests_step["run"] = "echo python -m unittest discover -s tests -v"
+        self.assertIn("command-tests", _release_workflow_errors(echoed_tests))
+
+        interpolated = copy.deepcopy(workflow)
+        gate = next(
+            step for step in interpolated["jobs"]["release"]["steps"]
+            if step.get("id") == "release_gate"
+        )
+        gate["run"] = 'python scripts/release_check.py --ci --expected-version "${{ steps.metadata.outputs.version }}"'
+        self.assertIn("expression-in-command", _release_workflow_errors(interpolated))
+
+        early_credentials = copy.deepcopy(workflow)
+        metadata = next(
+            step for step in early_credentials["jobs"]["release"]["steps"]
+            if step.get("id") == "metadata"
+        )
+        token_key = "GH" + "_TOKEN"
+        token_value = "${{" + " github.token }}"
+        metadata.setdefault("env", {})[token_key] = token_value
+        self.assertIn("release-token", _release_workflow_errors(early_credentials))
 
 
 if __name__ == "__main__":

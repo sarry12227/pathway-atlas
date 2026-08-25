@@ -11,9 +11,11 @@ from unittest import mock
 
 from scripts.compliance_scan import (
     PolicyError,
+    canonical_repository_path,
     contains_price_text,
     find_price_text,
     load_policy,
+    parse_policy_bytes,
     main,
     scan_text,
     scan_tracked,
@@ -50,6 +52,29 @@ def _write_policy(
 
 
 class ComplianceScanTest(unittest.TestCase):
+    def test_shared_repository_path_policy_requires_canonical_posix_spelling(self) -> None:
+        self.assertEqual(canonical_repository_path("tests/fixtures/example.json"), "tests/fixtures/example.json")
+        for unsafe in (r"tests\fixtures\example.json", "../private.txt", "/absolute.txt", "Ａ.txt"):
+            with self.subTest(unsafe=unsafe):
+                with self.assertRaises(PolicyError):
+                    canonical_repository_path(unsafe)
+
+    def test_strict_policy_parser_accepts_snapshot_bytes_and_rejects_duplicates(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            policy_path = Path(temporary) / "policy.json"
+            _write_policy(policy_path)
+            raw = policy_path.read_bytes()
+            file_policy = load_policy(policy_path)
+
+        self.assertEqual(parse_policy_bytes(raw), file_policy)
+        duplicate = raw.replace(
+            b'{"schema_version":',
+            b'{"schema_version":"1.0","schema_version":',
+            1,
+        )
+        with self.assertRaises(PolicyError):
+            parse_policy_bytes(duplicate)
+
     def test_detects_every_required_category_without_retaining_values(self) -> None:
         secret = "ghp_abcdefghijklmnopqrstuvwxyz123456"
         phone = "13800138000"

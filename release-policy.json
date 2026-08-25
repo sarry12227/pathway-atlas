@@ -61,7 +61,7 @@
     {
       "path": "scripts/compliance_scan.py",
       "kinds": ["absolute_local_path", "pricing_or_sales"],
-      "file_sha256": "c3be49ae740eddd07923d369c4311576802cb6ba10879a84f0118b6cf3a4fbc9",
+      "file_sha256": "f2f2f84b92fc5bb45fdec0f0e873c7f3ddd80aead20e0a10cea3b9185cdca39c",
       "reason": "scanner rule literal"
     },
     {
@@ -73,7 +73,7 @@
     {
       "path": "tests/test_build_release.py",
       "kinds": ["secret"],
-      "file_sha256": "b862428f412ecc629528716ba9da43e2db2bebd7d5e6f05535e7cb4558bea835",
+      "file_sha256": "9287f77e674d45c49039f942a863930afd9415998a0b9711c436204da94c20ed",
       "reason": "synthetic negative fixture"
     },
     {
@@ -91,7 +91,7 @@
     {
       "path": "tests/test_compliance_scan.py",
       "kinds": ["absolute_local_path", "identity_number", "phone", "pricing_or_sales", "private_system_reference", "secret", "student_pii"],
-      "file_sha256": "ad425ce2a9319475664f839a2c383463c5d030ff6aa25fdbca5dbab631b10570",
+      "file_sha256": "f017c894f3bcf394910178db7c589bf8571a45a8c881d605b2eb5425d98f09ec",
       "reason": "synthetic negative fixture"
     },
     {
