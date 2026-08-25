@@ -77,6 +77,17 @@ _REQUIRED_COMMUNITY = (
 )
 
 
+def _is_sensitive_untracked_name(relative: str) -> bool:
+    folded = relative.casefold()
+    path = PurePosixPath(folded)
+    return (
+        path.name in _SENSITIVE_BASENAMES
+        or path.name.startswith(".env.")
+        or path.suffix in _SENSITIVE_SUFFIXES
+        or any(folded.startswith(prefix) for prefix in _SENSITIVE_PREFIXES)
+    )
+
+
 def _safe_relative(value: str) -> str:
     normalized = value.replace("\\", "/")
     sensitive_kinds = {
@@ -298,32 +309,19 @@ def check_untracked_sensitive_paths(
     for raw in combined:
         normalized_raw = raw.replace("\\", "/")
         ignored = _path_identity(normalized_raw) in ignored_identities
-        raw_parts = PurePosixPath(normalized_raw).parts
-        raw_basename = PurePosixPath(normalized_raw).name.casefold()
-        high_risk_ignored_name = (
-            raw_basename in _SENSITIVE_BASENAMES
-            or raw_basename.startswith(".env.")
-        )
-        benign_ignored = any(
-            part.casefold() in _BENIGN_IGNORED_COMPONENTS or part.casefold().endswith(".egg-info")
-            for part in raw_parts
-        ) or (policy is not None and _is_under(normalized_raw, policy.ci_generated_paths))
-        if ignored and benign_ignored and not high_risk_ignored_name:
-            continue
         canonical = _canonical_repo_path(raw)
         if canonical is None:
             details.append("untracked-noncanonical-path")
             continue
-        folded = canonical.casefold()
-        basename = PurePosixPath(folded).name
-        suffix = PurePosixPath(folded).suffix
-        sensitive = (
-            basename in _SENSITIVE_BASENAMES
-            or basename.startswith(".env.")
-            or suffix in _SENSITIVE_SUFFIXES
-            or any(folded.startswith(prefix) for prefix in _SENSITIVE_PREFIXES)
-        )
-        if sensitive:
+        sensitive_name = _is_sensitive_untracked_name(canonical)
+        raw_parts = PurePosixPath(canonical).parts
+        benign_ignored = any(
+            part.casefold() in _BENIGN_IGNORED_COMPONENTS or part.casefold().endswith(".egg-info")
+            for part in raw_parts
+        ) or (policy is not None and _is_under(canonical, policy.ci_generated_paths))
+        if ignored and benign_ignored and not sensitive_name:
+            continue
+        if sensitive_name:
             details.append(
                 "kind=untracked_path;rule=sensitive-name;line=0;"
                 f"path={_safe_relative(canonical)}"

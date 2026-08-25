@@ -187,6 +187,37 @@ class ReleaseComponentTest(unittest.TestCase):
         self.assertNotIn(secret, serialized)
         self.assertNotIn("cache.pyc", serialized)
 
+    def test_ignored_benign_roots_never_hide_sensitive_suffixes(self) -> None:
+        sensitive_paths = (
+            ".venv/private.pem",
+            ".venv/client.key",
+            "node_modules/client.p12",
+            "dist/student.docx",
+            "dist/release.pem",
+        )
+        safe_paths = (
+            ".venv/cache.pyc",
+            "node_modules/package/index.js",
+            "dist/release.zip",
+            "dist/release.zip.sha256",
+        )
+        result = check_untracked_sensitive_paths(
+            (),
+            policy=load_policy(ROOT / "release-policy.json"),
+            ignored_paths=sensitive_paths + safe_paths,
+        )
+
+        serialized = json.dumps(result.to_dict())
+        self.assertFalse(result.ok)
+        self.assertEqual(result.count, len(sensitive_paths))
+        self.assertTrue(
+            all("kind=untracked_path;rule=sensitive-name;line=0;" in detail for detail in result.details)
+        )
+        for path in sensitive_paths:
+            self.assertIn(path, serialized)
+        for path in safe_paths:
+            self.assertNotIn(path, serialized)
+
     def test_ci_cleanliness_exempts_only_declared_generated_paths(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
