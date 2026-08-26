@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""shengxue-skill 分数直达查冲稳保切片测试（标准库 unittest，零依赖）。
+"""PathwayAtlas 分数直达查冲稳保切片测试（标准库 unittest，零依赖）。
 
 测试数据为小型构造 CSV（临时目录），不含真实全量数据；
 全量湖北数据的对等验证走 scripts/parity_check.py。

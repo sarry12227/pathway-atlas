@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://example.invalid/shengxue-skill/schemas/province.schema.json",
+  "$id": "https://example.invalid/pathway-atlas/schemas/province.schema.json",
   "title": "Province dataset metadata",
   "$comment": "This Schema validates structure; every ordinary_batch_policy must also pass the declared runtime threshold-order validator.",
   "x-semantic-validator": {

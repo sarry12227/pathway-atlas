@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://example.invalid/shengxue-skill/schemas/query-plan.schema.json",
+  "$id": "https://example.invalid/pathway-atlas/schemas/query-plan.schema.json",
   "title": "Deterministic research query plan",
   "$comment": "Structure is validated here; trusted-catalog identity, per-task ID, discovery context, target, availability, candidate, tier, and extraction semantics also require the declared runtime validator.",
   "x-semantic-validator": {

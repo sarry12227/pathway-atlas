@@ -1,5 +1,6 @@
 import pathlib
 import os
+import json
 import subprocess
 import tempfile
 import unittest
@@ -88,7 +89,7 @@ class ProjectMetadataTest(unittest.TestCase):
     def test_python_floor_and_optional_dependencies(self):
         data = tomllib.loads((ROOT / "pyproject.toml").read_text("utf-8"))
 
-        self.assertEqual(data["project"]["name"], "shengxue-skill")
+        self.assertEqual(data["project"]["name"], "pathway-atlas")
         self.assertEqual(data["project"]["version"], "0.1.0")
         self.assertEqual(data["project"]["requires-python"], ">=3.10")
         self.assertEqual(data["project"].get("dependencies", []), [])
@@ -115,6 +116,26 @@ class ProjectMetadataTest(unittest.TestCase):
             data["tool"]["setuptools"]["packages"]["find"]["include"],
             ["scripts*"],
         )
+
+    def test_public_runtime_brand_identifiers_are_current(self):
+        downloader = (ROOT / "scripts" / "downloader.py").read_text("utf-8")
+        docx_export = (ROOT / "scripts" / "docx_export.py").read_text("utf-8")
+        self.assertIn('"pathway-atlas-downloader/0.1"', downloader)
+        self.assertIn("pip install 'pathway-atlas[documents]'", docx_export)
+
+        schema_paths = sorted((ROOT / "schemas").glob("*.schema.json"))
+        self.assertGreaterEqual(len(schema_paths), 6)
+        identifiers = []
+        for path in schema_paths:
+            schema = json.loads(path.read_text(encoding="utf-8"))
+            identifier = schema.get("$id")
+            if identifier is not None:
+                identifiers.append((path.name, identifier))
+        self.assertGreaterEqual(len(identifiers), 6)
+        for name, identifier in identifiers:
+            with self.subTest(schema=name):
+                self.assertIn("pathway-atlas", identifier)
+                self.assertNotIn("shengxue-skill", identifier)
 
     def test_sensitive_runtime_paths_are_ignored_by_git(self):
         candidates = (

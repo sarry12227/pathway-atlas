@@ -3,7 +3,7 @@ requires = ["setuptools>=69"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "shengxue-skill"
+name = "pathway-atlas"
 version = "0.1.0"
 description = "Evidence-backed, deterministic higher-education planning skill"
 readme = "README.md"

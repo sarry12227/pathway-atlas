@@ -501,7 +501,7 @@ def _open_pinned_request(
                 headers={
                     "Accept": "*/*",
                     "Host": _host_header(hostname, port, parsed.scheme.lower()),
-                    "User-Agent": "shengxue-skill-downloader/0.1",
+                    "User-Agent": "pathway-atlas-downloader/0.1",
                 },
             )
             peer_ip = peer_socket.getpeername()[0]

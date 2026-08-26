@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://shengxue-skill.example/schemas/pathway-policy.schema.json",
+  "$id": "https://pathway-atlas.example/schemas/pathway-policy.schema.json",
   "title": "Evidence-backed pathway policy",
   "$comment": "This Schema validates one policy record's JSON structure. Every record and evaluation must also pass the declared runtime semantic validators.",
   "x-semantic-validator": {

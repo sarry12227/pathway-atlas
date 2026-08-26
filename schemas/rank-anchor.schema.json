@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://shengxue-skill.example/schemas/rank-anchor.schema.json",
+  "$id": "https://pathway-atlas.example/schemas/rank-anchor.schema.json",
   "title": "Joy-report rank anchor",
   "$comment": "This Schema validates the JSON structure. Every payload must also pass RankAnchor semantic validation; estimation additionally validates student-rank coverage.",
   "x-semantic-validator": {

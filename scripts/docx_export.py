@@ -91,7 +91,7 @@ def _require_document_dependency() -> None:
     if Document is None:
         raise DocumentDependencyError(
             "缺少 DOCX 能力（python-docx）；请安装项目 documents extra："
-            "pip install 'shengxue-skill[documents]'"
+            "pip install 'pathway-atlas[documents]'"
         )
 
 
