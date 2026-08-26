@@ -136,7 +136,13 @@ class TrackedBoundaryTest(unittest.TestCase):
             result = check_path_identities(root, ["linked.txt"])
 
         self.assertFalse(result.ok)
-        self.assertIn("tracked-link-or-reparse:linked.txt", result.details)
+        self.assertEqual(
+            result.details,
+            (
+                "kind=tracked_path;rule=tracked-link-or-reparse;"
+                "line=0;path=linked.txt",
+            ),
+        )
         self.assertNotIn(str(target), json.dumps(result.to_dict()))
 
     def test_release_inventory_rejects_non_regular_index_mode(self) -> None:
