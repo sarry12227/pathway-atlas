@@ -19,7 +19,8 @@ PYPROJECT = ROOT / "pyproject.toml"
 SCRIPTS = ROOT / "scripts"
 FIXTURES = ROOT / "tests" / "fixtures"
 INTRODUCTION = (
-    "面向全国新高考省份的开源 AI 升学规划 Skill：实时检索并交叉验证公开数据，"
+    "多元星图（PathwayAtlas）是面向全国新高考省份的开源 AI 升学规划 Skill："
+    "实时检索并交叉验证公开数据，"
     "通过本地确定性管线生成可追溯的普通批冲稳保与多元升学方案。"
 )
 PUBLIC_SCRIPT_CLIS = {
@@ -89,10 +90,9 @@ class ReadmeContractTest(unittest.TestCase):
     def setUpClass(cls):
         cls.text = README.read_text(encoding="utf-8")
 
-    def test_first_paragraph_is_the_approved_public_description(self):
+    def test_readme_contains_the_approved_public_description(self):
         paragraphs = [part.strip() for part in self.text.split("\n\n") if part.strip()]
-        self.assertGreaterEqual(len(paragraphs), 2)
-        self.assertEqual(paragraphs[1], INTRODUCTION)
+        self.assertIn(INTRODUCTION, paragraphs)
 
     def test_readme_explains_realtime_and_deterministic_halves(self):
         for phrase in (

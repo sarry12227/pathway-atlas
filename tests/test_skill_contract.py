@@ -96,7 +96,7 @@ class SkillContractTest(unittest.TestCase):
 
     def test_frontmatter_is_trigger_only(self):
         self.assertEqual(set(self.frontmatter), {"name", "description"})
-        self.assertEqual(self.frontmatter["name"], "shengxue-skill")
+        self.assertEqual(self.frontmatter["name"], "pathway-atlas")
         description = self.frontmatter["description"]
         self.assertRegex(description, r"^Use when \S")
         self.assertLessEqual(len(description), 500)
@@ -272,7 +272,7 @@ class SkillContractTest(unittest.TestCase):
 
     def assert_contract(self, text):
         frontmatter, body = parse_frontmatter(text)
-        self.assertEqual(frontmatter.get("name"), "shengxue-skill")
+        self.assertEqual(frontmatter.get("name"), "pathway-atlas")
         description = frontmatter.get("description", "")
         self.assertRegex(description, r"^Use when \S")
         self.assertIsNone(

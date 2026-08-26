@@ -98,10 +98,10 @@ PR_TEMPLATE = ROOT / ".github" / "pull_request_template.md"
 DEPENDABOT_CONFIG = ROOT / ".github" / "dependabot.yml"
 ISSUE_CHOOSER_CONFIG = ISSUE_TEMPLATE_DIR / "config.yml"
 SECURITY_CONTACT_URL = (
-    "https://github.com/sarry12227/shengxue-skill/security/advisories/new"
+    "https://github.com/sarry12227/pathway-atlas/security/advisories/new"
 )
 DATA_RIGHTS_CONTACT_URL = (
-    "https://github.com/sarry12227/shengxue-skill/blob/main/DATA_SOURCES.md"
+    "https://github.com/sarry12227/pathway-atlas/blob/main/DATA_SOURCES.md"
 )
 
 

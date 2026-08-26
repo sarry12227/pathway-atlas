@@ -1,6 +1,12 @@
-# shengxue-skill
+> **复制给 AI：**「请调用 `pathway-atlas`（多元星图）Skill。先询问我的省份、选科、分数或位次和升学意向；不要索取姓名、电话、身份证、住址或本地文件路径。请基于可验证的公开来源，先验证证据再计算，为我分析普通批冲稳保及适合的多元升学路径，并在每项建议旁标注来源、证据状态、覆盖范围和不确定性。」
 
-面向全国新高考省份的开源 AI 升学规划 Skill：实时检索并交叉验证公开数据，通过本地确定性管线生成可追溯的普通批冲稳保与多元升学方案。
+<p align="center"><img src="assets/brand/pathway-atlas-horizontal.svg" alt="多元星图 PathwayAtlas" width="100%"></p>
+
+# 多元星图 · PathwayAtlas
+
+**不只一条升学路，每条路都有据可循。**
+
+多元星图（PathwayAtlas）是面向全国新高考省份的开源 AI 升学规划 Skill：实时检索并交叉验证公开数据，通过本地确定性管线生成可追溯的普通批冲稳保与多元升学方案。
 
 当前版本是 **v0.1.0 公开预览**。它提供可审计的工作流和合成回放，不是生产就绪服务，也不随仓库分发全国实时录取数据库。
 
@@ -8,7 +14,7 @@
 
 升学信息散落在省级考试机构、高校招生网站、网页附件、图片表格和公开转载中。只让 Agent 搜索，数字容易缺少出处、混入重复转载或在不同会话中得到不同计算；只运行本地脚本，又无法获得当年的公开信息。
 
-shengxue-skill 把两者分开：
+多元星图把两者分开：
 
 - **Agent 实时检索**：Agent 宿主负责搜索、打开网页、读取公开附件和必要的视觉识别，逐项记录候选来源并交叉验证。
 - **本地确定性管线**：证据先归一化和校验，再由 Python 执行位次、选科过滤、普通批和多元路径计算，最后生成报告。计算阶段不访问网络，也不会让 Agent 凭记忆补数字。
@@ -68,16 +74,16 @@ python -m pip install -e ".[all,test]"
 
 ### 作为 Agent Skill 安装
 
-把整个仓库目录放入宿主扫描的 Skill 根目录，使最终结构为 `<skills-root>/shengxue-skill/SKILL.md`。也可以在宿主明确支持时使用指向本仓库的目录符号链接。
+把整个仓库目录放入宿主扫描的 Skill 根目录，使最终结构为 `<skills-root>/pathway-atlas/SKILL.md`。也可以在宿主明确支持时使用指向本仓库的目录符号链接。
 
 | 宿主 | 推荐位置或注册方式 | 本仓库适配 | 权威说明 |
 | --- | --- | --- | --- |
 | **Generic Agent** | 使用兼容开放 Agent Skills 规范的 Skill 根目录 | [Generic Agent 映射](references/hosts/generic.md) | [Agent Skills 规范](https://agentskills.io/specification) |
-| **Codex** | 用户级 `$HOME/.agents/skills/shengxue-skill`，或仓库级 `.agents/skills/shengxue-skill` | [Codex 映射](references/hosts/codex.md) | [OpenAI：Build skills](https://developers.openai.com/codex/skills) |
-| **Claude Code** | 用户级 `~/.claude/skills/shengxue-skill`，或项目级 `.claude/skills/shengxue-skill` | [Claude Code 映射](references/hosts/claude-code.md) | [Anthropic：Extend Claude with skills](https://code.claude.com/docs/en/skills) |
-| **Kimi Code** | `$KIMI_CODE_HOME/skills/shengxue-skill`；未设置时为 `~/.kimi-code/skills/shengxue-skill`，也支持共享的 `~/.agents/skills` | [Kimi 映射](references/hosts/kimi.md) | [Kimi Code：Agent Skills](https://www.kimi.com/code/docs/en/kimi-code-cli/customization/skills.html) |
+| **Codex** | 用户级 `$HOME/.agents/skills/pathway-atlas`，或仓库级 `.agents/skills/pathway-atlas` | [Codex 映射](references/hosts/codex.md) | [OpenAI：Build skills](https://developers.openai.com/codex/skills) |
+| **Claude Code** | 用户级 `~/.claude/skills/pathway-atlas`，或项目级 `.claude/skills/pathway-atlas` | [Claude Code 映射](references/hosts/claude-code.md) | [Anthropic：Extend Claude with skills](https://code.claude.com/docs/en/skills) |
+| **Kimi Code** | `$KIMI_CODE_HOME/skills/pathway-atlas`；未设置时为 `~/.kimi-code/skills/pathway-atlas`，也支持共享的 `~/.agents/skills` | [Kimi 映射](references/hosts/kimi.md) | [Kimi Code：Agent Skills](https://www.kimi.com/code/docs/en/kimi-code-cli/customization/skills.html) |
 
-重开会话后，可直接说“帮我做升学规划”；也可以按宿主文档显式选择 `shengxue-skill`。宿主是否具备搜索、浏览和视觉能力仍需在每次会话中重新预检。
+重开会话后，可直接复制本页第一行提示词；也可以按宿主文档显式选择 `pathway-atlas`。宿主是否具备搜索、浏览和视觉能力仍需在每次会话中重新预检。
 
 ## 合成演示
 

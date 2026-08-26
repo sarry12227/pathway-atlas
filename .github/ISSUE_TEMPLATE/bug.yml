@@ -46,7 +46,7 @@ body:
     id: environment
     attributes:
       label: "运行环境"
-      description: "请填写 shengxue-skill 版本、操作系统和 Python 版本，不要填写本地绝对路径。"
+      description: "请填写 PathwayAtlas 版本、操作系统和 Python 版本，不要填写本地绝对路径。"
       placeholder: "例如：v0.1.0、Windows、Python 3.10"
     validations:
       required: true
