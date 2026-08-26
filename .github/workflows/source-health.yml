@@ -180,7 +180,7 @@ jobs:
               output.write("review=true\n" if transition.review else "review=false\n")
           PY
       - name: Retain health telemetry for manual review
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: source-health-${{ github.run_id }}
           path: source-health/results.json
