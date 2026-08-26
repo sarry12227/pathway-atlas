@@ -911,7 +911,7 @@ class QueryPlanSchemaTest(unittest.TestCase):
 class QueryPlanCliTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        cls.temporary = tempfile.TemporaryDirectory()
+        cls.temporary = tempfile.TemporaryDirectory(dir=ROOT)
         directory = Path(cls.temporary.name).resolve()
         profile_payload = json.loads(
             (ROOT / "tests" / "fixtures" / "profiles" / "demo.json").read_text("utf-8")

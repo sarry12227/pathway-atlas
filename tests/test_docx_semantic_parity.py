@@ -497,7 +497,7 @@ class DocxStructureTest(unittest.TestCase):
             return ObservingTargetZip(archive) if mode == "w" else archive
 
         with tempfile.TemporaryDirectory() as temporary:
-            output = Path(temporary) / "atomic.docx"
+            output = Path(temporary).resolve() / "atomic.docx"
             with mock.patch.object(docx_export, "ZipFile", side_effect=zip_factory):
                 result = docx_export.export_docx(model(), output)
 

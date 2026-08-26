@@ -115,13 +115,13 @@
     {
       "path": "tests/test_docx_semantic_parity.py",
       "kinds": ["absolute_local_path", "phone", "pricing_or_sales"],
-      "file_sha256": "e1bf6162a86da58ece3b91cd3fc60cc8ffdc79acc030ba3016a61b4c953f42ab",
+      "file_sha256": "a45bb23b1a2866757b3344105a6e78b2228ad743462abd3346153e13408c6aa4",
       "reason": "synthetic negative fixture"
     },
     {
       "path": "tests/test_downloader.py",
       "kinds": ["absolute_local_path"],
-      "file_sha256": "bed36cfb32ea6e3ed17c6153dd58231f4dba5cc896b8e256aca15379a923bcd8",
+      "file_sha256": "f445c6b7dbccd79272fc6cfca38e7748a7a5780df3a5b1aed15b039ec8370bbf",
       "reason": "synthetic negative fixture"
     },
     {
@@ -157,7 +157,7 @@
     {
       "path": "tests/test_query_plan.py",
       "kinds": ["absolute_local_path", "phone", "secret", "student_pii"],
-      "file_sha256": "91a445e4ed41f124a9c39dd53147f37c823209b6e0ed440bb91d53a8b039a249",
+      "file_sha256": "2bd0d6348016583e5d3870ef579d1c67d0b64c9b22393136bb80cc3917359cef",
       "reason": "synthetic negative fixture"
     },
     {
