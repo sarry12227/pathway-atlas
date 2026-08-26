@@ -384,7 +384,7 @@ class ReleaseComponentTest(unittest.TestCase):
         )
         real_open = io.open
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve()
             cache = root / ".venv" / "cache.txt"
             cache.parent.mkdir()
             base_policy = load_policy(ROOT / "release-policy.json")
@@ -432,7 +432,7 @@ class ReleaseComponentTest(unittest.TestCase):
     def test_ignored_read_race_fails_closed_without_leaking_the_root(self) -> None:
         real_open = io.open
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve()
             cache = root / ".venv" / "cache.txt"
             cache.parent.mkdir()
             cache.write_bytes(b"safe")
@@ -479,7 +479,7 @@ class ReleaseComponentTest(unittest.TestCase):
         private = "ghp_replacement_private_payload_1234567890"
         real_open = io.open
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve()
             cache = root / ".venv" / "cache.txt"
             cache.parent.mkdir()
             cache.write_bytes(b"safe")
@@ -521,7 +521,7 @@ class ReleaseComponentTest(unittest.TestCase):
         private = "ghp_symlink_private_payload_1234567890"
         real_open = io.open
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve()
             target = root / "outside-private.txt"
             target.write_text(f"token={private}", encoding="utf-8")
             probe = root / "symlink-probe"
@@ -589,7 +589,7 @@ class ReleaseComponentTest(unittest.TestCase):
     def test_multiple_oversize_files_cannot_read_past_aggregate_plus_one(self) -> None:
         real_open = io.open
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve()
             cache = root / ".venv"
             cache.mkdir()
             candidates = tuple(cache / f"oversize-{index}.txt" for index in range(3))
@@ -640,7 +640,7 @@ class ReleaseComponentTest(unittest.TestCase):
     def test_multiple_post_read_mutations_cannot_read_past_aggregate_plus_one(self) -> None:
         real_open = io.open
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve()
             cache = root / ".venv"
             cache.mkdir()
             candidates = tuple(cache / f"race-{index}.txt" for index in range(3))
