@@ -1,0 +1,2 @@
+{"fact_id":"score-001","field":"min_score","method":"three-source-consensus","notes":"","source_ids":["s1","s2"],"status":"reference","unit":"分","value":588}
+{"fact_id":"score-002","field":"min_score","method":"three-source-consensus","notes":"","source_ids":["s3"],"status":"reference","unit":"分","value":589}

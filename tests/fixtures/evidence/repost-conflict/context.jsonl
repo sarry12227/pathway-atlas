@@ -1,0 +1,3 @@
+{"extraction_method":"manual-structured","fact_id":"score-001","kind":"fact-provenance","locator":"fixture[repost-conflict]/fact[score-001]","source_ids":["s1","s2"],"year":2026}
+{"extraction_method":"manual-structured","fact_id":"score-002","kind":"fact-provenance","locator":"fixture[repost-conflict]/fact[score-002]","source_ids":["s3"],"year":2026}
+{"province":"示例省","query":"synthetic-repost"}

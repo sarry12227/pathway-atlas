@@ -1,0 +1,296 @@
+{
+  "schema_version": "1.2",
+  "binary_extensions": [
+    ".7z",
+    ".doc",
+    ".docx",
+    ".gif",
+    ".gz",
+    ".ico",
+    ".jpeg",
+    ".jpg",
+    ".pdf",
+    ".png",
+    ".pyc",
+    ".sqlite",
+    ".sqlite3",
+    ".tar",
+    ".webp",
+    ".xls",
+    ".xlsx",
+    ".zip"
+  ],
+  "binary_release_manifest": [
+    {
+      "path": "tests/fixtures/replay/pdf/text-and-image.pdf",
+      "sha256": "870bd0bd74266cbb5c1900e404bda42f6f61581076496f296dd82decd78f000d",
+      "classification": "synthetic"
+    },
+    {
+      "path": "tests/fixtures/replay/structured/admission.xlsx",
+      "sha256": "0c02890fd3159d15f6846b15c5ef239d16b74acd9f4e3c68c5b0205d78cd67d7",
+      "classification": "synthetic"
+    }
+  ],
+  "max_text_bytes": 4194304,
+  "forbidden_tracked_directories": [
+    ".cache",
+    ".superpowers",
+    ".venv",
+    "data",
+    "evidence/raw-downloads",
+    "output",
+    "private",
+    "reports",
+    "work"
+  ],
+  "allowlist": [],
+  "file_allowlist": [
+    {
+      "path": ".scratch/shengxue-skill-open-source/spec.md",
+      "kinds": ["private_system_reference"],
+      "file_sha256": "8952a7bde9b0d45ecdbf58465a92790937f9b01bd1f646e5f6046b2420f88027",
+      "reason": "historical specification reference"
+    },
+    {
+      "path": "docs/superpowers/plans/2026-08-22-01-evidence-foundation.md",
+      "kinds": ["absolute_local_path"],
+      "file_sha256": "3b34c9ec4ef7e395c935c2919886aae4144c4539e678f801a80794950c0cd9f3",
+      "reason": "historical implementation-plan example"
+    },
+    {
+      "path": "docs/superpowers/plans/2026-08-22-02-engine-hardening.md",
+      "kinds": ["absolute_local_path", "private_system_reference"],
+      "file_sha256": "b3d5b8d24812b4809ad3a095f4a0103f9c55c5355e3ab78f3cb8aa3157b51223",
+      "reason": "historical implementation-plan example"
+    },
+    {
+      "path": "docs/superpowers/plans/2026-08-22-04-open-source-release.md",
+      "kinds": ["absolute_local_path", "phone", "private_system_reference", "secret", "student_pii"],
+      "file_sha256": "2e4d329eb39374cf3365526e78ee69425b7f9843f3e17288b507e7954a7841c3",
+      "reason": "historical implementation-plan example"
+    },
+    {
+      "path": "scripts/compliance_scan.py",
+      "kinds": ["absolute_local_path", "pricing_or_sales"],
+      "file_sha256": "da847909c9a021c190f4e522c3df6230c354fca0b1af5ad252411888ef8734ff",
+      "reason": "scanner rule literal"
+    },
+    {
+      "path": "scripts/path_recommend.py",
+      "kinds": ["pricing_or_sales"],
+      "file_sha256": "9028d5ee021fee88dac11a87604655476c082420d387b02158e4dab4ba9d1431",
+      "reason": "numeric parser rule literal"
+    },
+    {
+      "path": "tests/test_build_release.py",
+      "kinds": ["secret"],
+      "file_sha256": "3aa37eb924937f1a14983811b859a91e878401072f95570283b05bce6c3cde25",
+      "reason": "synthetic negative fixture"
+    },
+    {
+      "path": "tests/test_cli_smoke.py",
+      "kinds": ["absolute_local_path", "phone", "pricing_or_sales"],
+      "file_sha256": "8a125a4d39c59745bca7a79407d3a727097128d9bbb086ce30213dff9b5d0a15",
+      "reason": "synthetic negative fixture"
+    },
+    {
+      "path": "tests/test_community_files.py",
+      "kinds": ["absolute_local_path", "pricing_or_sales", "private_system_reference"],
+      "file_sha256": "74610841f3be44311248d467b92d5ab5d32986cdbcac99880269984b76f9ff8c",
+      "reason": "synthetic negative fixture"
+    },
+    {
+      "path": "tests/test_compliance_scan.py",
+      "kinds": ["absolute_local_path", "identity_number", "phone", "pricing_or_sales", "private_system_reference", "secret", "student_pii"],
+      "file_sha256": "f59d4156022d1f83e3b36898c599a68baaf5b139b0c24e46ed4a26ed385eaa55",
+      "reason": "synthetic negative fixture"
+    },
+    {
+      "path": "tests/test_contracts.py",
+      "kinds": ["phone"],
+      "file_sha256": "0a1bb6956fd716fee2ec57b250d6eee19dac2e1cbaefe21395135e3e75a1c0a5",
+      "reason": "synthetic negative fixture"
+    },
+    {
+      "path": "tests/test_docx_semantic_parity.py",
+      "kinds": ["absolute_local_path", "phone", "pricing_or_sales"],
+      "file_sha256": "a45bb23b1a2866757b3344105a6e78b2228ad743462abd3346153e13408c6aa4",
+      "reason": "synthetic negative fixture"
+    },
+    {
+      "path": "tests/test_downloader.py",
+      "kinds": ["absolute_local_path"],
+      "file_sha256": "f445c6b7dbccd79272fc6cfca38e7748a7a5780df3a5b1aed15b039ec8370bbf",
+      "reason": "synthetic negative fixture"
+    },
+    {
+      "path": "tests/test_evidence.py",
+      "kinds": ["absolute_local_path", "identity_number", "phone", "secret"],
+      "file_sha256": "1da5aceabd6fde9e32b6f34b368b27d79a329ca82c133034397d68b28975efd4",
+      "reason": "synthetic negative fixture"
+    },
+    {
+      "path": "tests/test_generate_report_evidence.py",
+      "kinds": ["absolute_local_path", "phone", "pricing_or_sales", "student_pii"],
+      "file_sha256": "3b8010cb3b033e507a92496006ba64e69f2ab81cfb5c2c006652bf4cdd11b97f",
+      "reason": "synthetic negative fixture"
+    },
+    {
+      "path": "tests/test_live_smoke_contract.py",
+      "kinds": ["absolute_local_path"],
+      "file_sha256": "10b4deb4a96d736d3b722af2fc72d7a792b751f6a04b12dea5d8e3adc84f1fbb",
+      "reason": "synthetic negative fixture"
+    },
+    {
+      "path": "tests/test_path_policy.py",
+      "kinds": ["absolute_local_path", "phone", "secret", "student_pii"],
+      "file_sha256": "cf6f721119c22a4d1cf1744aa88011ca6b2db6986d62b7c67e73c1366fd072b1",
+      "reason": "synthetic negative fixture"
+    },
+    {
+      "path": "tests/test_public_package_boundary.py",
+      "kinds": ["absolute_local_path", "pricing_or_sales", "private_system_reference"],
+      "file_sha256": "c36f1b10f110b616b2b0c6d38adbd19f0ce939e19433add9c69ac7e360e2b68e",
+      "reason": "synthetic negative fixture"
+    },
+    {
+      "path": "tests/test_query_plan.py",
+      "kinds": ["absolute_local_path", "phone", "secret", "student_pii"],
+      "file_sha256": "2bd0d6348016583e5d3870ef579d1c67d0b64c9b22393136bb80cc3917359cef",
+      "reason": "synthetic negative fixture"
+    },
+    {
+      "path": "tests/test_release_check.py",
+      "kinds": ["absolute_local_path", "pricing_or_sales", "secret", "student_pii"],
+      "file_sha256": "d1bb920eca424e4d6796ba359c9e54c0d6892d5bbefc23aa2c1e46dedd5a13e1",
+      "reason": "synthetic negative fixture"
+    },
+    {
+      "path": "tests/test_replay_scenarios.py",
+      "kinds": ["absolute_local_path"],
+      "file_sha256": "743d5b051169b3af1a3c360a36420fe8ad5e961e1d1c091d665612ab2b50948e",
+      "reason": "synthetic negative fixture"
+    },
+    {
+      "path": "tests/test_structured_adapters.py",
+      "kinds": ["absolute_local_path"],
+      "file_sha256": "7b3dfebd8e7c4fd4fa4d7d61fdb903f1d40b62daac0e5b0b5238bdfafffde4fa",
+      "reason": "synthetic negative fixture"
+    },
+    {
+      "path": "tests/test_unstructured_adapters.py",
+      "kinds": ["absolute_local_path", "secret"],
+      "file_sha256": "a51d90b77191eb33c5e79659c58453c70dca58b114005b5bfc38906581de81e7",
+      "reason": "synthetic negative fixture"
+    },
+    {
+      "path": "tests/test_validate_data.py",
+      "kinds": ["absolute_local_path", "phone"],
+      "file_sha256": "bd9d0af7e0fd51a3bca461ba9a345bbe72ab1d78fcf19e65723bfb49876194da",
+      "reason": "synthetic negative fixture"
+    },
+    {
+      "path": "tests/test_validate_evidence.py",
+      "kinds": ["absolute_local_path", "identity_number", "phone", "secret"],
+      "file_sha256": "c3548a120068417847ad3bbe3669d168c3a38ea9b83a5fdbfd50037afd088f9e",
+      "reason": "synthetic negative fixture"
+    }
+  ],
+  "required_release_paths": [
+    ".gitattributes",
+    "SKILL.md",
+    "README.md",
+    "LICENSE",
+    "CONTRIBUTING.md",
+    "DATA_SOURCES.md",
+    "SECURITY.md",
+    "CODE_OF_CONDUCT.md",
+    "CHANGELOG.md",
+    "ROADMAP.md",
+    "pyproject.toml",
+    "release-policy.json",
+    "docs/release-process.md",
+    ".github/workflows/ci.yml",
+    ".github/workflows/source-health.yml",
+    ".github/workflows/release.yml",
+    ".github/ISSUE_TEMPLATE/source-health.yml",
+    ".github/ISSUE_TEMPLATE/config.yml",
+    ".github/ISSUE_TEMPLATE/bug.yml",
+    ".github/ISSUE_TEMPLATE/data-correction.yml",
+    ".github/ISSUE_TEMPLATE/source-request.yml",
+    ".github/pull_request_template.md",
+    ".github/dependabot.yml",
+    "scripts/__init__.py",
+    "scripts/adapters/__init__.py",
+    "scripts/adapters/admission_bridge.py",
+    "scripts/adapters/html_table.py",
+    "scripts/adapters/ocr_rows.py",
+    "scripts/adapters/pdf_text.py",
+    "scripts/adapters/qr.py",
+    "scripts/adapters/spreadsheet.py",
+    "scripts/build_release.py",
+    "scripts/compliance_scan.py",
+    "scripts/contracts.py",
+    "scripts/data_loader.py",
+    "scripts/docx_export.py",
+    "scripts/downloader.py",
+    "scripts/evidence.py",
+    "scripts/generate_report.py",
+    "scripts/live_smoke.py",
+    "scripts/path_recommend.py",
+    "scripts/preflight.py",
+    "scripts/province_registry.py",
+    "scripts/query_plan.py",
+    "scripts/rank_calc.py",
+    "scripts/release_check.py",
+    "scripts/report_model.py",
+    "scripts/school_recommend.py",
+    "scripts/source_health_state.py",
+    "scripts/source_policy.py",
+    "scripts/validate_data.py",
+    "scripts/validate_evidence.py",
+    "schemas/capability-report.schema.json",
+    "schemas/evidence-bundle.schema.json",
+    "schemas/pathway-policy.schema.json",
+    "schemas/province-catalog.schema.json",
+    "schemas/province.schema.json",
+    "schemas/query-plan.schema.json",
+    "schemas/rank-anchor.schema.json",
+    "references/hosts/claude-code.md",
+    "references/hosts/codex.md",
+    "references/hosts/generic.md",
+    "references/hosts/kimi.md",
+    "references/provinces/index.json",
+    "references/provinces/README.md",
+    "references/retrieval-playbook.md",
+    "references/source-policy.md",
+    "tests/test_build_release.py",
+    "tests/test_compliance_scan.py",
+    "tests/test_release_check.py",
+    "tests/test_replay_scenarios.py",
+    "tests/test_structured_adapters.py",
+    "tests/test_unstructured_adapters.py",
+    "tests/test_docx_semantic_parity.py",
+    "tests/test_workflows.py"
+  ],
+  "required_release_prefixes": [
+    "tests/fixtures/evidence",
+    "tests/fixtures/profiles",
+    "tests/fixtures/provinces",
+    "tests/fixtures/replay"
+  ],
+  "ci_generated_paths": [
+    "build",
+    "dist",
+    "shengxue_skill.egg-info"
+  ],
+  "deterministic_test_modules": [
+    "tests.test_replay_scenarios",
+    "tests.test_structured_adapters",
+    "tests.test_unstructured_adapters"
+  ],
+  "docx_test_modules": [
+    "tests.test_docx_semantic_parity"
+  ]
+}

@@ -1,0 +1,80 @@
+name: "数据事实更正"
+description: "提交公开来源中结构化事实的更正证据，不要上传原始附件或个人资料。"
+title: "[数据更正] "
+labels:
+  - data-correction
+body:
+  - type: markdown
+    attributes:
+      value: |
+        请只提交定位更正所需的最小结构化信息，不要填写或附加学生真实姓名、手机号、身份证号、精确住址、私人报告、身份证明或受限来源副本。
+
+        删除请求、权利人请求和再分发边界请先阅读[数据来源与再分发政策](../../DATA_SOURCES.md)；如需提供敏感权利证明，请先请求维护者启用私密渠道，不要公开提交。
+  - type: input
+    id: province
+    attributes:
+      label: "适用省级地区"
+      description: "填写该事实适用的省级地区；不要填写学生所在学校或住址。"
+      placeholder: "例如：某省级地区"
+    validations:
+      required: true
+  - type: input
+    id: applicable_year
+    attributes:
+      label: "适用年份"
+      description: "填写事实对应的招生或考试年份，不要用抓取年份替代。"
+      placeholder: "例如：2026"
+    validations:
+      required: true
+  - type: textarea
+    id: challenged_fact
+    attributes:
+      label: "需要更正的事实"
+      description: "给出被质疑的最小结构化字段和值；不要复制整张表格或报告。"
+      render: text
+    validations:
+      required: true
+  - type: input
+    id: source_url
+    attributes:
+      label: "原始来源网址"
+      description: "填写不含个人信息、访问凭证或私密查询参数的公开原始网址。"
+      placeholder: "https://example.test/public-source"
+    validations:
+      required: true
+  - type: input
+    id: publisher
+    attributes:
+      label: "发布主体"
+      description: "填写网页或材料上可核验的发布机构，不要填写转载者之外的推测身份。"
+      placeholder: "例如：公开发布机构"
+    validations:
+      required: true
+  - type: input
+    id: captured_at
+    attributes:
+      label: "检索日期"
+      description: "填写你实际查看该来源的日期，使用公历年月日。"
+      placeholder: "例如：2026-08-25"
+    validations:
+      required: true
+  - type: textarea
+    id: correction_reason
+    attributes:
+      label: "更正理由与最小定位"
+      description: "说明为什么现有事实不准确，并给出页码、表头或段落等逻辑定位；不要附加文件。"
+      render: text
+    validations:
+      required: true
+  - type: checkboxes
+    id: privacy_confirmation
+    attributes:
+      label: "公开信息确认"
+      description: "提交前请确认内容满足隐私、版权与再分发边界。"
+      options:
+        - label: "我确认没有填写或附加学生真实姓名、手机号、身份证号、精确住址、私人报告、身份证明或受限材料。"
+          required: true
+        - label: "我确认只提交了更正所需的最小事实和定位，没有复制完整来源内容。"
+          required: true
+    validations:
+      required: true

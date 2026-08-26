@@ -1,0 +1,201 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/shengxue-skill/schemas/query-plan.schema.json",
+  "title": "Deterministic research query plan",
+  "$comment": "Structure is validated here; trusted-catalog identity, per-task ID, discovery context, target, availability, candidate, tier, and extraction semantics also require the declared runtime validator.",
+  "x-semantic-validator": {
+    "locator": "scripts.query_plan.validate_query_plan_payload",
+    "flat_locator": "query_plan.validate_query_plan_payload",
+    "checks": [
+      "task_id_digest",
+      "task_context",
+      "catalog_discovery_context",
+      "trusted_catalog_identity",
+      "structured_target",
+      "explicit_three_year_window",
+      "availability_expectation",
+      "candidate_limit",
+      "source_tiers",
+      "extraction_fields"
+    ]
+  },
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "province",
+    "exam_year",
+    "subject_group",
+    "authority_name",
+    "official_roots",
+    "catalog_verified_at",
+    "tasks"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "1.0"
+    },
+    "province": {
+      "$ref": "#/$defs/publicText"
+    },
+    "exam_year": {
+      "type": "integer",
+      "minimum": 2000,
+      "maximum": 2100
+    },
+    "subject_group": {
+      "$ref": "#/$defs/publicText"
+    },
+    "authority_name": {
+      "$ref": "#/$defs/publicText"
+    },
+    "official_roots": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/officialRoot"}
+    },
+    "catalog_verified_at": {
+      "type": "string",
+      "format": "date",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+    },
+    "tasks": {
+      "type": "array",
+      "minItems": 21,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/queryTask"
+      }
+    }
+  },
+  "$defs": {
+    "publicText": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "pattern": "^(?!\\s)(?!.*\\s$)(?!.*[\\u0000-\\u001F\\u007F])[\\s\\S]+$"
+    },
+    "safeField": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]{0,63}$"
+    },
+    "officialRoot": {
+      "type": "string",
+      "pattern": "^https://[^/?#\\s]+(?:/[^?#\\s]*)?$"
+    },
+    "queryTask": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "task_id",
+        "kind",
+        "province",
+        "year",
+        "subject_group",
+        "authority_name",
+        "official_roots",
+        "target_name",
+        "query_variants",
+        "preferred_source_tiers",
+        "max_candidates",
+        "freshness_rule",
+        "required_extraction_fields",
+        "availability_expectation"
+      ],
+      "properties": {
+        "task_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "province_policy",
+            "score_table",
+            "batch_admission",
+            "joy_report",
+            "enrollment_plan",
+            "subject_requirement",
+            "strong_foundation",
+            "comprehensive_evaluation",
+            "hk_macao_admission",
+            "special_pathway"
+          ]
+        },
+        "province": {
+          "$ref": "#/$defs/publicText"
+        },
+        "year": {
+          "type": "integer",
+          "minimum": 1998,
+          "maximum": 2100
+        },
+        "subject_group": {
+          "$ref": "#/$defs/publicText"
+        },
+        "authority_name": {
+          "$ref": "#/$defs/publicText"
+        },
+        "official_roots": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/officialRoot"}
+        },
+        "target_name": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "maxLength": 512,
+          "pattern": "^(?!\\s)(?!.*\\s$)(?!.*[\\u0000-\\u001F\\u007F])[\\s\\S]+$"
+        },
+        "query_variants": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/publicText"
+          }
+        },
+        "preferred_source_tiers": {
+          "type": "array",
+          "prefixItems": [
+            {"const": "A"},
+            {"const": "B"},
+            {"const": "C"}
+          ],
+          "items": false,
+          "minItems": 3,
+          "maxItems": 3
+        },
+        "max_candidates": {
+          "type": "integer",
+          "const": 10
+        },
+        "freshness_rule": {
+          "type": "string",
+          "enum": [
+            "verify_exact_current_year_availability",
+            "query_exact_expected_available_year"
+          ]
+        },
+        "required_extraction_fields": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/safeField"
+          }
+        },
+        "availability_expectation": {
+          "type": "string",
+          "enum": [
+            "current_year_availability_must_be_checked",
+            "expected_available"
+          ]
+        }
+      }
+    }
+  }
+}

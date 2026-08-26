@@ -1,0 +1,54 @@
+# Python bytecode, test output, and local tooling caches
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+*.egg-info/
+
+# Virtual environments and local configuration
+.venv/
+venv/
+env/
+ENV/
+.env
+.env*
+*.env
+
+# Runtime workspaces and generated output
+output/
+work/
+.cache/
+.worktrees/
+data/hubei/
+reports/
+generated-reports/
+*_report.md
+*_report.docx
+*-report.md
+*-report.docx
+
+# Evidence downloads are local and may contain copyrighted source material
+evidence/raw-downloads/
+evidence/raw_downloads/
+evidence/raw/
+raw-downloads/
+raw_downloads/
+
+# Local databases and transient exports
+*.db
+*.sqlite
+*.sqlite3
+*.duckdb
+
+# Private keys and certificates
+*.key
+*.pem
+*.crt
+*.cer
+*.p12
+*.pfx

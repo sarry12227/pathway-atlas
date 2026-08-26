@@ -1,0 +1,2 @@
+{"extraction_method":"manual-structured","fact_id":"score-001","kind":"fact-provenance","locator":"fixture[three-source-consensus]/fact[score-001]","source_ids":["s1","s2","s3"],"year":2026}
+{"province":"示例省","query":"synthetic"}

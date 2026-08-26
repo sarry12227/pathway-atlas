@@ -1,0 +1,14 @@
+{
+  "schema_version": "1.0",
+  "province": "演示甲省",
+  "subject_mode": "3+1+2",
+  "subject_group": "物理",
+  "secondary_subjects": ["化学", "地理"],
+  "rank": 1100,
+  "grade": "高三",
+  "current_year": 2026,
+  "target_major_categories": [],
+  "target_cities": [],
+  "target_schools": [],
+  "eligibility_facts": []
+}

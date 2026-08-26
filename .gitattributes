@@ -1,0 +1,21 @@
+* text=auto eol=lf
+tests/fixtures/evidence/** text eol=lf
+
+*.7z -text
+*.doc -text
+*.docx -text
+*.gif -text
+*.gz -text
+*.ico -text
+*.jpeg -text
+*.jpg -text
+*.pdf -text
+*.png -text
+*.pyc -text
+*.sqlite -text
+*.sqlite3 -text
+*.tar -text
+*.webp -text
+*.xls -text
+*.xlsx -text
+*.zip -text

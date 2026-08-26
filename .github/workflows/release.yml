@@ -1,0 +1,79 @@
+name: Publish tagged release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-tags
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Verify and publish deterministic artifacts
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout complete tagged history
+        id: checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Set up supported Python
+        id: setup
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.10"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install all test dependencies
+        id: install
+        run: python -m pip install -e ".[all,test]"
+      - name: Verify exact annotated tag and snapshot version
+        id: metadata
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          EXPECTED_COMMIT: ${{ github.sha }}
+        run: python scripts/build_release.py --verify-ref
+      - name: Run the complete deterministic suite
+        id: tests
+        run: python -m unittest discover -s tests -v
+      - name: Run the strict tagged release gate
+        id: release_gate
+        env:
+          RELEASE_VERSION: ${{ steps.metadata.outputs.version }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: python scripts/release_check.py --ci --expected-version "$RELEASE_VERSION" --tag "$RELEASE_TAG"
+      - name: Build the deterministic release pair
+        id: build
+        env:
+          RELEASE_VERSION: ${{ steps.metadata.outputs.version }}
+          OUTPUT_DIRECTORY: dist
+        run: python scripts/build_release.py --version "$RELEASE_VERSION" --output "$OUTPUT_DIRECTORY"
+      - name: Verify the published checksum input
+        id: checksum
+        working-directory: dist
+        env:
+          CHECKSUM_FILE: SHA256SUMS
+        run: sha256sum --check "$CHECKSUM_FILE"
+      - name: Extract exactly one matching changelog section
+        id: notes
+        env:
+          RELEASE_VERSION: ${{ steps.metadata.outputs.version }}
+          CHANGELOG_PATH: CHANGELOG.md
+          NOTES_PATH: dist/release-notes.md
+        run: python scripts/build_release.py --extract-notes
+      - name: Publish the non-draft GitHub Release
+        id: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          ARCHIVE_PATH: dist/shengxue-skill-${{ steps.metadata.outputs.version }}.zip
+          CHECKSUM_PATH: dist/SHA256SUMS
+          NOTES_PATH: dist/release-notes.md
+        run: gh release create "$RELEASE_TAG" "$ARCHIVE_PATH" "$CHECKSUM_PATH" --verify-tag --title "$RELEASE_TAG" --notes-file "$NOTES_PATH"

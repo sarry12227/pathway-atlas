@@ -1,0 +1,18 @@
+{
+  "province": "虚构重复省",
+  "mode": "3+1+2",
+  "primary_subjects": ["物理", "历史"],
+  "secondary_subjects": ["化学", "生物", "思想政治", "地理"],
+  "score_scale": 750,
+  "schema_version": "1.0",
+  "ordinary_batch_policy": {
+    "schema_version": "1.0",
+    "policy_id": "synthetic-ordinary-batch-v1",
+    "basis_id": "synthetic-policy-basis-v1",
+    "search_delta_min": -8000,
+    "search_delta_max": 6000,
+    "challenge_delta_lt": -2000,
+    "stable_delta_le": 2000,
+    "tier_caps": {"冲": 3, "稳": 4, "保": 5}
+  }
+}

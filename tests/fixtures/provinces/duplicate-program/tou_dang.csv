@@ -1,0 +1,5 @@
+year,province,subject_group,school_code,school_name,program_group,min_score,min_rank,remarks
+2026,虚构重复省,物理,SYN-A01,虚构大学,第01组,600,1000,
+2026,虚构重复省,物理,SYN-A02,虚构大学,第01组,600,1000,
+2026,虚构重复省,物理,SYN-A01,虚构大学,第01组,600,1000,中外合作
+2026,虚构重复省,物理,SYN-A01,虚构大学,第01组,601,999,

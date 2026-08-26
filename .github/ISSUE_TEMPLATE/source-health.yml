@@ -1,0 +1,49 @@
+name: Source health manual review
+description: Maintainer-only review of non-authoritative official-root telemetry
+title: "[source-health] Manual official-root review"
+labels:
+  - source-health
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Source-health output is non-authoritative telemetry. Maintainers must manually verify the official domain and upstream publisher before making any change.
+
+        Automation must not update catalog facts, evidence, or release status. This issue must not be used as evidence or release approval.
+
+        Do not include personal student data, raw URLs with query strings, local paths, credentials, or copied page content.
+  - type: input
+    id: province
+    attributes:
+      label: Province-level region
+      description: Enter only the catalogued province-level region name.
+    validations:
+      required: true
+  - type: dropdown
+    id: observed_status
+    attributes:
+      label: Telemetry status
+      description: Select the bounded machine status that prompted manual review.
+      options:
+        - redirect_review
+        - persistent unavailable
+    validations:
+      required: true
+  - type: textarea
+    id: manual_verification
+    attributes:
+      label: Manual verification notes
+      description: Record only a concise, non-personal maintainer assessment; do not paste source content or raw links.
+    validations:
+      required: true
+  - type: checkboxes
+    id: safeguards
+    attributes:
+      label: Safeguards
+      options:
+        - label: I manually verified the official publisher and domain outside this telemetry.
+          required: true
+        - label: I included no personal student data, credentials, local paths, or copied source content.
+          required: true
+        - label: I will use the normal evidence and review process for any proposed fact change.
+          required: true
