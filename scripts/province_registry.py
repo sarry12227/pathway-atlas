@@ -102,17 +102,27 @@ class _DirectoryIdentity:
             absolute = Path(os.path.abspath(os.fspath(requested)))
             info = os.lstat(absolute)
             resolved = absolute.resolve(strict=True)
+            resolved_info = os.lstat(resolved)
         except (OSError, RuntimeError, TypeError, ValueError) as error:
             raise ProvincePathError(f"{description}不可访问或不存在") from error
         attributes = getattr(info, "st_file_attributes", 0)
+        resolved_attributes = getattr(resolved_info, "st_file_attributes", 0)
         if (
-            resolved != absolute
-            or not stat.S_ISDIR(info.st_mode)
+            not stat.S_ISDIR(info.st_mode)
             or stat.S_ISLNK(info.st_mode)
             or attributes & _REPARSE_POINT
+            or not stat.S_ISDIR(resolved_info.st_mode)
+            or stat.S_ISLNK(resolved_info.st_mode)
+            or resolved_attributes & _REPARSE_POINT
+            or (info.st_dev, info.st_ino) != (resolved_info.st_dev, resolved_info.st_ino)
         ):
             raise ProvincePathError(f"{description}必须是真实目录，不能是链接或重解析点")
-        return cls(resolved, info.st_dev, info.st_ino, attributes)
+        return cls(
+            resolved,
+            resolved_info.st_dev,
+            resolved_info.st_ino,
+            resolved_attributes,
+        )
 
     def verify(self, description: str) -> None:
         try:

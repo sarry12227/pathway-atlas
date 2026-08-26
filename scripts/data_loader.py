@@ -70,8 +70,9 @@ def _read_csv_records(
         parent_identity = _parent_identity or _DirectoryIdentity.capture(
             absolute.parent, "CSV 父目录"
         )
-        if absolute.parent != parent_identity.path:
+        if absolute.parent.resolve(strict=True) != parent_identity.path:
             raise DataError(f"CSV 必须位于已验证父目录内：{absolute}")
+        absolute = parent_identity.path / absolute.name
         parent_identity.verify("CSV 父目录")
         before = os.lstat(absolute)
         attributes = getattr(before, "st_file_attributes", 0)

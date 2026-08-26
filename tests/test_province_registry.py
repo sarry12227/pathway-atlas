@@ -87,6 +87,25 @@ class ProvinceRegistryTest(unittest.TestCase):
         with self.assertRaises(UnknownProvinceError):
             resolve_province_dir(FIXTURES, "../demo-312")
 
+    def test_stable_symlinked_ancestor_is_canonicalized_before_identity_tracking(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            sandbox = Path(temporary)
+            real_parent = sandbox / "real-parent"
+            child = real_parent / "dataset"
+            child.mkdir(parents=True)
+            alias = sandbox / "system-alias"
+            try:
+                alias.symlink_to(real_parent, target_is_directory=True)
+            except (OSError, NotImplementedError) as error:
+                self.skipTest(f"symlink unavailable: {type(error).__name__}")
+
+            identity = registry_module._DirectoryIdentity.capture(
+                alias / "dataset", "测试数据目录"
+            )
+
+            self.assertEqual(identity.path, child.resolve())
+            identity.verify("测试数据目录")
+
     def test_duplicate_metadata_name_is_rejected(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
