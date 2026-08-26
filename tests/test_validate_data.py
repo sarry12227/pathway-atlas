@@ -316,8 +316,9 @@ class AdmissionNormalizationTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             sandbox = Path(temporary)
             real_parent = sandbox / "real-parent"
-            real_parent.mkdir()
-            path = real_parent / "tou_dang.csv"
+            data_directory = real_parent / "dataset"
+            data_directory.mkdir(parents=True)
+            path = data_directory / "tou_dang.csv"
             write_csv(
                 path,
                 ("year", "subject_group", "min_score", "min_rank"),
@@ -329,7 +330,7 @@ class AdmissionNormalizationTest(unittest.TestCase):
             except (OSError, NotImplementedError) as error:
                 self.skipTest(f"symlink unavailable: {type(error).__name__}")
 
-            rows = load_admission_rows(alias / "tou_dang.csv")
+            rows = load_admission_rows(alias / "dataset" / "tou_dang.csv")
 
             self.assertEqual(rows[0]["min_rank"], "1000")
 

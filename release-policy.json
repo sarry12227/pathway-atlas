@@ -187,7 +187,7 @@
     {
       "path": "tests/test_validate_data.py",
       "kinds": ["absolute_local_path", "phone"],
-      "file_sha256": "4a9b3edf57e427bd29889422df826c57afe714c2a6cb717ae3cc153f5f31b73f",
+      "file_sha256": "bd9d0af7e0fd51a3bca461ba9a345bbe72ab1d78fcf19e65723bfb49876194da",
       "reason": "synthetic negative fixture"
     },
     {
