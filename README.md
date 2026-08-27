@@ -91,6 +91,8 @@ git clone https://gitee.com/sarry1/pathway-atlas.git <skills-root>/pathway-atlas
 
 安装后检查 `<skills-root>/pathway-atlas/SKILL.md` 的 frontmatter `name` 为 `pathway-atlas`，再重新加载宿主。两条 `git clone` 命令是主源与回退源，不要在同一目标目录重复执行。
 
+公开仓库、镜像和第三方 Skill 目录的逐项核验结果见 [分发状态](DISTRIBUTION.md)。只有能够直接打开并核对来源的详情页才会标记为已收录；等待审核不会写成发布成功。
+
 | 宿主 | 推荐位置或注册方式 | 本仓库适配 | 权威说明 |
 | --- | --- | --- | --- |
 | **Generic Agent** | 使用兼容开放 Agent Skills 规范的 Skill 根目录 | [Generic Agent 映射](references/hosts/generic.md) | [Agent Skills 规范](https://agentskills.io/specification) |

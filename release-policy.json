@@ -232,6 +232,7 @@
     "CODE_OF_CONDUCT.md",
     "CHANGELOG.md",
     "ROADMAP.md",
+    "DISTRIBUTION.md",
     "pyproject.toml",
     "release-policy.json",
     "docs/release-process.md",
