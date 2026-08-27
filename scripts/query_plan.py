@@ -48,6 +48,13 @@ if __package__:
             _MISSING_LOCAL_CAPABILITY = "path_recommend"
     if _MISSING_LOCAL_CAPABILITY is None:
         try:
+            from .year_fallback import year_window
+        except ModuleNotFoundError as error:
+            if error.name != f"{__package__}.year_fallback":
+                raise
+            _MISSING_LOCAL_CAPABILITY = "year_fallback"
+    if _MISSING_LOCAL_CAPABILITY is None:
+        try:
             from .province_registry import (
                 ProvinceConfig,
                 _parse_config,
@@ -80,6 +87,13 @@ else:  # pragma: no cover - exercised by the real CLI and flat-import tests
             _MISSING_LOCAL_CAPABILITY = "path_recommend"
     if _MISSING_LOCAL_CAPABILITY is None:
         try:
+            from year_fallback import year_window
+        except ModuleNotFoundError as error:
+            if error.name != "year_fallback":
+                raise
+            _MISSING_LOCAL_CAPABILITY = "year_fallback"
+    if _MISSING_LOCAL_CAPABILITY is None:
+        try:
             from province_registry import (
                 ProvinceConfig,
                 _parse_config,
@@ -94,6 +108,7 @@ if _MISSING_LOCAL_CAPABILITY is not None:
     OrdinaryBatchPolicy = RecommendationProfile = PlanningProfile = ProvinceConfig = None
     load_planning_profile = None
     validate_public_output_text = _parse_config = canonical_subject_selection_key = None
+    year_window = None
 
 
 _SCHEMA_VERSION = "1.0"
@@ -833,7 +848,7 @@ class QueryPlan:
         object.__setattr__(self, "tasks", tasks)
         if len({task.task_id for task in tasks}) != len(tasks):
             raise ValueError("query plan contains duplicate task IDs")
-        window = {self.exam_year - 2, self.exam_year - 1, self.exam_year}
+        window = set(year_window(self.exam_year))
         for task in tasks:
             if (
                 task.province != self.province
@@ -843,7 +858,7 @@ class QueryPlan:
             ):
                 raise ValueError("task context does not match query plan")
             if task.year not in window:
-                raise ValueError("task year is outside the explicit three-year window")
+                raise ValueError("task year is outside the explicit four-year window")
             expectation = (
                 "current_year_availability_must_be_checked"
                 if task.year == self.exam_year
@@ -855,41 +870,47 @@ class QueryPlan:
             kind: tuple(task for task in tasks if task.kind == kind) for kind in _KINDS
         }
         if {task.year for task in by_kind["score_table"]} != window:
-            raise ValueError("score_table tasks must cover the exact three-year window")
+            raise ValueError("score_table tasks must cover the exact four-year window")
         batch_targets = {"普通批", "提前批", "综合评价批"}
         if {task.target_name for task in by_kind["batch_admission"]} != batch_targets:
             raise ValueError("batch admission tasks must cover every declared batch")
         for target in batch_targets:
-            if {
+            target_years = tuple(
                 task.year
                 for task in by_kind["batch_admission"]
                 if task.target_name == target
-            } != window:
-                raise ValueError("each batch admission target must cover the exact three-year window")
-        joy_years = tuple(task.year for task in by_kind["joy_report"])
-        if len(joy_years) > 3 or len(set(joy_years)) != len(joy_years):
-            raise ValueError("joy-report tasks must use at most three explicit years")
-        current_year_kinds = _KINDS - {
-            "score_table",
-            "batch_admission",
-            "joy_report",
-            "special_pathway",
-        }
-        for kind in current_year_kinds:
-            if not by_kind[kind] or any(task.year != self.exam_year for task in by_kind[kind]):
-                raise ValueError(f"{kind} tasks must target the explicit exam year")
-        for singleton in (
+            )
+            if len(target_years) != 4 or set(target_years) != window:
+                raise ValueError(
+                    "each batch admission target must cover the exact four-year window"
+                )
+        annual_single_target_kinds = (
             "province_policy",
+            "score_table",
+            "joy_report",
             "enrollment_plan",
             "subject_requirement",
             "strong_foundation",
             "comprehensive_evaluation",
             "hk_macao_admission",
-        ):
-            if len(by_kind[singleton]) != 1:
-                raise ValueError(f"{singleton} must have exactly one task")
-        if any(task.year != self.exam_year for task in by_kind["special_pathway"]):
-            raise ValueError("special pathway tasks must target the explicit exam year")
+        )
+        for kind in annual_single_target_kinds:
+            kind_years = tuple(task.year for task in by_kind[kind])
+            if len(kind_years) != 4 or set(kind_years) != window:
+                raise ValueError(f"{kind} tasks must cover the exact four-year window")
+        special_targets = {
+            task.target_name for task in by_kind["special_pathway"]
+        }
+        for target in special_targets:
+            target_years = tuple(
+                task.year
+                for task in by_kind["special_pathway"]
+                if task.target_name == target
+            )
+            if len(target_years) != 4 or set(target_years) != window:
+                raise ValueError(
+                    "each special pathway must cover the exact four-year window"
+                )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -1128,7 +1149,7 @@ def build_query_plan(
 
     authority = discovery.authority_name
     roots = discovery.official_roots
-    years = (year - 2, year - 1, year)
+    years = year_window(year)
     tasks: list[QueryTask] = []
 
     def add_task(
@@ -1151,15 +1172,16 @@ def build_query_plan(
             )
         )
 
-    add_task(
-        "province_policy",
-        year,
-        None,
-        (
-            f"{authority} {province_name} {year} {subject_group} 高考政策 考试模式",
-            f"{authority} {province_name} {year} {subject_group} 批次设置 选科模式",
-        ),
-    )
+    for task_year in years:
+        add_task(
+            "province_policy",
+            task_year,
+            None,
+            (
+                f"{authority} {province_name} {task_year} {subject_group} 高考政策 考试模式",
+                f"{authority} {province_name} {task_year} {subject_group} 批次设置 选科模式",
+            ),
+        )
     for task_year in years:
         add_task(
             "score_table",
@@ -1196,66 +1218,71 @@ def build_query_plan(
             )
         add_task("joy_report", task_year, school, joy_queries)
 
-    add_task(
-        "enrollment_plan",
-        year,
-        None,
-        (
-            f"{authority} {province_name} {year} {subject_group} 高校 招生计划 专业 计划数",
-            f"{authority} {province_name} {year} {subject_group} 院校代码 专业代码 招生批次",
-        ),
-    )
-    add_task(
-        "subject_requirement",
-        year,
-        None,
-        (
-            f"{authority} {province_name} {year} {subject_group} 招生专业 选科要求",
-            f"{authority} {province_name} {year} {subject_group} 院校专业 选考科目要求",
-        ),
-    )
-    add_task(
-        "strong_foundation",
-        year,
-        "强基计划",
-        (
-            f"{authority} {province_name} {year} {subject_group} 强基计划 招生专业 入围 录取",
-            f"{authority} {province_name} {year} {subject_group} 强基计划 培养方案 转段方向 出口",
-        ),
-    )
-    add_task(
-        "comprehensive_evaluation",
-        year,
-        "综合评价",
-        (
-            f"{authority} {province_name} {year} {subject_group} 综合评价 报考条件 成绩比例",
-            f"{authority} {province_name} {year} {subject_group} 综合评价 校测 录取 出口",
-        ),
-    )
-    add_task(
-        "hk_macao_admission",
-        year,
-        "港澳招生",
-        (
-            f"{authority} {province_name} {year} {subject_group} 港澳招生 招生方式 英语要求",
-            f"{authority} {province_name} {year} {subject_group} 港澳院校 费用 奖学金 出口",
-        ),
-    )
+    for task_year in years:
+        add_task(
+            "enrollment_plan",
+            task_year,
+            None,
+            (
+                f"{authority} {province_name} {task_year} {subject_group} 高校 招生计划 专业 计划数",
+                f"{authority} {province_name} {task_year} {subject_group} 院校代码 专业代码 招生批次",
+            ),
+        )
+        add_task(
+            "subject_requirement",
+            task_year,
+            None,
+            (
+                f"{authority} {province_name} {task_year} {subject_group} 招生专业 选科要求",
+                f"{authority} {province_name} {task_year} {subject_group} 院校专业 选考科目要求",
+            ),
+        )
+        add_task(
+            "strong_foundation",
+            task_year,
+            "强基计划",
+            (
+                f"{authority} {province_name} {task_year} {subject_group} 强基计划 招生专业 入围 录取",
+                f"{authority} {province_name} {task_year} {subject_group} 强基计划 培养方案 转段方向 出口",
+            ),
+        )
+        add_task(
+            "comprehensive_evaluation",
+            task_year,
+            "综合评价",
+            (
+                f"{authority} {province_name} {task_year} {subject_group} 综合评价 报考条件 成绩比例",
+                f"{authority} {province_name} {task_year} {subject_group} 综合评价 校测 录取 出口",
+            ),
+        )
+        add_task(
+            "hk_macao_admission",
+            task_year,
+            "港澳招生",
+            (
+                f"{authority} {province_name} {task_year} {subject_group} 港澳招生 招生方式 英语要求",
+                f"{authority} {province_name} {task_year} {subject_group} 港澳院校 费用 奖学金 出口",
+            ),
+        )
 
     built_in_pathways = frozenset({"强基", "强基计划", "综合评价", "综评", "港澳", "港澳招生"})
     for pathway in pathways:
         if pathway in built_in_pathways:
             continue
-        add_task(
-            "special_pathway",
-            year,
-            pathway,
-            (
-                f"{authority} {province_name} {year} {subject_group} {pathway} 报考条件 普通路径区别",
-                f"{authority} {province_name} {year} {subject_group} {pathway} 就业 地域限制 服务期 违约后果",
-                f"{authority} {province_name} {year} {subject_group} {pathway} 费用 补助 特殊限制",
-            ),
-        )
+        for task_year in years:
+            add_task(
+                "special_pathway",
+                task_year,
+                pathway,
+                (
+                    f"{authority} {province_name} {task_year} {subject_group} "
+                    f"{pathway} 报考条件 普通路径区别",
+                    f"{authority} {province_name} {task_year} {subject_group} "
+                    f"{pathway} 就业 地域限制 服务期 违约后果",
+                    f"{authority} {province_name} {task_year} {subject_group} "
+                    f"{pathway} 费用 补助 特殊限制",
+                ),
+            )
     return QueryPlan(
         schema_version=_SCHEMA_VERSION,
         province=province_name,

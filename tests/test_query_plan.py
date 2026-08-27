@@ -448,7 +448,13 @@ class QueryPlanTest(unittest.TestCase):
         self.assertEqual(
             {task.target_name for task in pathways}, {"强基计划", "综合评价"}
         )
-        self.assertTrue(all(task.target_name is None for task in plan.tasks if task.kind == "score_table"))
+        self.assertTrue(
+            all(
+                task.target_name is None
+                for task in plan.tasks
+                if task.kind == "score_table"
+            )
+        )
 
         payload = plan.to_dict()
         target_task = next(task for task in payload["tasks"] if task["kind"] == "joy_report")
@@ -462,10 +468,47 @@ class QueryPlanTest(unittest.TestCase):
             self.assertEqual(task.max_candidates, 10)
             self.assertEqual(task.preferred_source_tiers, ("A", "B", "C"))
 
-    def test_admission_years_are_exactly_three_explicit_years(self):
-        tasks = [task for task in self.build_312().tasks if task.kind == "batch_admission"]
-        self.assertEqual({task.year for task in tasks}, {2024, 2025, 2026})
-        self.assertEqual({task.target_name for task in tasks}, {"普通批", "提前批", "综合评价批"})
+    def test_every_annual_family_uses_target_year_through_target_minus_three(self):
+        tasks = [
+            task
+            for task in self.build_312().tasks
+            if task.kind == "batch_admission"
+        ]
+        window = {2023, 2024, 2025, 2026}
+        self.assertEqual({task.year for task in tasks}, window)
+        self.assertEqual(
+            {task.target_name for task in tasks},
+            {"普通批", "提前批", "综合评价批"},
+        )
+        for kind in (
+            "province_policy",
+            "score_table",
+            "joy_report",
+            "enrollment_plan",
+            "subject_requirement",
+            "strong_foundation",
+            "comprehensive_evaluation",
+            "hk_macao_admission",
+        ):
+            with self.subTest(kind=kind):
+                self.assertEqual(
+                    {task.year for task in self.build_312().tasks if task.kind == kind},
+                    window,
+                )
+        special_targets = {
+            task.target_name
+            for task in self.build_312().tasks
+            if task.kind == "special_pathway"
+        }
+        for target in special_targets:
+            self.assertEqual(
+                {
+                    task.year
+                    for task in self.build_312().tasks
+                    if task.kind == "special_pathway" and task.target_name == target
+                },
+                window,
+            )
         self.assertNotIn("latest", json.dumps(self.build_312().to_dict()))
 
     def test_mode_aware_subject_keys_and_ids_are_deterministic_safe_ascii(self):
@@ -573,7 +616,7 @@ class QueryPlanTest(unittest.TestCase):
         )
         self.assertNotIn("pathway_policy", kinds)
         generic_joy = [task for task in plan.tasks if task.kind == "joy_report"]
-        self.assertEqual(len(generic_joy), 3)
+        self.assertEqual(len(generic_joy), 4)
         self.assertTrue(all(task.target_name is None for task in generic_joy))
         for task in generic_joy:
             query_text = " ".join(task.query_variants)
@@ -614,7 +657,13 @@ class QueryPlanTest(unittest.TestCase):
 
         ordered = self.build_312(requested_pathways=("Ｂ计划", "A计划"))
         self.assertEqual(
-            [task.target_name for task in ordered.tasks if task.kind == "special_pathway"],
+            list(
+                dict.fromkeys(
+                    task.target_name
+                    for task in ordered.tasks
+                    if task.kind == "special_pathway"
+                )
+            ),
             ["A计划", "B计划"],
         )
         with self.assertRaises(ValueError):
@@ -875,7 +924,7 @@ class QueryPlanSchemaTest(unittest.TestCase):
                 "catalog_discovery_context",
                 "trusted_catalog_identity",
                 "structured_target",
-                "explicit_three_year_window",
+                "explicit_four_year_window",
                 "availability_expectation",
                 "candidate_limit",
                 "source_tiers",

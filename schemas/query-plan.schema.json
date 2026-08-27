@@ -12,7 +12,7 @@
       "catalog_discovery_context",
       "trusted_catalog_identity",
       "structured_target",
-      "explicit_three_year_window",
+      "explicit_four_year_window",
       "availability_expectation",
       "candidate_limit",
       "source_tiers",
@@ -63,7 +63,7 @@
     },
     "tasks": {
       "type": "array",
-      "minItems": 21,
+      "minItems": 44,
       "uniqueItems": true,
       "items": {
         "$ref": "#/$defs/queryTask"
