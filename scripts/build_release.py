@@ -176,7 +176,7 @@ def _project_version(raw: bytes) -> str:
         version = payload["project"]["version"]
     except (UnicodeError, KeyError, TypeError, ValueError) as error:
         raise BuildReleaseError("invalid project metadata") from error
-    if name != "shengxue-skill" or not isinstance(version, str) or _VERSION_RE.fullmatch(version) is None:
+    if name != "pathway-atlas" or not isinstance(version, str) or _VERSION_RE.fullmatch(version) is None:
         raise BuildReleaseError("invalid project metadata")
     return version
 
@@ -291,7 +291,7 @@ def _write_archive(root: Path, destination: Path, blobs: Sequence[IndexBlob]) ->
     try:
         with zipfile.ZipFile(destination, "x", compression=zipfile.ZIP_DEFLATED, compresslevel=9, strict_timestamps=True) as archive:
             for blob in blobs:
-                info = zipfile.ZipInfo(f"shengxue-skill/{blob.path}", date_time=_ZIP_TIMESTAMP)
+                info = zipfile.ZipInfo(f"pathway-atlas/{blob.path}", date_time=_ZIP_TIMESTAMP)
                 info.create_system = 3
                 info.compress_type = zipfile.ZIP_DEFLATED
                 info.flag_bits |= 0x800
@@ -495,7 +495,7 @@ def build_release(root: Path, version: str, output: str) -> ReleaseArtifacts:
     _validate_worktree(root, blobs)
     output_path = _safe_output(root, output)
 
-    archive_name = f"shengxue-skill-{version}.zip"
+    archive_name = f"pathway-atlas-{version}.zip"
     checksum_name = "SHA256SUMS"
     ready: Path | None = None
     try:

@@ -14,7 +14,7 @@
 ```powershell
 $sourceRepository = (git rev-parse --path-format=absolute --show-toplevel).Trim()
 $rehearsalCommit = (git rev-parse HEAD).Trim()
-$rehearsalRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("shengxue-skill-release-rehearsal-" + [guid]::NewGuid().ToString("N"))
+$rehearsalRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("pathway-atlas-release-rehearsal-" + [guid]::NewGuid().ToString("N"))
 $clonePath = Join-Path $rehearsalRoot "repo"
 $artifactPath = Join-Path $rehearsalRoot "artifacts"
 New-Item -ItemType Directory -Path $rehearsalRoot, $artifactPath | Out-Null
@@ -93,8 +93,8 @@ Push-Location $clonePath
 New-Item -ItemType Directory -Path dist | Out-Null
 & $releasePython scripts\build_release.py --version 0.1.0 --output dist/rehearsal-one
 & $releasePython scripts\build_release.py --version 0.1.0 --output dist/rehearsal-two
-$zipOne = Join-Path $clonePath "dist\rehearsal-one\shengxue-skill-0.1.0.zip"
-$zipTwo = Join-Path $clonePath "dist\rehearsal-two\shengxue-skill-0.1.0.zip"
+$zipOne = Join-Path $clonePath "dist\rehearsal-one\pathway-atlas-0.1.0.zip"
+$zipTwo = Join-Path $clonePath "dist\rehearsal-two\pathway-atlas-0.1.0.zip"
 $sumsOne = Join-Path $clonePath "dist\rehearsal-one\SHA256SUMS"
 $sumsTwo = Join-Path $clonePath "dist\rehearsal-two\SHA256SUMS"
 if (-not [System.Linq.Enumerable]::SequenceEqual([IO.File]::ReadAllBytes($zipOne), [IO.File]::ReadAllBytes($zipTwo))) { throw "ZIP byte mismatch" }

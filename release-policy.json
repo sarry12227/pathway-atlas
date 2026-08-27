@@ -22,6 +22,18 @@
   ],
   "binary_release_manifest": [
     {
+      "path": "assets/brand/pathway-atlas-horizontal.png",
+      "sha256": "acd47314ced46aadf05e782d70d9bd87f781b82636e46cb288c0231e732dbcc8",
+      "classification": "rights-reviewed",
+      "rights_doc": "LICENSE"
+    },
+    {
+      "path": "assets/brand/pathway-atlas-mark.png",
+      "sha256": "39dbf6bb3fee69ff0cb4a7962b513a950f638e653cfb17dc1fd60e22e10f1777",
+      "classification": "rights-reviewed",
+      "rights_doc": "LICENSE"
+    },
+    {
       "path": "tests/fixtures/replay/pdf/text-and-image.pdf",
       "sha256": "870bd0bd74266cbb5c1900e404bda42f6f61581076496f296dd82decd78f000d",
       "classification": "synthetic"
@@ -71,6 +83,18 @@
       "reason": "historical implementation-plan example"
     },
     {
+      "path": "docs/superpowers/plans/2026-08-26-pathway-atlas-brand-migration.md",
+      "kinds": ["absolute_local_path"],
+      "file_sha256": "a547dfa66aa09c6008007b3e0681a19101fe0f3cc8072e47c26cb99113bfc990",
+      "reason": "historical implementation-plan example"
+    },
+    {
+      "path": "docs/superpowers/plans/2026-08-27-pathway-atlas-brand-distribution.md",
+      "kinds": ["absolute_local_path"],
+      "file_sha256": "d79a77c03c82432338316461736013b08a790d4020736e4326328c12bfcfea2e",
+      "reason": "historical implementation-plan example"
+    },
+    {
       "path": "scripts/compliance_scan.py",
       "kinds": ["absolute_local_path", "pricing_or_sales"],
       "file_sha256": "da847909c9a021c190f4e522c3df6230c354fca0b1af5ad252411888ef8734ff",
@@ -85,7 +109,7 @@
     {
       "path": "tests/test_build_release.py",
       "kinds": ["secret"],
-      "file_sha256": "3aa37eb924937f1a14983811b859a91e878401072f95570283b05bce6c3cde25",
+      "file_sha256": "9148a44ff7554eb4679ea7f49e8133575a7b84c8a678cae111520b90fa327841",
       "reason": "synthetic negative fixture"
     },
     {
@@ -97,7 +121,7 @@
     {
       "path": "tests/test_community_files.py",
       "kinds": ["absolute_local_path", "pricing_or_sales", "private_system_reference"],
-      "file_sha256": "74610841f3be44311248d467b92d5ab5d32986cdbcac99880269984b76f9ff8c",
+      "file_sha256": "db688bc3929f67257f3d58171e305c075fa08362f0a8f2d771555228c4a81311",
       "reason": "synthetic negative fixture"
     },
     {
@@ -163,7 +187,7 @@
     {
       "path": "tests/test_release_check.py",
       "kinds": ["absolute_local_path", "pricing_or_sales", "secret", "student_pii"],
-      "file_sha256": "d1bb920eca424e4d6796ba359c9e54c0d6892d5bbefc23aa2c1e46dedd5a13e1",
+      "file_sha256": "7002130378ecb7afa2ee1c2311b431556b99947a188353356fbcc9a44f8858ca",
       "reason": "synthetic negative fixture"
     },
     {
@@ -283,7 +307,7 @@
   "ci_generated_paths": [
     "build",
     "dist",
-    "shengxue_skill.egg-info"
+    "pathway_atlas.egg-info"
   ],
   "deterministic_test_modules": [
     "tests.test_replay_scenarios",

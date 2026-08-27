@@ -200,8 +200,8 @@ def _is_exact_ignored_artifact(relative: str, policy: ReleasePolicy) -> bool:
     name = path.name
     return bool(
         name == "sha256sums"
-        or re.fullmatch(r"shengxue-skill-[0-9]+(?:\.[0-9]+){2}\.zip", name)
-        or re.fullmatch(r"shengxue_skill-[0-9]+(?:\.[0-9]+){2}-.+\.whl", name)
+        or re.fullmatch(r"pathway-atlas-[0-9]+(?:\.[0-9]+){2}\.zip", name)
+        or re.fullmatch(r"pathway_atlas-[0-9]+(?:\.[0-9]+){2}-.+\.whl", name)
     )
 
 
@@ -420,7 +420,7 @@ def check_project_version(root: Path, expected_version: str, tag: str | None) ->
         name = project["name"]
     except (OSError, UnicodeError, KeyError, TypeError, ValueError):
         return CheckResult("project_version", False, ("invalid-pyproject",), 1)
-    if name != "shengxue-skill":
+    if name != "pathway-atlas":
         details.append("project-name-mismatch")
     if version != expected_version:
         details.append("expected-version-mismatch")

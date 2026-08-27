@@ -25,7 +25,7 @@ class BuildReleaseTest(unittest.TestCase):
         (self.root / "scripts").mkdir()
         (self.root / "tests" / "fixtures" / "synthetic").mkdir(parents=True)
         (self.root / "pyproject.toml").write_text(
-            '[project]\nname = "shengxue-skill"\nversion = "0.1.0"\n',
+            '[project]\nname = "pathway-atlas"\nversion = "0.1.0"\n',
             encoding="utf-8",
         )
         for document in (
@@ -106,30 +106,32 @@ class BuildReleaseTest(unittest.TestCase):
         digest = hashlib.sha256(first.archive.read_bytes()).hexdigest()
         self.assertEqual(
             first.checksums.read_text("utf-8"),
-            f"{digest}  shengxue-skill-0.1.0.zip\n",
+            f"{digest}  pathway-atlas-0.1.0.zip\n",
         )
         with zipfile.ZipFile(first.archive) as archive:
             names = archive.namelist()
             self.assertEqual(names, sorted(names))
             required = {
-                "shengxue-skill/CHANGELOG.md",
-                "shengxue-skill/CODE_OF_CONDUCT.md",
-                "shengxue-skill/CONTRIBUTING.md",
-                "shengxue-skill/DATA_SOURCES.md",
-                "shengxue-skill/LICENSE",
-                "shengxue-skill/README.md",
-                "shengxue-skill/ROADMAP.md",
-                "shengxue-skill/SECURITY.md",
-                "shengxue-skill/SKILL.md",
-                "shengxue-skill/pyproject.toml",
-                "shengxue-skill/release-policy.json",
-                "shengxue-skill/tests/fixtures/synthetic/rows.csv",
+                "pathway-atlas/CHANGELOG.md",
+                "pathway-atlas/CODE_OF_CONDUCT.md",
+                "pathway-atlas/CONTRIBUTING.md",
+                "pathway-atlas/DATA_SOURCES.md",
+                "pathway-atlas/LICENSE",
+                "pathway-atlas/README.md",
+                "pathway-atlas/ROADMAP.md",
+                "pathway-atlas/SECURITY.md",
+                "pathway-atlas/SKILL.md",
+                "pathway-atlas/pyproject.toml",
+                "pathway-atlas/release-policy.json",
+                "pathway-atlas/tests/fixtures/synthetic/rows.csv",
             }
             self.assertTrue(required <= set(names))
             self.assertIn(
-                "shengxue-skill/tests/fixtures/synthetic/rows.csv",
+                "pathway-atlas/tests/fixtures/synthetic/rows.csv",
                 names,
             )
+            legacy_root = "shengxue" + "-skill/"
+            self.assertFalse(any(name.startswith(legacy_root) for name in names))
             for info in archive.infolist():
                 self.assertEqual(info.date_time, (1980, 1, 1, 0, 0, 0))
                 self.assertEqual(info.compress_type, zipfile.ZIP_DEFLATED)
@@ -143,10 +145,10 @@ class BuildReleaseTest(unittest.TestCase):
 
         with zipfile.ZipFile(artifact.archive) as archive:
             self.assertEqual(
-                archive.read("shengxue-skill/README.md"),
+                archive.read("pathway-atlas/README.md"),
                 b"# Synthetic README.md\n",
             )
-            self.assertNotIn("shengxue-skill/untracked-secret.txt", archive.namelist())
+            self.assertNotIn("pathway-atlas/untracked-secret.txt", archive.namelist())
 
     def test_worktree_and_index_mismatch_fails_before_publication(self) -> None:
         (self.root / "README.md").write_text("uncommitted replacement\n", encoding="utf-8")
@@ -304,7 +306,7 @@ class BuildReleaseTest(unittest.TestCase):
         artifacts = self._build("dist-binary")
         with zipfile.ZipFile(artifacts.archive) as archive:
             self.assertEqual(
-                archive.read("shengxue-skill/tests/fixtures/synthetic/sample.png"),
+                archive.read("pathway-atlas/tests/fixtures/synthetic/sample.png"),
                 binary,
             )
 
@@ -327,7 +329,7 @@ class BuildReleaseTest(unittest.TestCase):
         ):
             artifact = self._build("dist")
 
-        self.assertIn("shengxue-skill/SKILL.md", self._zip_names(artifact.archive))
+        self.assertIn("pathway-atlas/SKILL.md", self._zip_names(artifact.archive))
 
     def test_replacement_ref_is_rejected_and_private_blob_is_never_packaged(self) -> None:
         private = b"token=ghp_builder_private_payload_1234567890\x00tail"
@@ -483,7 +485,7 @@ class BuildReleaseTest(unittest.TestCase):
                 output = self.root / "dist"
                 if output.exists():
                     names = {path.name for path in output.iterdir()}
-                    if names != {"shengxue-skill-0.1.0.zip", "SHA256SUMS"}:
+                    if names != {"pathway-atlas-0.1.0.zip", "SHA256SUMS"}:
                         half_visible = True
                         break
                 threading.Event().wait(0.005)
@@ -493,7 +495,7 @@ class BuildReleaseTest(unittest.TestCase):
         self.assertFalse(half_visible)
         self.assertEqual(
             {path.name for path in (self.root / "dist").iterdir()},
-            {"shengxue-skill-0.1.0.zip", "SHA256SUMS"},
+            {"pathway-atlas-0.1.0.zip", "SHA256SUMS"},
         )
 
     def test_atomic_directory_dispatch_uses_each_supported_platform_primitive(self) -> None:

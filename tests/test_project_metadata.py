@@ -132,10 +132,11 @@ class ProjectMetadataTest(unittest.TestCase):
             if identifier is not None:
                 identifiers.append((path.name, identifier))
         self.assertGreaterEqual(len(identifiers), 6)
+        old_slug = "shengxue" + "-skill"
         for name, identifier in identifiers:
             with self.subTest(schema=name):
                 self.assertIn("pathway-atlas", identifier)
-                self.assertNotIn("shengxue-skill", identifier)
+                self.assertNotIn(old_slug, identifier)
 
     def test_sensitive_runtime_paths_are_ignored_by_git(self):
         candidates = (

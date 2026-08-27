@@ -560,7 +560,7 @@ def _release_workflow_errors(document: dict[str, Any]) -> list[str]:
         "publish": {
             "GH_TOKEN": "${{ github.token }}",
             "RELEASE_TAG": "${{ github.ref_name }}",
-            "ARCHIVE_PATH": "dist/shengxue-skill-${{ steps.metadata.outputs.version }}.zip",
+            "ARCHIVE_PATH": "dist/pathway-atlas-${{ steps.metadata.outputs.version }}.zip",
             "CHECKSUM_PATH": "dist/SHA256SUMS",
             "NOTES_PATH": "dist/release-notes.md",
         },

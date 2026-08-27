@@ -73,7 +73,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.ref_name }}
-          ARCHIVE_PATH: dist/shengxue-skill-${{ steps.metadata.outputs.version }}.zip
+          ARCHIVE_PATH: dist/pathway-atlas-${{ steps.metadata.outputs.version }}.zip
           CHECKSUM_PATH: dist/SHA256SUMS
           NOTES_PATH: dist/release-notes.md
         run: gh release create "$RELEASE_TAG" "$ARCHIVE_PATH" "$CHECKSUM_PATH" --verify-tag --title "$RELEASE_TAG" --notes-file "$NOTES_PATH"

@@ -230,7 +230,7 @@ class ReleaseComponentTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             (root / "pyproject.toml").write_text(
-                '[project]\nname="shengxue-skill"\nversion="0.1.0"\nrequires-python=">=3.10"\n',
+                '[project]\nname="pathway-atlas"\nversion="0.1.0"\nrequires-python=">=3.10"\n',
                 encoding="utf-8",
             )
             self.assertTrue(check_project_version(root, "0.1.0", "v0.1.0").ok)
