@@ -3,7 +3,7 @@ name: pathway-atlas
 description: Use when a user needs evidence-backed Chinese gaokao admission planning, school recommendations, rank interpretation, or diversified admission pathways.
 ---
 
-# 多元星图 · PathwayAtlas
+# 多元星途 · PathwayAtlas
 
 按以下六个阶段完成一次匿名、证据优先的升学规划；每阶段达到所述交接条件后再继续。
 

@@ -1,12 +1,12 @@
-> **复制给 AI：**「请调用 `pathway-atlas`（多元星图）Skill。先询问我的省份、选科、分数或位次和升学意向；不要索取姓名、电话、身份证、住址或本地文件路径。请基于可验证的公开来源，先验证证据再计算，为我分析普通批冲稳保及适合的多元升学路径，并在每项建议旁标注来源、证据状态、覆盖范围和不确定性。」
+> **复制给 AI：**「请使用你当前环境的 Skill 安装能力，从 GitHub `https://github.com/sarry12227/pathway-atlas` 安装 `pathway-atlas`（多元星途）；如果 GitHub 无法访问，请改用 Gitee 镜像 `https://gitee.com/sarry1/pathway-atlas`。若环境没有专用安装工具，请将仓库克隆或下载到当前 Agent 的 Skills 目录，确认根目录存在 `SKILL.md` 且其中 `name` 为 `pathway-atlas`，然后重新加载并调用它。调用后先询问我的省份、选科、分数或位次和升学意向；不要索取姓名、电话、身份证、住址或本地文件路径。请基于可验证的公开来源，先验证证据再计算，为我分析普通批冲稳保及适合的多元升学路径，并在每项建议旁标注来源、证据状态、覆盖范围和不确定性。」
 
-<p align="center"><img src="assets/brand/pathway-atlas-horizontal.svg" alt="多元星图 PathwayAtlas" width="100%"></p>
+<p align="center"><img src="assets/brand/pathway-atlas-horizontal.svg" alt="多元星途 PathwayAtlas" width="100%"></p>
 
-# 多元星图 · PathwayAtlas
+# 多元星途 · PathwayAtlas
 
-**不只一条升学路，每条路都有据可循。**
+**点亮多种升学路径，走出个性升学星途。**
 
-多元星图（PathwayAtlas）是面向全国新高考省份的开源 AI 升学规划 Skill：实时检索并交叉验证公开数据，通过本地确定性管线生成可追溯的普通批冲稳保与多元升学方案。
+多元星途（PathwayAtlas）是面向全国新高考省份的开源 AI 升学规划 Skill：实时检索并交叉验证公开数据，通过本地确定性管线生成可追溯的普通批冲稳保与多元升学方案。
 
 当前版本是 **v0.1.0 公开预览**。它提供可审计的工作流和合成回放，不是生产就绪服务，也不随仓库分发全国实时录取数据库。
 
@@ -14,7 +14,7 @@
 
 升学信息散落在省级考试机构、高校招生网站、网页附件、图片表格和公开转载中。只让 Agent 搜索，数字容易缺少出处、混入重复转载或在不同会话中得到不同计算；只运行本地脚本，又无法获得当年的公开信息。
 
-多元星图把两者分开：
+多元星途把两者分开：
 
 - **Agent 实时检索**：Agent 宿主负责搜索、打开网页、读取公开附件和必要的视觉识别，逐项记录候选来源并交叉验证。
 - **本地确定性管线**：证据先归一化和校验，再由 Python 执行位次、选科过滤、普通批和多元路径计算，最后生成报告。计算阶段不访问网络，也不会让 Agent 凭记忆补数字。
@@ -75,6 +75,21 @@ python -m pip install -e ".[all,test]"
 ### 作为 Agent Skill 安装
 
 把整个仓库目录放入宿主扫描的 Skill 根目录，使最终结构为 `<skills-root>/pathway-atlas/SKILL.md`。也可以在宿主明确支持时使用指向本仓库的目录符号链接。
+
+支持 `skills` CLI 的宿主可以直接从 GitHub 安装：
+
+```bash
+npx skills add sarry12227/pathway-atlas --skill pathway-atlas
+```
+
+没有专用安装器时，将 GitHub 主源克隆到当前宿主的 Skill 根目录；GitHub 访问受限时改用公开 Gitee 镜像：
+
+```bash
+git clone https://github.com/sarry12227/pathway-atlas.git <skills-root>/pathway-atlas
+git clone https://gitee.com/sarry1/pathway-atlas.git <skills-root>/pathway-atlas
+```
+
+安装后检查 `<skills-root>/pathway-atlas/SKILL.md` 的 frontmatter `name` 为 `pathway-atlas`，再重新加载宿主。两条 `git clone` 命令是主源与回退源，不要在同一目标目录重复执行。
 
 | 宿主 | 推荐位置或注册方式 | 本仓库适配 | 权威说明 |
 | --- | --- | --- | --- |

@@ -1,6 +1,6 @@
 # 贡献指南
 
-感谢你帮助改进多元星图（PathwayAtlas）。请先阅读 [README](README.md)、
+感谢你帮助改进多元星途（PathwayAtlas）。请先阅读 [README](README.md)、
 [信源规范](references/source-policy.md) 和 [数据来源政策](DATA_SOURCES.md)。本项目接受
 代码、文档、虚构回放、来源目录和省份规则改进；默认不接受真实数据快照。
 

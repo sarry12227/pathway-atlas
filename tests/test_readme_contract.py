@@ -19,7 +19,7 @@ PYPROJECT = ROOT / "pyproject.toml"
 SCRIPTS = ROOT / "scripts"
 FIXTURES = ROOT / "tests" / "fixtures"
 INTRODUCTION = (
-    "多元星图（PathwayAtlas）是面向全国新高考省份的开源 AI 升学规划 Skill："
+    "多元星途（PathwayAtlas）是面向全国新高考省份的开源 AI 升学规划 Skill："
     "实时检索并交叉验证公开数据，"
     "通过本地确定性管线生成可追溯的普通批冲稳保与多元升学方案。"
 )
