@@ -94,6 +94,22 @@ class ReadmeContractTest(unittest.TestCase):
         paragraphs = [part.strip() for part in self.text.split("\n\n") if part.strip()]
         self.assertIn(INTRODUCTION, paragraphs)
 
+    def test_first_line_install_prompt_invokes_the_full_intake_and_decision_flow(self):
+        first_line = self.text.splitlines()[0]
+        for phrase in (
+            "复制给 AI",
+            "github.com/sarry12227/pathway-atlas",
+            "gitee.com/sarry1/pathway-atlas",
+            "不超过 20 题",
+            "自动回填",
+            "确认匿名画像",
+            "乐观、中性、保守位次",
+            "普通批冲稳保",
+            "主攻、重点准备、备选、观察或不建议",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, first_line)
+
     def test_readme_explains_realtime_and_deterministic_halves(self):
         for phrase in (
             "Agent 实时检索",

@@ -257,6 +257,52 @@ class SkillContractTest(unittest.TestCase):
         )
         self.assertRegex(intake, r"(?:估算|参考)位次[^。\n]*(?:冲稳保|院校池)")
 
+    def test_every_annual_data_family_uses_the_same_four_year_fallback(self):
+        query = stage_sections(self.body)["查询计划"]
+        for phrase in (
+            "Y → Y-1 → Y-2 → Y-3",
+            "每种数据类型独立",
+            "一分一段表",
+            "投档位次",
+            "招生计划",
+            "招生章程",
+            "学费",
+            "选科要求",
+            "多元路径政策",
+            "服务期",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, query)
+        self.assertRegex(
+            query,
+            r"最新年度[^。\n]*(?:没有|缺失|未公布)[^。\n]*"
+            r"(?:逐年|依次)[^。\n]*(?:最多|向前)[^。\n]*三年",
+        )
+        self.assertRegex(
+            query,
+            r"当前年度[^。\n]*第三方[^。\n]*上一年度[^。\n]*官方[^。\n]*同时保留",
+        )
+
+    def test_final_answer_must_decide_both_schools_and_pathways(self):
+        evidence = stage_sections(self.body)["证据归一化"]
+        output = stage_sections(self.body)["报告输出"]
+        self.assertRegex(
+            evidence,
+            r"官方[^。\n]*(?:缺失|不可得|未找到)[^。\n]*"
+            r"(?:继续|仍)[^。\n]*(?:B|C)[^。\n]*(?:corroborated|reference)",
+        )
+        for phrase in (
+            "普通批院校范围",
+            "代表性院校",
+            "主攻、重点准备、备选、观察或不建议",
+            "已满足、部分满足、暂未满足、待核验或不适用",
+            "不能只复述政策",
+            "本结果由 AI 基于公开数据整理",
+            "不构成录取承诺或正式升学建议",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, output)
+
     def test_preflight_uses_host_mapping_and_runtime_tiers(self):
         preflight = stage_sections(self.body)["能力预检"]
         for tier in ("full", "standard", "offline"):

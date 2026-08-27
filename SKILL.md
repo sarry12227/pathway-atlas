@@ -11,6 +11,8 @@ description: Use when a student or parent asks “这个分数或位次能上什
 
 首次回复只能自动回填已识别答案并展示以下完整问卷。把用户首条消息中的已知答案自动回填到对应题目，请用户核对或修改；不得重复询问用户已提供的内容。每题都必须有明确答案，也可以回答“不知道、不确定、不便回答”。
 
+固定交互顺序是：自动预填已知答案 → 补齐 20 题以内匿名问卷 → 用户确认画像 → 预检 → 检索 → 验证 → 位次定位与推荐 → 报告。问卷答案由 Agent 在内部转换为画像；不得要求用户创建或理解 profile、province、evidence 等 JSON 文件。
+
 1. **性别** 选项：男 / 女 / 不便回答。
 2. **所在高中与报考地区** 填写高考报名省份、当前城市、所在高中完整校名。
 3. **年级与预计高考年份** 选项：高一 / 高二 / 高三；同时确认预计高考年份。
@@ -50,6 +52,8 @@ description: Use when a student or parent asks “这个分数或位次能上什
 
 用 `python scripts/query_plan.py` 构建并读取确定性计划，再按[检索流程](references/retrieval-playbook.md)逐任务执行。模式来自已验证的 `ProvinceConfig.mode`；每个 `QueryTask` 保持规范化 `subject_group`、`required_extraction_fields`、`availability`、`freshness` 与有界 `max_candidates`，不得另设固定 Top-N 候选数。
 
+所有年度数据统一按 `Y → Y-1 → Y-2 → Y-3` 查询。最新年度没有、缺失或未公布时依次逐年回查，最多向前查三年；每种数据类型独立选择最近可比年份，不能因一项当年数据缺失就停止整份规划。此规则至少覆盖一分一段表、投档位次、招生计划、招生章程、学费、选科要求、多元路径政策、服务期与违约条款。当前年度只有第三方资料而上一年度有官方资料时必须同时保留：前者标当年参考，后者标历史基线；制度或口径变化导致不可比时停止数值聚合并说明原因。
+
 offline 仅消费已认证的用户提供本地材料，不声称当前或实时验证；没有静默联网回退。
 
 完成：每个 task 都有计划规定的终止状态，或显式 unavailable 与 degradation。
@@ -57,6 +61,8 @@ offline 仅消费已认证的用户提供本地材料，不声称当前或实时
 ## 证据归一化
 
 HTML、XLSX、PDF、OCR、QR 分别进入匹配 adapter；下载只走 secure downloader。每项事实保存 year、method、locator、source provenance，并按[信源规范](references/source-policy.md)完成分级、独立性、去重、采纳与冲突处理；冲突不得取平均或挑选方便值。
+
+官方来源缺失、不可得或未找到时仍继续检索可追溯的 B/C 来源；达到信源规范门槛的事实可以 `corroborated` 或 `reference` 身份进入判断，必须醒目标注来源等级、年份、覆盖范围和不确定性。未达到门槛的单源第三方材料只能作为发现线索或“观察”理由，不能伪装成已确认的数字、资格或当年政策。
 
 普通批投档行只经 `scripts.adapters.admission_bridge` 组合 exact adapter row、对应 `QueryTask`、验证器返回的 `ValidatedAdmissionRow` 与 extraction coverage；整行绑定委托公共 `admission_row_hash`，并单独保留 `coverage_status`。
 
@@ -76,6 +82,8 @@ HTML、XLSX、PDF、OCR、QR 分别进入匹配 adapter；下载只走 secure do
 
 用共享证据入口 `python scripts/generate_report.py` 生成 Markdown；可选能力存在时用 `python scripts/docx_export.py` 生成 DOCX。DOCX 能力缺失时保留 Markdown 并返回退出码 `3`，不安装依赖或伪造文件。
 
-报告逐项披露 `reference`、`inferred`、`partial`、`conflict`、`missing`、`masked`，以及 coverage、method、bounds。输出保持匿名、确定性、path-neutral，并以 exclusive/原子发布避免覆盖；不承诺录取或投资结果。用户明确授权之前，不发布、上传或 push 任何产物。
+最终答复必须直接回答两个核心问题。普通批部分给出乐观、中性、保守位次及置信度，并按冲、稳、保、观察列出普通批院校范围和代表性院校；完全没有可校准依据时才省略数字，并明确最少需要补充什么。多元路径部分对每条适用路径必须选择“主攻、重点准备、备选、观察或不建议”之一，同时选择“已满足、部分满足、暂未满足、待核验或不适用”之一，并给出差距、时间线、当下动作和约束；不能只复述政策、只说“可以关注”或用“视情况而定”代替判断。
+
+报告逐项披露 `reference`、`inferred`、`partial`、`conflict`、`missing`、`masked`，以及 coverage、method、bounds。输出保持匿名、确定性、path-neutral，并以 exclusive/原子发布避免覆盖；不承诺录取或投资结果。报告首尾写明：“本结果由 AI 基于公开数据整理，仅供升学规划参考，不构成录取承诺或正式升学建议。政策、招生计划和录取结果请以当年主管部门及招生高校最终公布内容为准。”用户明确授权之前，不发布、上传或 push 任何产物。
 
 完成：已生成的文件通过合规检查并仅引用 snapshot，所有不可用项和降级均可见。

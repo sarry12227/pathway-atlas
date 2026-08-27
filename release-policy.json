@@ -139,7 +139,7 @@
     {
       "path": "tests/test_docx_semantic_parity.py",
       "kinds": ["absolute_local_path", "phone", "pricing_or_sales"],
-      "file_sha256": "a45bb23b1a2866757b3344105a6e78b2228ad743462abd3346153e13408c6aa4",
+      "file_sha256": "a2b694057ae061d6a9c0bb78c3ca0b62d93bf4f7db9bfe3a944b94a11823b3ef",
       "reason": "synthetic negative fixture"
     },
     {
@@ -175,7 +175,7 @@
     {
       "path": "tests/test_public_package_boundary.py",
       "kinds": ["absolute_local_path", "pricing_or_sales", "private_system_reference"],
-      "file_sha256": "c36f1b10f110b616b2b0c6d38adbd19f0ce939e19433add9c69ac7e360e2b68e",
+      "file_sha256": "f4ceb1c7edb3de5e26411a9ad98f50f803e11465ad0c70f68dbdcc35e8247118",
       "reason": "synthetic negative fixture"
     },
     {
