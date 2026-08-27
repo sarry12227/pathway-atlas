@@ -609,6 +609,16 @@ class ComplianceScanTest(unittest.TestCase):
             {(entry.path, entry.sha256, entry.classification) for entry in policy.binary_release_manifest},
             {
                 (
+                    "assets/brand/pathway-atlas-horizontal.png",
+                    "acd47314ced46aadf05e782d70d9bd87f781b82636e46cb288c0231e732dbcc8",
+                    "rights-reviewed",
+                ),
+                (
+                    "assets/brand/pathway-atlas-mark.png",
+                    "39dbf6bb3fee69ff0cb4a7962b513a950f638e653cfb17dc1fd60e22e10f1777",
+                    "rights-reviewed",
+                ),
+                (
                     "tests/fixtures/replay/pdf/text-and-image.pdf",
                     "870bd0bd74266cbb5c1900e404bda42f6f61581076496f296dd82decd78f000d",
                     "synthetic",

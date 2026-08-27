@@ -127,7 +127,7 @@
     {
       "path": "tests/test_compliance_scan.py",
       "kinds": ["absolute_local_path", "identity_number", "phone", "pricing_or_sales", "private_system_reference", "secret", "student_pii"],
-      "file_sha256": "f59d4156022d1f83e3b36898c599a68baaf5b139b0c24e46ed4a26ed385eaa55",
+      "file_sha256": "655039755dafcf353284d54bdab8eced46ca4c0ca096c5d02f16705911854c9e",
       "reason": "synthetic negative fixture"
     },
     {
