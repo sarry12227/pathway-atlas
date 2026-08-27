@@ -32,13 +32,13 @@ Logo 在已选第 4 版的基础上渐进升级。保留五条路径、北大红
 
 ## 3. README 首屏
 
-README 第 1 行必须是以下可直接复制给 AI 的提示词，位于标题、Logo、徽章和项目介绍之前。提示词必须形成“安装 SkillHub → 安装 Skill → 重新加载 → 调用 Skill”的完整闭环，而不是假设用户已经安装：
+README 第 1 行必须是以下可直接复制给 AI 的提示词，位于标题、Logo、徽章和项目介绍之前。提示词模仿“一段话交给 AI 即可执行”的表达方式，但安装源是项目自己的 GitHub 与 Gitee 仓库，不依赖或上架任何第三方 Skill 商店：
 
-> **复制给 AI：**「请先阅读 https://skillhub.cn/install/skillhub.md：如果尚未安装 SkillHub，请按文档完成安装；然后使用 SkillHub 搜索并将 `pathway-atlas`（多元星途）安装到你当前 Agent 的 Skills 目录，确认安装成功并重新加载。安装后请调用 `pathway-atlas`：先询问我的省份、选科、分数或位次和升学意向；不要索取姓名、电话、身份证、住址或本地文件路径。请基于可验证的公开来源，先验证证据再计算，为我分析普通批冲稳保及适合的多元升学路径，并在每项建议旁标注来源、证据状态、覆盖范围和不确定性。」
+> **复制给 AI：**「请使用你当前环境的 Skill 安装能力，从 GitHub `https://github.com/sarry12227/pathway-atlas` 安装 `pathway-atlas`（多元星途）；如果 GitHub 无法访问，请改用 Gitee 镜像 `https://gitee.com/sarry1/pathway-atlas`。若环境没有专用安装工具，请将仓库克隆或下载到当前 Agent 的 Skills 目录，确认根目录存在 `SKILL.md` 且其中 `name` 为 `pathway-atlas`，然后重新加载并调用它。调用后先询问我的省份、选科、分数或位次和升学意向；不要索取姓名、电话、身份证、住址或本地文件路径。请基于可验证的公开来源，先验证证据再计算，为我分析普通批冲稳保及适合的多元升学路径，并在每项建议旁标注来源、证据状态、覆盖范围和不确定性。」
 
 README 随后展示横版 Logo、`多元星途 · PathwayAtlas` 标题、口号“点亮多种升学路径，走出个性升学星途。”与当前公开预览说明。安装示例统一使用 `pathway-atlas` 目录和 Skill 标识。
 
-README 的安装说明应补充可检查的命令示例：先检查 `skillhub --version`，再运行 `skillhub search pathway-atlas`，最后以 `skillhub install pathway-atlas --dir <当前 Agent 的 Skills 目录>` 安装。`--dir` 不得省略，因为 SkillHub 默认的 `./skills/` 不一定会被 Agent 识别。若搜索结果不能唯一确认发布者和版本，AI 必须先向用户展示候选与风险，不得安装名称相似的替代 Skill。
+README 的安装说明应补充 GitHub 主源和 Gitee 镜像源的可检查命令示例，并说明不同 Agent 的 Skills 目录不同。安装完成必须核验目标目录、`SKILL.md` frontmatter、当前提交或版本，再重新加载 Agent；不得仅下载文件后就宣称 Skill 已可调用。GitHub 需要登录或访问受限时，AI 应自动切换到公开 Gitee 镜像，而不是要求非技术用户自行排查。
 
 ## 4. 迁移策略
 
@@ -50,8 +50,7 @@ README 的安装说明应补充可检查的命令示例：先检查 `skillhub --
 4. 更新 Schema `$id`、CI/release workflow、release checker、release policy 与对应测试。
 5. 更新 GitHub/Gitee 当前仓库 URL、Issue 模板链接、DATA_SOURCES 与安全入口。
 6. 将 GitHub 和 Gitee 仓库重命名为 `pathway-atlas`，保持默认分支为 `main`；更新本地 remotes。
-7. 将 `pathway-atlas` 发布或同步到 SkillHub，确认搜索结果、发布者身份、安装命令和安装后 Skill 标识均与 README 一致。
-8. GitHub 保持当前可见性不变；Gitee 保持公开。改变 GitHub 可见性不属于本次授权。
+7. GitHub 保持当前可见性不变；Gitee 保持公开。改变 GitHub 可见性不属于本次授权。
 
 不采用以下方案：
 
@@ -101,8 +100,8 @@ SVG 必须是有效 XML、无外部资源、无脚本、无嵌入路径或个人
 2. 在 GitHub 将仓库重命名为 `pathway-atlas`，更新 description、topics、README/social preview；确认默认分支仍为 `main`。
 3. 将同一内容树快进同步到 Gitee `main`，再将 Gitee 仓库重命名为 `pathway-atlas`，更新简介和 Logo；确认公开访问与默认分支。
 4. 更新本地 `origin`、`gitee` URL，核对两个远端默认分支的 tree hash 一致。
-5. 按 SkillHub 的发布流程提交 `pathway-atlas`，必要时由用户完成平台要求的登录、实名或授权；在独立临时 Skills 目录中执行搜索和安装，确认安装包内容来自已验证发布树。
-6. 分别以未登录访问检查仓库首页、README 第一行提示词、Logo 和默认分支，并复核 SkillHub 的公开详情页。
+5. 在两个独立临时 Skills 目录中分别按 README 提示词从 GitHub 和 Gitee 安装，核验根目录、`SKILL.md` 标识和内容树；GitHub 因权限不可匿名访问时如实记录，并确认 Gitee 公共回退可用。
+6. 分别以默认入口检查仓库首页、README 第一行提示词、Logo 和默认分支。
 
 若任一平台重命名失败，不删除旧仓库、不强推、不创建内容不同的替代主分支。保持已验证提交可恢复，并在继续前报告平台状态。
 
@@ -110,8 +109,8 @@ SVG 必须是有效 XML、无外部资源、无脚本、无嵌入路径或个人
 
 先更新判别性测试，再修改生产与文档：
 
-- README 第 1 行必须精确包含 SkillHub 安装说明、可复制调用提示词、`pathway-atlas` 和“多元星途”。
-- 在临时 Skills 目录中按 README 命令安装后，Agent 必须能发现 `pathway-atlas`；不得把 SkillHub 默认 `./skills/` 当成已成功安装。
+- README 第 1 行必须精确包含 GitHub 主源、Gitee 镜像源、安装与重新加载步骤、可复制调用提示词、`pathway-atlas` 和“多元星途”。
+- 在临时 Skills 目录中按 README 提示词安装后，Agent 必须能发现 `pathway-atlas`；安装目录错误、缺少 `SKILL.md` 或 frontmatter 名称不符都必须失败。
 - 当前用户可见表面不得继续展示“多元星图”；历史品牌设计提交不重写。
 - `SKILL.md`、`pyproject.toml`、release builder/checker/workflow 必须使用新标识。
 - 当前公共表面不得出现旧标识；历史计划目录使用显式排除清单。
@@ -129,6 +128,6 @@ SVG 必须是有效 XML、无外部资源、无脚本、无嵌入路径或个人
 2. README 第一行提示词可直接复制，且“多元星途”Logo 与口号在默认分支首屏显示。
 3. GitHub 默认 `main` 和 Gitee 默认 `main` 展示同一内容树。
 4. GitHub/Gitee 新仓库 URL 可访问，本地 remotes 指向新 URL。
-5. SkillHub 能搜索并安装唯一的 `pathway-atlas`，安装后 Skill 标识与 README 调用指令一致。
+5. GitHub 主源和 Gitee 镜像源均能按 README 提示词安装 `pathway-atlas`；GitHub 权限受限时，Gitee 公共回退仍可完成安装与调用。
 6. 受影响测试、一次全量测试、compliance 与 release gate 均给出新鲜证据。
 7. 未修改用户拥有的无关文件，未改变 GitHub 可见性。
