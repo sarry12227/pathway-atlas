@@ -174,12 +174,48 @@ class RecommendationProfile(_Serializable):
     target_major_categories: tuple[str, ...] = ()
     target_cities: tuple[str, ...] = ()
     target_schools: tuple[str, ...] = ()
+    rank_basis: str = "official"
+    optimistic_rank: int | None = None
+    conservative_rank: int | None = None
+    rank_confidence: str = "official"
+    rank_source_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.rank, int) or isinstance(self.rank, bool):
             raise TypeError("rank must be a positive integer")
         if self.rank < 1:
             raise ValueError("rank must be a positive integer")
+        optimistic = self.rank if self.optimistic_rank is None else self.optimistic_rank
+        conservative = (
+            self.rank if self.conservative_rank is None else self.conservative_rank
+        )
+        for name, value in (
+            ("optimistic_rank", optimistic),
+            ("conservative_rank", conservative),
+        ):
+            if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+                raise TypeError(f"{name} must be a positive integer")
+        if not optimistic <= self.rank <= conservative:
+            raise ValueError("rank scenario bounds must contain rank")
+        object.__setattr__(self, "optimistic_rank", optimistic)
+        object.__setattr__(self, "conservative_rank", conservative)
+        if self.rank_basis not in {"official", "inferred"}:
+            raise ValueError("rank_basis must be official or inferred")
+        allowed_confidence = (
+            {"official", "high"}
+            if self.rank_basis == "official"
+            else {"high", "medium", "low"}
+        )
+        if self.rank_confidence not in allowed_confidence:
+            raise ValueError("rank_confidence does not match rank_basis")
+        sources = self._normalize_collection(self.rank_source_ids, "rank_source_ids")
+        if len(sources) != len(set(sources)) or any(
+            _SAFE_ID.fullmatch(source) is None for source in sources
+        ):
+            raise ValueError("rank_source_ids must contain unique safe IDs")
+        if self.rank_basis == "inferred" and not sources:
+            raise ValueError("inferred ranks require source IDs")
+        object.__setattr__(self, "rank_source_ids", tuple(sorted(sources)))
         for name in ("target_province", "subject_group"):
             value = getattr(self, name)
             if not isinstance(value, str):
@@ -310,6 +346,10 @@ class RecommendationItem(_Serializable):
     data_year: int
     source_ids: tuple[str, ...]
     evidence_status: EvidenceStatus
+    supporting_years: tuple[int, ...] = ()
+    required_year_majority: int = 1
+    scenario_reach_counts: tuple[int, int, int] = (0, 0, 0)
+    scenario_confidence: str = "official"
 
 
 @dataclass(frozen=True)
@@ -326,15 +366,52 @@ class RecommendationResult(_Serializable):
     coverage_status: EvidenceStatus = EvidenceStatus.MISSING
     empty_reason: str | None = None
     warnings: tuple[str, ...] = ()
+    rank_basis: str = "official"
+    rank_bounds: tuple[int, int, int] | None = None
+    rank_confidence: str = "official"
+    rank_source_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.ordinary_batch_policy, OrdinaryBatchPolicy):
             raise TypeError("ordinary_batch_policy must be an OrdinaryBatchPolicy")
+        if self.rank_basis not in {"official", "inferred"}:
+            raise ValueError("rank_basis must be official or inferred")
+        allowed_confidence = (
+            {"official", "high"}
+            if self.rank_basis == "official"
+            else {"high", "medium", "low"}
+        )
+        if self.rank_confidence not in allowed_confidence:
+            raise ValueError("rank_confidence does not match rank_basis")
+        if self.rank_bounds is not None:
+            if (
+                not isinstance(self.rank_bounds, tuple)
+                or len(self.rank_bounds) != 3
+                or any(
+                    not isinstance(rank, int)
+                    or isinstance(rank, bool)
+                    or rank < 1
+                    for rank in self.rank_bounds
+                )
+                or not self.rank_bounds[0] <= self.rank_bounds[1] <= self.rank_bounds[2]
+            ):
+                raise ValueError("rank_bounds must be three ordered positive integers")
+        sources = tuple(self.rank_source_ids)
+        if len(sources) != len(set(sources)) or any(
+            not isinstance(source, str) or _SAFE_ID.fullmatch(source) is None
+            for source in sources
+        ):
+            raise ValueError("rank_source_ids must contain unique safe IDs")
+        if self.rank_basis == "inferred" and not sources:
+            raise ValueError("inferred ranks require source IDs")
         object.__setattr__(
             self,
             "ordinary_batch_policy",
             OrdinaryBatchPolicy(**self.ordinary_batch_policy.to_dict()),
         )
+        object.__setattr__(self, "items", tuple(self.items))
+        object.__setattr__(self, "warnings", tuple(self.warnings))
+        object.__setattr__(self, "rank_source_ids", tuple(sorted(sources)))
 
 
 __all__ = [
