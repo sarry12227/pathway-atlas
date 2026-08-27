@@ -193,7 +193,7 @@ jobs:
           key: source-health-state-${{ github.run_id }}
       - name: Create or update the single manual-review issue when gated
         if: ${{ steps.state.outputs.review == 'true' }}
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         with:
           script: |
             const fs = require("fs");
