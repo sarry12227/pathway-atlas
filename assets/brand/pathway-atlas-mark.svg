@@ -1,39 +1,29 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
-  <title id="title">多元星图品牌标志</title>
-  <desc id="desc">五条证据路径围绕学生目标星汇聚成一幅开放的升学星图</desc>
+  <title id="title">多元星途品牌标志</title>
+  <desc id="desc">五条升学路径从不同起点出发，经过证据节点，走向同一颗引导星</desc>
   <defs>
-    <path id="route-star" d="M0-22 6-7 22 0 6 7 0 22-6 7-22 0-6-7Z"/>
-    <path id="route-loop" d="M256 256C202 204 208 112 256 62c48 50 54 142 0 194Z"/>
+    <path id="star-shape" d="M0-36 10-11 36 0 10 11 0 36-10 11-36 0-10-11Z"/>
   </defs>
 
-  <!-- 五条闭合轨道：选择彼此独立，又围绕同一学生目标。 -->
-  <g fill="none" stroke-width="17" stroke-linecap="round" stroke-linejoin="round">
-    <use href="#route-loop" stroke="#14213D"/>
-    <use href="#route-loop" stroke="#94070A" transform="rotate(72 256 256)"/>
-    <use href="#route-loop" stroke="#94070A" transform="rotate(144 256 256)"/>
-    <use href="#route-loop" stroke="#14213D" transform="rotate(216 256 256)"/>
-    <use href="#route-loop" stroke="#94070A" transform="rotate(288 256 256)"/>
+  <g id="path-origin" fill="none" stroke-width="18" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M70 438C91 374 154 360 198 305C237 256 216 204 250 132" stroke="#94070A"/>
+    <path d="M150 450C150 384 190 350 231 312C270 276 292 220 256 132" stroke="#14213D"/>
+    <path d="M256 456C271 391 220 352 225 302C231 247 258 207 258 132" stroke="#94070A"/>
+    <path d="M362 450C361 382 323 349 282 309C244 272 222 220 260 132" stroke="#14213D"/>
+    <path d="M442 438C420 374 357 360 313 305C273 256 298 204 266 132" stroke="#94070A"/>
   </g>
 
-  <!-- 路径上的金色节点代表可核验的证据锚点。 -->
-  <g fill="#C9A227">
-    <circle cx="229" cy="158" r="7"/>
-    <circle cx="229" cy="158" r="7" transform="rotate(72 256 256)"/>
-    <circle cx="229" cy="158" r="7" transform="rotate(144 256 256)"/>
-    <circle cx="229" cy="158" r="7" transform="rotate(216 256 256)"/>
-    <circle cx="229" cy="158" r="7" transform="rotate(288 256 256)"/>
+  <g id="evidence-node" fill="#FFF8E7" stroke="#C9A227" stroke-width="8">
+    <circle cx="158" cy="358" r="12"/>
+    <circle cx="225" cy="302" r="12"/>
+    <circle cx="258" cy="205" r="12"/>
+    <circle cx="283" cy="309" r="12"/>
+    <circle cx="354" cy="358" r="12"/>
   </g>
 
-  <!-- 外星点是不同升学路径；中心星是学生自己的目标。 -->
-  <g fill="#94070A">
-      <use href="#route-star" transform="rotate(72 256 256) translate(256 62) scale(.72)"/>
-      <use href="#route-star" transform="rotate(144 256 256) translate(256 62) scale(.72)"/>
-      <use href="#route-star" transform="rotate(288 256 256) translate(256 62) scale(.72)"/>
+  <g id="guiding-star">
+    <path d="M258 132V111" fill="none" stroke="#C9A227" stroke-width="8" stroke-linecap="round"/>
+    <use href="#star-shape" fill="#C9A227" transform="translate(258 76)"/>
+    <circle cx="258" cy="76" r="8" fill="#FFF8E7"/>
   </g>
-  <g fill="#14213D">
-      <use href="#route-star" transform="translate(256 62) scale(.72)"/>
-      <use href="#route-star" transform="rotate(216 256 256) translate(256 62) scale(.72)"/>
-  </g>
-  <use href="#route-star" fill="#C9A227" transform="translate(256 258) scale(1.18)"/>
-  <circle cx="256" cy="258" r="5" fill="#FFF8E7"/>
 </svg>

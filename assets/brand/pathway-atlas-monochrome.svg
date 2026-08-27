@@ -1,27 +1,28 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
-  <title id="title">多元星图单色标志</title>
-  <desc id="desc">适合印章、文档页脚和单色打印的品牌标志</desc>
+  <title id="title">多元星途单色标志</title>
+  <desc id="desc">适合印章、文档页脚和单色打印的多路径升学标志</desc>
   <defs>
-    <path id="s" d="M0-22 6-7 22 0 6 7 0 22-6 7-22 0-6-7Z"/>
-    <path id="l" d="M256 256C202 204 208 112 256 62c48 50 54 142 0 194Z"/>
+    <path id="star-shape" d="M0-36 10-11 36 0 10 11 0 36-10 11-36 0-10-11Z"/>
   </defs>
-  <g fill="#14213D">
-    <g fill="none" stroke="#14213D" stroke-width="17" stroke-linecap="round" stroke-linejoin="round">
-      <use href="#l"/><use href="#l" transform="rotate(72 256 256)"/>
-      <use href="#l" transform="rotate(144 256 256)"/>
-      <use href="#l" transform="rotate(216 256 256)"/>
-      <use href="#l" transform="rotate(288 256 256)"/>
-    </g>
-    <circle cx="229" cy="158" r="7"/>
-    <circle cx="229" cy="158" r="7" transform="rotate(72 256 256)"/>
-    <circle cx="229" cy="158" r="7" transform="rotate(144 256 256)"/>
-    <circle cx="229" cy="158" r="7" transform="rotate(216 256 256)"/>
-    <circle cx="229" cy="158" r="7" transform="rotate(288 256 256)"/>
-    <use href="#s" transform="translate(256 62) scale(.72)"/>
-    <use href="#s" transform="rotate(72 256 256) translate(256 62) scale(.72)"/>
-    <use href="#s" transform="rotate(144 256 256) translate(256 62) scale(.72)"/>
-    <use href="#s" transform="rotate(216 256 256) translate(256 62) scale(.72)"/>
-    <use href="#s" transform="rotate(288 256 256) translate(256 62) scale(.72)"/>
-    <use href="#s" transform="translate(256 258) scale(1.18)"/>
+
+  <g id="path-origin" fill="none" stroke="#14213D" stroke-width="18" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M70 438C91 374 154 360 198 305C237 256 216 204 250 132"/>
+    <path d="M150 450C150 384 190 350 231 312C270 276 292 220 256 132"/>
+    <path d="M256 456C271 391 220 352 225 302C231 247 258 207 258 132"/>
+    <path d="M362 450C361 382 323 349 282 309C244 272 222 220 260 132"/>
+    <path d="M442 438C420 374 357 360 313 305C273 256 298 204 266 132"/>
+  </g>
+
+  <g id="evidence-node" fill="#FFFFFF" stroke="#14213D" stroke-width="8">
+    <circle cx="158" cy="358" r="12"/>
+    <circle cx="225" cy="302" r="12"/>
+    <circle cx="258" cy="205" r="12"/>
+    <circle cx="283" cy="309" r="12"/>
+    <circle cx="354" cy="358" r="12"/>
+  </g>
+
+  <g id="guiding-star" fill="#14213D">
+    <path d="M258 132V111" fill="none" stroke="#14213D" stroke-width="8" stroke-linecap="round"/>
+    <use href="#star-shape" transform="translate(258 76)"/>
   </g>
 </svg>
