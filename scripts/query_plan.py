@@ -1266,9 +1266,26 @@ def build_query_plan(
         )
 
     built_in_pathways = frozenset({"强基", "强基计划", "综合评价", "综评", "港澳", "港澳招生"})
-    for pathway in pathways:
-        if pathway in built_in_pathways:
-            continue
+    default_special_pathways = (
+        "国家专项",
+        "地方专项",
+        "高校专项",
+        "公费师范",
+        "优师计划",
+        "定向医学生",
+        "军校",
+        "公安司法消防",
+        "航海航空",
+        "中外合作办学",
+        "艺体类",
+    )
+    requested_special = tuple(
+        pathway for pathway in pathways if pathway not in built_in_pathways
+    )
+    special_pathways = tuple(
+        dict.fromkeys(requested_special + default_special_pathways)
+    )
+    for pathway in special_pathways:
         for task_year in years:
             add_task(
                 "special_pathway",

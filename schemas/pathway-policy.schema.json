@@ -6,8 +6,12 @@
   "x-semantic-validator": {
     "policy": "scripts.path_recommend.PathwayPolicy",
     "evaluate": "scripts.path_recommend.evaluate_pathways",
+    "evidence_bridge": "scripts.adapters.pathway_bridge.bridge_pathway_policies",
     "checks": [
       "source_threshold_by_status",
+      "projection_hash_binding",
+      "province_subject_year_binding",
+      "historical_fallback_disclosure",
       "current_year_validity",
       "critical_constraint_completeness",
       "profile_policy_match",
@@ -36,7 +40,13 @@
     "fees_and_subsidies",
     "policy_source_ids",
     "evidence_status",
-    "calculation_basis"
+    "calculation_basis",
+    "target_year",
+    "data_year",
+    "fallback_distance",
+    "year_basis",
+    "timeline",
+    "preparation_actions"
   ],
   "properties": {
     "policy_id": {
@@ -48,6 +58,17 @@
       "enum": [
         "strong_foundation",
         "comprehensive_evaluation",
+        "national_special",
+        "local_special",
+        "university_special",
+        "public_funded_teacher",
+        "excellent_teacher",
+        "directed_medical",
+        "military",
+        "police_judicial_fire",
+        "maritime_aviation",
+        "sino_foreign",
+        "arts_sports",
         "special_program",
         "public_funded_or_directed",
         "hong_kong_macao",
@@ -161,6 +182,43 @@
       "type": "string",
       "minLength": 1,
       "pattern": "^\\S(?:.*\\S)?$"
+    },
+    "target_year": {
+      "type": ["integer", "null"],
+      "minimum": 2000,
+      "maximum": 2100
+    },
+    "data_year": {
+      "type": ["integer", "null"],
+      "minimum": 2000,
+      "maximum": 2100
+    },
+    "fallback_distance": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 3
+    },
+    "year_basis": {
+      "type": "string",
+      "enum": ["current_year", "historical_fallback", "unverified"]
+    },
+    "timeline": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "pattern": "^\\S(?:.*\\S)?$"
+      }
+    },
+    "preparation_actions": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "pattern": "^\\S(?:.*\\S)?$"
+      }
     }
   }
 }

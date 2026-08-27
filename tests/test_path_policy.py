@@ -973,8 +973,12 @@ class PathwayPolicySchemaTest(unittest.TestCase):
         self.assertEqual(
             set(self.schema["properties"]["pathway_type"]["enum"]),
             {
-                "strong_foundation", "comprehensive_evaluation", "special_program",
-                "public_funded_or_directed", "hong_kong_macao", "other",
+                "strong_foundation", "comprehensive_evaluation", "national_special",
+                "local_special", "university_special", "public_funded_teacher",
+                "excellent_teacher", "directed_medical", "military",
+                "police_judicial_fire", "maritime_aviation", "hong_kong_macao",
+                "sino_foreign", "arts_sports", "other", "special_program",
+                "public_funded_or_directed",
             },
         )
         self.assertEqual(
@@ -1025,6 +1029,8 @@ class PathwayPolicySchemaTest(unittest.TestCase):
             set(semantic["checks"]),
             {
                 "source_threshold_by_status", "current_year_validity",
+                "projection_hash_binding", "province_subject_year_binding",
+                "historical_fallback_disclosure",
                 "critical_constraint_completeness", "profile_policy_match",
                 "promise_language_gate", "source_id_claim_gate",
             },
@@ -1038,7 +1044,7 @@ import importlib
 import json
 from pathlib import Path
 schema = json.loads(Path("schemas/pathway-policy.schema.json").read_text(encoding="utf-8"))
-for key in ("policy", "evaluate"):
+for key in ("policy", "evaluate", "evidence_bridge"):
     module_name, attribute = schema["x-semantic-validator"][key].rsplit(".", 1)
     assert getattr(importlib.import_module(module_name), attribute)
 print("package-locators-ok")

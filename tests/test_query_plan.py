@@ -186,8 +186,33 @@ class QueryPlanTest(unittest.TestCase):
                 "strong_foundation",
                 "comprehensive_evaluation",
                 "hk_macao_admission",
+                "special_pathway",
             },
         )
+
+    def test_default_plan_researches_every_approved_pathway_family_for_four_years(self):
+        plan = self.build_312()
+        expected = {
+            "国家专项",
+            "地方专项",
+            "高校专项",
+            "公费师范",
+            "优师计划",
+            "定向医学生",
+            "军校",
+            "公安司法消防",
+            "航海航空",
+            "中外合作办学",
+            "艺体类",
+        }
+        tasks = [task for task in plan.tasks if task.kind == "special_pathway"]
+        self.assertEqual({task.target_name for task in tasks}, expected)
+        for target in expected:
+            selected = [task for task in tasks if task.target_name == target]
+            self.assertEqual({task.year for task in selected}, {2023, 2024, 2025, 2026})
+            self.assertTrue(
+                all(task.preferred_source_tiers == ("A", "B", "C") for task in selected)
+            )
 
     def test_catalog_backed_plan_has_independent_research_families(self):
         from query_plan import load_province_catalog
@@ -656,16 +681,14 @@ class QueryPlanTest(unittest.TestCase):
         self.assertEqual(ascii_plan.to_dict(), compatibility_plan.to_dict())
 
         ordered = self.build_312(requested_pathways=("Ｂ计划", "A计划"))
-        self.assertEqual(
-            list(
-                dict.fromkeys(
-                    task.target_name
-                    for task in ordered.tasks
-                    if task.kind == "special_pathway"
-                )
-            ),
-            ["A计划", "B计划"],
+        ordered_targets = list(
+            dict.fromkeys(
+                task.target_name
+                for task in ordered.tasks
+                if task.kind == "special_pathway"
+            )
         )
+        self.assertEqual(ordered_targets[:2], ["A计划", "B计划"])
         with self.assertRaises(ValueError):
             self.build_312(requested_pathways=("A计划", "Ａ计划"))
 

@@ -20,16 +20,25 @@ else:
 
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _SUBJECT_MODES = frozenset({"3+1+2", "3+3"})
-_PATHWAY_TYPES = frozenset(
-    {
-        "strong_foundation",
-        "comprehensive_evaluation",
-        "special_program",
-        "public_funded_or_directed",
-        "hong_kong_macao",
-        "other",
-    }
+PATHWAY_TYPES = (
+    "strong_foundation",
+    "comprehensive_evaluation",
+    "national_special",
+    "local_special",
+    "university_special",
+    "public_funded_teacher",
+    "excellent_teacher",
+    "directed_medical",
+    "military",
+    "police_judicial_fire",
+    "maritime_aviation",
+    "hong_kong_macao",
+    "sino_foreign",
+    "arts_sports",
+    "other",
 )
+_LEGACY_PATHWAY_TYPES = frozenset({"special_program", "public_funded_or_directed"})
+_PATHWAY_TYPES = frozenset(PATHWAY_TYPES) | _LEGACY_PATHWAY_TYPES
 _EXACT_EVIDENCE_MINIMUMS = {
     EvidenceStatus.OFFICIAL: 1,
     EvidenceStatus.CORROBORATED: 2,
@@ -409,14 +418,15 @@ def _pathway_type(value: Any, name: str = "pathway_type") -> str:
 class PathwayProfile(_Serializable):
     """Privacy-minimal inputs for deterministic pathway evaluation."""
 
-    rank: int
+    rank: int | None
     province: str
     subject_mode: str
     current_year: int
     eligibility_facts: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "rank", _strict_positive_int(self.rank, "rank"))
+        if self.rank is not None:
+            object.__setattr__(self, "rank", _strict_positive_int(self.rank, "rank"))
         object.__setattr__(self, "province", _output_text(self.province, "province"))
         object.__setattr__(self, "subject_mode", _text(self.subject_mode, "subject_mode"))
         if self.subject_mode not in _SUBJECT_MODES:
@@ -458,6 +468,12 @@ class PathwayPolicy(_Serializable):
     policy_source_ids: tuple[str, ...]
     evidence_status: EvidenceStatus
     calculation_basis: str
+    target_year: int | None = None
+    data_year: int | None = None
+    fallback_distance: int = 0
+    year_basis: str = "current_year"
+    timeline: tuple[str, ...] = ()
+    preparation_actions: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         policy_id = _text(self.policy_id, "policy_id")
@@ -511,6 +527,38 @@ class PathwayPolicy(_Serializable):
         basis = _output_text(self.calculation_basis, "calculation_basis")
         assert basis is not None
         object.__setattr__(self, "calculation_basis", basis)
+        target_year = self.valid_year if self.target_year is None else self.target_year
+        data_year = self.valid_year if self.data_year is None else self.data_year
+        if target_year is None or data_year is None:
+            if target_year is not None or data_year is not None or self.fallback_distance != 0:
+                raise ValueError("incomplete pathway year metadata")
+            object.__setattr__(self, "target_year", None)
+            object.__setattr__(self, "data_year", None)
+            object.__setattr__(self, "year_basis", "unverified")
+        else:
+            target_year = _strict_positive_int(target_year, "target_year", minimum=2000)
+            data_year = _strict_positive_int(data_year, "data_year", minimum=2000)
+            distance = _strict_int(self.fallback_distance, "fallback_distance")
+            if target_year > 2100 or data_year > 2100 or not 0 <= distance <= 3:
+                raise ValueError("pathway year metadata is outside its supported range")
+            if target_year - data_year != distance or self.valid_year != data_year:
+                raise ValueError("pathway fallback distance does not match policy years")
+            expected_basis = "current_year" if distance == 0 else "historical_fallback"
+            if self.year_basis != expected_basis:
+                raise ValueError("pathway year basis does not match fallback distance")
+            object.__setattr__(self, "target_year", target_year)
+            object.__setattr__(self, "data_year", data_year)
+            object.__setattr__(self, "fallback_distance", distance)
+        object.__setattr__(
+            self,
+            "timeline",
+            _output_string_tuple(self.timeline, "timeline"),
+        )
+        object.__setattr__(
+            self,
+            "preparation_actions",
+            _output_string_tuple(self.preparation_actions, "preparation_actions"),
+        )
 
 
 @dataclass(frozen=True)
@@ -608,6 +656,15 @@ class PathwayItem(_Serializable):
     evidence_status: EvidenceStatus
     calculation_basis: str
     target_rank: int | None = None
+    investment_decision: str = ""
+    qualification_status: str = ""
+    satisfied_conditions: tuple[str, ...] = ()
+    timeline: tuple[str, ...] = ()
+    preparation_actions: tuple[str, ...] = ()
+    target_year: int | None = None
+    data_year: int | None = None
+    fallback_distance: int = 0
+    year_basis: str = "unverified"
 
     def __post_init__(self) -> None:
         policy_id = _text(self.policy_id, "policy_id")
@@ -686,6 +743,48 @@ class PathwayItem(_Serializable):
             )
             if self.status != "formal":
                 raise ValueError("only formal items may carry a target rank")
+        decisions = {"主攻", "重点准备", "备选", "观察", "不建议"}
+        qualifications = {"已满足", "部分满足", "暂未满足", "待核验", "不适用"}
+        decision = self.investment_decision or {
+            "formal": "主攻",
+            "pending_verification": "观察",
+            "excluded": "不建议",
+        }[self.status]
+        qualification = self.qualification_status or {
+            "formal": "已满足",
+            "pending_verification": "待核验",
+            "excluded": "不适用",
+        }[self.status]
+        if decision not in decisions:
+            raise ValueError("investment_decision is not supported")
+        if qualification not in qualifications:
+            raise ValueError("qualification_status is not supported")
+        if self.status == "excluded" and (
+            decision != "不建议" or qualification != "不适用"
+        ):
+            raise ValueError("excluded pathway decision is inconsistent")
+        object.__setattr__(self, "investment_decision", decision)
+        object.__setattr__(self, "qualification_status", qualification)
+        for name in ("satisfied_conditions", "timeline", "preparation_actions"):
+            object.__setattr__(
+                self,
+                name,
+                _output_string_tuple(getattr(self, name), name),
+            )
+        if self.target_year is None or self.data_year is None:
+            if self.target_year is not None or self.data_year is not None:
+                raise ValueError("incomplete pathway item year metadata")
+            if self.fallback_distance != 0 or self.year_basis != "unverified":
+                raise ValueError("unverified pathway item has inconsistent year metadata")
+        else:
+            target_year = _strict_positive_int(self.target_year, "target_year", minimum=2000)
+            data_year = _strict_positive_int(self.data_year, "data_year", minimum=2000)
+            distance = _strict_int(self.fallback_distance, "fallback_distance")
+            if target_year - data_year != distance or not 0 <= distance <= 3:
+                raise ValueError("pathway item fallback metadata is inconsistent")
+            expected_basis = "current_year" if distance == 0 else "historical_fallback"
+            if self.year_basis != expected_basis:
+                raise ValueError("pathway item year basis is inconsistent")
 
 
 @dataclass(frozen=True)
@@ -864,6 +963,14 @@ def _exact_evidence_problem(
     return None
 
 
+def exact_evidence_problem(
+    status: EvidenceStatus, source_ids: tuple[str, ...], noun: str = "政策"
+) -> str | None:
+    """Expose the single source-policy threshold seam to internal adapters."""
+
+    return _exact_evidence_problem(status, source_ids, noun)
+
+
 def _model_problem(
     profile: PathwayProfile,
     policies: tuple[PathwayPolicy, ...],
@@ -878,6 +985,8 @@ def _model_problem(
         return "位次模型省份与用户画像不匹配"
     if model.subject_mode != profile.subject_mode:
         return "位次模型选科模式与用户画像不匹配"
+    if profile.rank is None:
+        return "用户画像暂无可靠位次，位次模型未执行"
     if profile.current_year not in model.cohort_years:
         return "用户当前年份不在模型声明的队列年份中"
     if not (model.applicability_rank_min <= profile.rank <= model.applicability_rank_max):
@@ -914,6 +1023,11 @@ def _evaluate_policy(
         for item in policy.eligibility_requirements
         if item not in profile.eligibility_facts
     )
+    satisfied = tuple(
+        item
+        for item in policy.eligibility_requirements
+        if item in profile.eligibility_facts
+    )
     critical_fields = (
         ("training_arrangements", "培养安排未核实"),
         ("transition_rules", "转段规则未核实"),
@@ -927,10 +1041,13 @@ def _evaluate_policy(
     )
     if not policy.professional_options:
         missing.append("专业选项未核实")
+    historical = policy.fallback_distance > 0
     if policy.valid_year is None:
         missing.append("政策有效年份未核实")
-    elif policy.valid_year != profile.current_year:
-        missing.append("政策不是当前年份有效版本")
+    elif policy.target_year != profile.current_year:
+        missing.append("政策目标年份与用户规划年份不一致")
+    elif historical:
+        missing.append(f"政策为历史回退版本：{policy.data_year}")
     evidence_problem = _exact_evidence_problem(
         policy.evidence_status, policy.policy_source_ids, "政策"
     )
@@ -941,20 +1058,48 @@ def _evaluate_policy(
         status = "excluded"
         eligibility = "ineligible"
         constraints = tuple(ineligible + missing)
+        investment_decision = "不建议"
+        qualification_status = "不适用"
     elif missing:
         status = "pending_verification"
         eligibility = "pending_verification"
         constraints = tuple(missing)
+        if evidence_problem is not None:
+            investment_decision = "观察"
+            qualification_status = "待核验"
+        elif historical:
+            investment_decision = "重点准备"
+            qualification_status = "待核验"
+        elif any(
+            requirement not in profile.eligibility_facts
+            for requirement in policy.eligibility_requirements
+        ):
+            investment_decision = "备选"
+            qualification_status = "部分满足" if satisfied else "暂未满足"
+        else:
+            investment_decision = "观察"
+            qualification_status = "待核验"
     else:
         status = "formal"
         eligibility = "eligible"
         constraints = ()
+        investment_decision = (
+            "主攻"
+            if policy.evidence_status == EvidenceStatus.OFFICIAL
+            else "重点准备"
+        )
+        qualification_status = "已满足"
     basis = policy.calculation_basis
     item_target_rank = target_rank if status == "formal" else None
     if transformation is not None and status == "formal":
         basis = f"{basis}；{transformation}"
     else:
         basis = f"{basis}；未执行位次换算"
+    if historical:
+        basis = (
+            f"{basis}；历史回退 {policy.data_year}→{policy.target_year}，"
+            "仅用于规划，不确认当年资格"
+        )
     return PathwayItem(
         policy_id=policy.policy_id,
         pathway_type=policy.pathway_type,
@@ -974,4 +1119,13 @@ def _evaluate_policy(
         evidence_status=policy.evidence_status,
         calculation_basis=basis,
         target_rank=item_target_rank,
+        investment_decision=investment_decision,
+        qualification_status=qualification_status,
+        satisfied_conditions=satisfied,
+        timeline=policy.timeline,
+        preparation_actions=policy.preparation_actions,
+        target_year=policy.target_year,
+        data_year=policy.data_year,
+        fallback_distance=policy.fallback_distance,
+        year_basis=policy.year_basis,
     )
