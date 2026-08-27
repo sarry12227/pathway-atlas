@@ -6,8 +6,8 @@
 
 | Platform | Official URL | Method | Version/Commit | Status | Listing URL | Last verified | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| GitHub | https://github.com/sarry12227/pathway-atlas | Public repository and release | — | pending | — | — | 待验证公开 `main`、首页首行提示词和发布包。 |
-| Gitee | https://gitee.com/sarry1/pathway-atlas | Public mirror | — | pending | — | — | 待验证与 GitHub `main` 的提交树一致。 |
+| GitHub | https://github.com/sarry12227/pathway-atlas | Public repository and release | v0.1.0 / main | indexed | https://github.com/sarry12227/pathway-atlas | 2026-08-27 | 已验证公开仓库、默认 `main` 与首页首行安装调用提示词。 |
+| Gitee | https://gitee.com/sarry1/pathway-atlas | Public mirror | v0.1.0 / main | indexed | https://gitee.com/sarry1/pathway-atlas | 2026-08-27 | 已验证公开镜像、默认 `main` 与 GitHub 主源内容同步。 |
 | SkillsMP | https://skillsmp.com | Public GitHub discovery | — | pending | — | — | 只记录可公开打开的详情页。 |
 | skills.sh | https://skills.sh | `npx skills add` discovery | — | pending | — | — | 待从公开 GitHub 主源执行安装与检索。 |
 | skills.homes | https://skills.homes | Public directory discovery | — | pending | — | — | 待确认官方收录或提交入口。 |
