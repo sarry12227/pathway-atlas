@@ -44,6 +44,86 @@ LEGACY_MARKERS = (
     "--name",
 )
 
+QUESTION_LABELS = (
+    "性别",
+    "所在高中与报考地区",
+    "年级与预计高考年份",
+    "班型/培养层次",
+    "选科组合",
+    "最近一次大考总分",
+    "最近一次大考校排名（年级排名）",
+    "过往最高校排位",
+    "正常水平校排位",
+    "获奖经历",
+    "特殊活动经历",
+    "理想大学",
+    "为什么想去这些学校",
+    "想学什么专业（大类）",
+    "为什么想学这个专业",
+    "想去哪个城市或地区读大学",
+    "对大学毕业后的想象",
+    "目前最焦虑或最担心",
+    "最希望规划方案解决什么问题",
+    "规划条件、限制与特殊升学方向",
+)
+
+QUESTIONNAIRE_REQUIRED_OPTIONS = (
+    "男 / 女 / 不便回答",
+    "高一 / 高二 / 高三",
+    "名气大 / 排名高",
+    "专业实力强",
+    "城市好 / 地理位置优越",
+    "家里有人读过 / 熟人推荐",
+    "分数线刚好合适",
+    "听老师 / 同学说的",
+    "计算机 / 软件 / 人工智能",
+    "电子信息 / 通信工程",
+    "电气工程 / 自动化",
+    "机械工程 / 航空航天",
+    "能源动力 / 材料科学",
+    "土木工程 / 建筑学",
+    "数学 / 物理 / 化学 / 生物（基础科学）",
+    "临床医学 / 口腔医学",
+    "药学 / 护理学",
+    "法学",
+    "财会 / 金融 / 经济学",
+    "汉语言文学 / 新闻传播 / 历史 / 哲学",
+    "外语（英语 / 小语种）",
+    "管理类（工商管理 / 人力资源等）",
+    "教育 / 心理学",
+    "自己感兴趣 / 热爱这个领域",
+    "好就业 / 薪资高",
+    "家人建议 / 家族从事相关行业",
+    "听说前景好 / 风口行业",
+    "老师推荐",
+    "同学都选这个",
+    "北京 / 上海 / 广州 / 深圳 / 武汉 / 杭州 / 南京 / 苏州 / 成都 / 重庆 / 西安",
+    "无所谓，学校好就行",
+    "直接工作，积累职场经验",
+    "考研 / 保研，继续深造",
+    "考公务员 / 事业编，求稳定",
+    "出国留学，开阔视野",
+    "创业，做自己的事业",
+    "还没想好，走一步看一步",
+    "孩子成绩不稳定，怕高考发挥失常",
+    "不知道孩子适合学什么专业，怕选错路",
+    "怕分数够了但选错学校 / 专业",
+    "不知道除了裸分高考，还有哪些升学途径",
+    "孩子没有获奖经历，担心影响强基计划 / 综合评价",
+    "孩子学习动力不足，需要外部激励和引导",
+    "对志愿填报规则完全不了解，怕踩坑",
+    "家庭有特殊情况（经济、身体、户籍等），不知道有哪些政策可以利用",
+)
+
+
+def questionnaire_rows(intake):
+    return tuple(
+        (int(number), label.strip())
+        for number, label in re.findall(
+            r"^\s*([0-9]+)\.\s*\*\*([^*]+)\*\*", intake, flags=re.MULTILINE
+        )
+    )
+
 
 def read_utf8(path):
     source = path.read_bytes()
@@ -94,12 +174,27 @@ class SkillContractTest(unittest.TestCase):
         self.frontmatter, self.body = parse_frontmatter(self.skill)
         self.sections = None
 
-    def test_frontmatter_is_trigger_only(self):
+    def test_frontmatter_triggers_from_real_user_intent_without_skill_name(self):
         self.assertEqual(set(self.frontmatter), {"name", "description"})
         self.assertEqual(self.frontmatter["name"], "pathway-atlas")
         description = self.frontmatter["description"]
         self.assertRegex(description, r"^Use when \S")
         self.assertLessEqual(len(description), 500)
+        for trigger in (
+            "这个分数",
+            "位次",
+            "冲稳保",
+            "升学路径",
+            "强基",
+            "综评",
+            "选校",
+            "选专业",
+        ):
+            self.assertIn(trigger, description)
+        self.assertRegex(
+            description,
+            r"(?:无需|不需要|无须)[^。]*(?:说出|提及|指定)[^。]*pathway-atlas",
+        )
         self.assertIsNone(
             re.search(
                 r"preflight|query.plan|validate|full|standard|offline|"
@@ -113,36 +208,54 @@ class SkillContractTest(unittest.TestCase):
     def test_body_has_exact_six_stage_shape(self):
         sections = stage_sections(self.body)
         self.assertEqual(tuple(sections), STAGES)
-        self.assertLessEqual(len(self.body.splitlines()), 120)
+        self.assertLessEqual(len(self.body.splitlines()), 220)
 
-    def test_intake_is_province_first_decision_relevant_and_anonymous(self):
+    def test_first_turn_questionnaire_preserves_source_contract_and_caps_at_twenty(self):
         intake = stage_sections(self.body)["信息采集"]
-        rows = re.findall(r"^\|\s*([0-9]+)\s*\|\s*([^|]+?)\s*\|", intake, re.MULTILINE)
-        self.assertEqual(
-            tuple(field.strip() for _, field in rows),
-            (
-                "省份",
-                "选科",
-                "学校全称",
-                "分数",
-                "年级排名",
-                "意向院校",
-                "意向地区/城市",
-                "意向专业",
-                "港澳意愿",
-                "奖项/活动",
-            ),
-        )
-        self.assertEqual(tuple(number for number, _ in rows), tuple(map(str, range(1, 11))))
-        self.assertRegex(intake, r"未知|选填")
+        rows = questionnaire_rows(intake)
+        self.assertEqual(tuple(number for number, _ in rows), tuple(range(1, 21)))
+        self.assertEqual(tuple(label for _, label in rows), QUESTION_LABELS)
+        self.assertNotIn("学生姓名", tuple(label for _, label in rows))
+        self.assertIn("班型/培养层次，如普通班、重点班、竞赛班", intake)
+        for option in QUESTIONNAIRE_REQUIRED_OPTIONS:
+            self.assertIn(option, intake)
+        self.assertRegex(intake, r"不知道.*不确定.*不便回答")
         self.assertRegex(
             intake,
-            r"拒绝收集[^。\n]*(?:姓名|学生姓名)[^。\n]*电话[^。\n]*地址[^。\n]*班级"
+            r"拒绝收集[^。\n]*(?:姓名|学生姓名)[^。\n]*电话[^。\n]*地址[^。\n]*具体班级编号"
             r"[^。\n]*(?:通信 ID|通信ID)[^。\n]*(?:凭证|secret)[^。\n]*本地路径",
         )
         self.assertIn("ProvinceConfig", intake)
         self.assertIn("canonical subject", intake.lower())
         self.assertNotRegex(intake, r"只支持|默认省份|湖北")
+
+    def test_first_turn_prefills_known_answers_and_blocks_work_until_confirmation(self):
+        intake = stage_sections(self.body)["信息采集"]
+        self.assertRegex(
+            intake,
+            r"首次回复[^。\n]*(?:只能|只)[^。\n]*(?:回填|已识别)[^。\n]*完整问卷",
+        )
+        self.assertRegex(intake, r"用户首条消息[^。\n]*(?:自动回填|回填)[^。\n]*(?:核对|确认)")
+        self.assertRegex(intake, r"不得[^。\n]*重复询问[^。\n]*已提供")
+        self.assertRegex(
+            intake,
+            r"(?:用户回复并确认|画像确认)[^。\n]*(?:之前|前)[^。\n]*"
+            r"(?:不得|禁止)[^。\n]*(?:preflight|查询计划|检索|搜索)[^。\n]*"
+            r"(?:计算|推荐|判断)",
+        )
+        self.assertRegex(intake, r"确认后的匿名画像[^。\n]*(?:唯一|完整)[^。\n]*上下文")
+
+    def test_missing_official_rank_uses_evidence_estimate_before_school_matching(self):
+        intake = stage_sections(self.body)["信息采集"]
+        self.assertNotRegex(intake, r"(?:分数或位次|位次).*未知[^。\n]*只能做路径探索")
+        self.assertNotRegex(intake, r"(?:分数或位次|位次).*未知[^。\n]*不生成院校冲稳保")
+        self.assertRegex(
+            intake,
+            r"(?:没有|缺少|暂无)[^。\n]*官方位次[^。\n]*"
+            r"(?:学校|班型)[^。\n]*(?:考试|成绩|排名)[^。\n]*"
+            r"(?:估算|定位)[^。\n]*(?:乐观|中性|保守)[^。\n]*位次",
+        )
+        self.assertRegex(intake, r"(?:估算|参考)位次[^。\n]*(?:冲稳保|院校池)")
 
     def test_preflight_uses_host_mapping_and_runtime_tiers(self):
         preflight = stage_sections(self.body)["能力预检"]
@@ -275,6 +388,12 @@ class SkillContractTest(unittest.TestCase):
         self.assertEqual(frontmatter.get("name"), "pathway-atlas")
         description = frontmatter.get("description", "")
         self.assertRegex(description, r"^Use when \S")
+        for trigger in ("这个分数", "冲稳保", "升学路径", "强基", "综评"):
+            self.assertIn(trigger, description)
+        self.assertRegex(
+            description,
+            r"(?:无需|不需要|无须)[^。]*(?:说出|提及|指定)[^。]*pathway-atlas",
+        )
         self.assertIsNone(
             re.search(
                 r"preflight|query.plan|validate|workflow|stages?|CLI|output|"
@@ -289,6 +408,26 @@ class SkillContractTest(unittest.TestCase):
         evidence = sections["证据归一化"]
         calculation = sections["确定性计算"]
         intake = sections["信息采集"]
+        rows = questionnaire_rows(intake)
+        self.assertEqual(tuple(number for number, _ in rows), tuple(range(1, 21)))
+        self.assertEqual(tuple(label for _, label in rows), QUESTION_LABELS)
+        self.assertNotIn("学生姓名", tuple(label for _, label in rows))
+        self.assertIn("班型/培养层次，如普通班、重点班、竞赛班", intake)
+        for option in QUESTIONNAIRE_REQUIRED_OPTIONS:
+            self.assertIn(option, intake)
+        self.assertRegex(
+            intake,
+            r"(?:用户回复并确认|画像确认)[^。\n]*(?:之前|前)[^。\n]*"
+            r"(?:不得|禁止)[^。\n]*(?:preflight|查询计划|检索|搜索)[^。\n]*"
+            r"(?:计算|推荐|判断)",
+        )
+        self.assertIsNone(
+            re.search(
+                r"(?:用户回复并确认|画像确认)[^。\n]*(?:之前|前)[^。\n]*"
+                r"(?:可以|可|允许|先)[^。\n]*(?:preflight|查询计划|检索|搜索|计算|推荐|判断)",
+                intake,
+            )
+        )
         self.assertRegex(query, r"offline[^。\n]*(?:不声称|禁止声称)[^。\n]*(?:当前|实时|current|live)")
         self.assertIsNone(
             re.search(
@@ -349,6 +488,10 @@ class SkillContractTest(unittest.TestCase):
     def test_semantic_mutation_canaries_and_safe_prose(self):
         canaries = (
             (
+                "根据咨询意图自动触发，无需用户说出 pathway-atlas",
+                "仅当用户明确说出 pathway-atlas 时才触发",
+            ),
+            (
                 "形成 authenticated snapshot 之前不得给出数字或开始计算",
                 "先开始计算并给出数字，再形成 authenticated snapshot",
             ),
@@ -365,8 +508,12 @@ class SkillContractTest(unittest.TestCase):
                 "offline 在后台联网并声称当前实时验证",
             ),
             (
-                "拒绝收集学生姓名、电话、地址、班级、通信 ID、凭证或本地路径",
-                "收集学生姓名、电话、地址、班级、通信 ID、凭证或本地路径",
+                "拒绝收集学生姓名、电话、地址、具体班级编号、通信 ID、凭证或本地路径",
+                "收集学生姓名、电话、地址、具体班级编号、通信 ID、凭证或本地路径",
+            ),
+            (
+                "画像确认前不得运行 preflight、查询计划或检索，也不得计算、推荐或判断",
+                "画像确认前可以先运行 preflight、查询计划和检索，再计算、推荐或判断",
             ),
         )
         for good, bad in canaries:
@@ -382,8 +529,8 @@ class SkillContractTest(unittest.TestCase):
             "可以使用已声明的联网能力，exit 2/3 保持受控。",
             1,
         ).replace(
-            "拒绝收集学生姓名、电话、地址、班级、通信 ID、凭证或本地路径",
-            "拒绝收集学生姓名、电话、地址、班级、通信 ID、凭证或本地路径；"
+            "拒绝收集学生姓名、电话、地址、具体班级编号、通信 ID、凭证或本地路径",
+            "拒绝收集学生姓名、电话、地址、具体班级编号、通信 ID、凭证或本地路径；"
             "学校全称仍是决策字段",
             1,
         ).replace(
@@ -417,9 +564,14 @@ class SkillContractTest(unittest.TestCase):
                 "必要时静默联网并声称实时验证",
             ),
             (
-                "拒绝收集学生姓名、电话、地址、班级、通信 ID、凭证或本地路径",
-                "拒绝收集学生姓名、电话、地址、班级、通信 ID、凭证或本地路径；"
+                "拒绝收集学生姓名、电话、地址、具体班级编号、通信 ID、凭证或本地路径",
+                "拒绝收集学生姓名、电话、地址、具体班级编号、通信 ID、凭证或本地路径；"
                 "同时收集学生姓名和电话以便联系",
+            ),
+            (
+                "画像确认前不得运行 preflight、查询计划或检索，也不得计算、推荐或判断",
+                "画像确认前不得运行 preflight、查询计划或检索，也不得计算、推荐或判断；"
+                "为了节省时间，可以同时搜索并先给出初步推荐",
             ),
             (
                 "形成 authenticated snapshot 之前不得给出数字或开始计算",
