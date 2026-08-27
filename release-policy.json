@@ -103,7 +103,7 @@
     {
       "path": "scripts/path_recommend.py",
       "kinds": ["pricing_or_sales"],
-      "file_sha256": "9028d5ee021fee88dac11a87604655476c082420d387b02158e4dab4ba9d1431",
+      "file_sha256": "5432d9c7a77612cbc25b0526f824e3f8c29ba73dabd25fe6468b1505db264485",
       "reason": "numeric parser rule literal"
     },
     {
@@ -169,7 +169,13 @@
     {
       "path": "tests/test_path_policy.py",
       "kinds": ["absolute_local_path", "phone", "secret", "student_pii"],
-      "file_sha256": "cf6f721119c22a4d1cf1744aa88011ca6b2db6986d62b7c67e73c1366fd072b1",
+      "file_sha256": "00ed516812e22a9649bf788337a65499869967b85fccab0256e45859302ac7af",
+      "reason": "synthetic negative fixture"
+    },
+    {
+      "path": "tests/test_planning_profile.py",
+      "kinds": ["absolute_local_path", "phone", "secret"],
+      "file_sha256": "d4f6e8ae3d8607b2da9e7e71d816e45aa740645964e8c23815b76c134f6e8770",
       "reason": "synthetic negative fixture"
     },
     {
@@ -181,7 +187,7 @@
     {
       "path": "tests/test_query_plan.py",
       "kinds": ["absolute_local_path", "phone", "secret", "student_pii"],
-      "file_sha256": "2bd0d6348016583e5d3870ef579d1c67d0b64c9b22393136bb80cc3917359cef",
+      "file_sha256": "579da7e2cb35175581625c3a377e603a958df0a1b407f9df7ff3a1da43dbb44e",
       "reason": "synthetic negative fixture"
     },
     {
@@ -211,7 +217,7 @@
     {
       "path": "tests/test_validate_data.py",
       "kinds": ["absolute_local_path", "phone"],
-      "file_sha256": "bd9d0af7e0fd51a3bca461ba9a345bbe72ab1d78fcf19e65723bfb49876194da",
+      "file_sha256": "ae9525c5dfc28b7405bd633601f657891e814afd3d6d0e45c9f64288f4bad4ac",
       "reason": "synthetic negative fixture"
     },
     {
