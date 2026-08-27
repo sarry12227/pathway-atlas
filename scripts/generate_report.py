@@ -11,9 +11,12 @@ from pathlib import Path
 if __package__:
     from .compliance_scan import scan_text
     from .contracts import EvidenceStatus, RecommendationProfile
+    from .contracts import RecommendationResult
     from .data_loader import DataError
     from .path_recommend import PathwayProfile, evaluate_pathways
+    from .adapters.pathway_bridge import bridge_pathway_policies
     from .planning_profile import PlanningProfile, load_planning_profile
+    from .rank_locator import RankScenario, locate_rank
     from .report_model import (
         StudentProfile,
         build_report_model,
@@ -31,9 +34,12 @@ if __package__:
 else:
     from compliance_scan import scan_text
     from contracts import EvidenceStatus, RecommendationProfile
+    from contracts import RecommendationResult
     from data_loader import DataError
     from path_recommend import PathwayProfile, evaluate_pathways
+    from adapters.pathway_bridge import bridge_pathway_policies
     from planning_profile import PlanningProfile, load_planning_profile
+    from rank_locator import RankScenario, locate_rank
     from report_model import (
         StudentProfile,
         build_report_model,
@@ -351,6 +357,7 @@ def _public_recommendations(
     profile: RecommendationProfile,
     policy,
     facts,
+    rank_scenario: RankScenario | None = None,
 ):
     """Run Task 3 without assigning unscoped facts to admission rows.
 
@@ -375,11 +382,13 @@ def _public_recommendations(
         ]
         if not matching_years:
             raise DataError("已验证投档数据没有匹配的科目组")
-        latest_year = max(matching_years)
+        latest_years = tuple(sorted(set(matching_years), reverse=True)[:3])
         rows = [
             (row, row_hash) for row, row_hash in authenticated_rows
             if row.get("subject_group") == profile.subject_group
-            and row.get("year") == latest_year
+            and row.get("year") in (
+                latest_years if rank_scenario is not None else latest_years[:1]
+            )
         ]
         evidence_by_hash, evidence_projections = _admission_fact_index(facts)
         bounded_rows = []
@@ -440,9 +449,112 @@ def _public_recommendations(
                         }
                     )
             bounded_rows.append(row)
-        return recommend_schools(bounded_rows, profile, policy)
+        return recommend_schools(
+            bounded_rows,
+            profile,
+            policy,
+            rank_scenario=rank_scenario,
+        )
     except (DataError, SchoolRecommendError, TypeError, ValueError) as error:
         raise EvidenceReportInputError("普通批数据无法形成安全推荐结果") from error
+
+
+def build_pathway_atlas_model(
+    planning_profile: PlanningProfile,
+    dataset,
+    evidence,
+):
+    """Run the complete evidence-first planning pipeline once for both renderers."""
+
+    if not isinstance(planning_profile, PlanningProfile):
+        raise TypeError("planning_profile must be a PlanningProfile")
+    facts = tuple(record.to_dict() for record in evidence.facts)
+    subject_key = canonical_subject_selection_key(
+        dataset.config,
+        planning_profile.subject_group,
+        list(planning_profile.secondary_subjects),
+    )
+    rank_scenario = locate_rank(
+        planning_profile,
+        evidence_facts=facts,
+        score_rows=dataset.score_rows,
+        score_subject_group=subject_key,
+    )
+    numeric_rank = (
+        rank_scenario.central_rank
+        if rank_scenario.status in {EvidenceStatus.OFFICIAL, EvidenceStatus.INFERRED}
+        else None
+    )
+    retrieval_year = max(int(value[:4]) for value in evidence.retrieval_dates)
+    report_profile = StudentProfile(
+        province=planning_profile.province,
+        subject_mode=planning_profile.subject_mode,
+        subject_group=planning_profile.subject_group,
+        secondary_subjects=planning_profile.secondary_subjects,
+        rank=numeric_rank,
+        grade=planning_profile.grade,
+        current_year=retrieval_year,
+        subject_selection_key=subject_key,
+    )
+    if numeric_rank is None:
+        recommendations = RecommendationResult(
+            ordinary_batch_policy=dataset.config.ordinary_batch_policy,
+            items=(),
+            input_years=tuple(
+                sorted({int(row.to_dict()["year"]) for row in dataset.admission_rows})
+            ),
+            usable_years=(),
+            verified_rank_coverage=None,
+            coverage_status=EvidenceStatus.MISSING,
+            empty_reason="rank_calibration_missing",
+            warnings=("没有可校准的位次依据，未制造普通批数值",),
+        )
+    else:
+        recommendation_profile = RecommendationProfile(
+            rank=numeric_rank,
+            target_province=planning_profile.province,
+            subject_group=subject_key,
+            secondary_subjects=frozenset(planning_profile.secondary_subjects),
+            target_major_categories=planning_profile.target_majors,
+            target_cities=planning_profile.target_regions,
+            target_schools=planning_profile.target_schools,
+            rank_basis=rank_scenario.status.value,
+            optimistic_rank=rank_scenario.optimistic_rank,
+            conservative_rank=rank_scenario.conservative_rank,
+            rank_confidence=rank_scenario.confidence,
+            rank_source_ids=rank_scenario.source_ids,
+        )
+        recommendations = _public_recommendations(
+            dataset.admission_rows,
+            recommendation_profile,
+            dataset.config.ordinary_batch_policy,
+            facts,
+            rank_scenario=rank_scenario,
+        )
+    pathway_policies = bridge_pathway_policies(
+        evidence,
+        province=planning_profile.province,
+        subject_mode=planning_profile.subject_mode,
+        target_year=planning_profile.exam_year,
+    )
+    pathways = evaluate_pathways(
+        PathwayProfile(
+            rank=numeric_rank,
+            province=planning_profile.province,
+            subject_mode=planning_profile.subject_mode,
+            current_year=planning_profile.exam_year,
+            eligibility_facts=planning_profile.eligibility_facts,
+        ),
+        pathway_policies,
+        model=None,
+    )
+    return build_report_model(
+        report_profile,
+        recommendations,
+        rank=rank_scenario,
+        pathways=pathways,
+        evidence=evidence,
+    )
 
 
 def _build_evidence_parser() -> argparse.ArgumentParser:
@@ -496,32 +608,39 @@ def _evidence_main(argv) -> int:
     args = _build_evidence_parser().parse_args(argv)
     try:
         loaded_profile = _load_public_profile(args.profile)
-        if isinstance(loaded_profile, PlanningProfile):
-            raise EvidenceReportInputError("规划画像尚未完成位次定位")
-        report_profile, recommendation_profile, pathway_profile = loaded_profile
-        dataset = _resolve_public_dataset(args.dataset, report_profile)
-        report_profile, recommendation_profile = _profiles_with_canonical_subject_key(
-            dataset, report_profile, recommendation_profile
+        profile_for_dataset = (
+            loaded_profile if isinstance(loaded_profile, PlanningProfile) else loaded_profile[0]
         )
+        dataset = _resolve_public_dataset(args.dataset, profile_for_dataset)
         evidence = _validated_evidence_snapshot(args.evidence)
-        facts = tuple(record.to_dict() for record in evidence.facts)
-        recommendations = _public_recommendations(
-            dataset.admission_rows,
-            recommendation_profile,
-            dataset.config.ordinary_batch_policy,
-            facts,
-        )
-        # The public replay fixture carries no policy records or versioned rank
-        # anchors.  Task 5 is still entered through its new API; Task 4 remains
-        # explicitly unavailable instead of falling back to bundled xibao data.
-        pathways = evaluate_pathways(pathway_profile, (), model=None)
-        model = build_report_model(
-            report_profile,
-            recommendations,
-            rank=None,
-            pathways=pathways,
-            evidence=evidence,
-        )
+        if isinstance(loaded_profile, PlanningProfile):
+            model = build_pathway_atlas_model(loaded_profile, dataset, evidence)
+        else:
+            report_profile, recommendation_profile, pathway_profile = loaded_profile
+            report_profile, recommendation_profile = _profiles_with_canonical_subject_key(
+                dataset, report_profile, recommendation_profile
+            )
+            facts = tuple(record.to_dict() for record in evidence.facts)
+            recommendations = _public_recommendations(
+                dataset.admission_rows,
+                recommendation_profile,
+                dataset.config.ordinary_batch_policy,
+                facts,
+            )
+            policies = bridge_pathway_policies(
+                evidence,
+                province=pathway_profile.province,
+                subject_mode=pathway_profile.subject_mode,
+                target_year=pathway_profile.current_year,
+            )
+            pathways = evaluate_pathways(pathway_profile, policies, model=None)
+            model = build_report_model(
+                report_profile,
+                recommendations,
+                rank=None,
+                pathways=pathways,
+                evidence=evidence,
+            )
         markdown = render_markdown(model)
         if scan_text(markdown):
             raise EvidenceReportInputError("报告未通过合规扫描")

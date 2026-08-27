@@ -32,11 +32,13 @@ if __package__:
     from .compliance_scan import scan_text
     from .contracts import CapabilityTier, EvidenceStatus, RecommendationProfile
     from .path_recommend import evaluate_pathways
+    from .rank_locator import RankScenario
     from .report_model import ReportModel, StudentProfile, build_report_model
 else:  # pragma: no cover - direct script execution
     from compliance_scan import scan_text
     from contracts import CapabilityTier, EvidenceStatus, RecommendationProfile
     from path_recommend import evaluate_pathways
+    from rank_locator import RankScenario
     from report_model import ReportModel, StudentProfile, build_report_model
 
 
@@ -391,7 +393,7 @@ def _evidence_section(document, model, bullet_id):
     rows = [
         ("年级", profile.grade),
         ("选科", f"{profile.subject_mode}；{profile.subject_selection_key}；再选科目：{_ids(profile.secondary_subjects)}"),
-        ("用户提供省位次", profile.rank),
+        ("当前定位位次", profile.rank if profile.rank is not None else "暂无可靠位次"),
         ("能力档位", _TIER_LABEL[model.capability_tier]),
         ("查询覆盖", model.query_coverage),
         ("证据状态 / 置信度", f"{_STATUS_LABEL[model.evidence_status]} / {_CONFIDENCE_LABEL[model.evidence_status]}"),
@@ -427,8 +429,23 @@ def _evidence_section(document, model, bullet_id):
 def _rank_section(document, model, bullet_id):
     document.add_heading("二、成绩定位", level=1)
     rank = model.rank
-    if rank is None:
-        document.add_paragraph("喜报位次证据不足：本次直接采用用户提供的省位次，不执行校排名折算。")
+    if isinstance(rank, RankScenario):
+        if rank.status in {EvidenceStatus.OFFICIAL, EvidenceStatus.INFERRED}:
+            for text in (
+                f"乐观位次：{rank.optimistic_rank}",
+                f"中性位次：{rank.central_rank}",
+                f"保守位次：{rank.conservative_rank}",
+                f"位次性质：{'官方' if rank.status is EvidenceStatus.OFFICIAL else '推断参考'}",
+                f"置信度：{rank.confidence}",
+                f"计算依据：{rank.basis}",
+                f"依据年份：{'、'.join(map(str, rank.contributing_years)) or '无'}",
+                f"位次来源编号：{_ids(rank.source_ids)}",
+            ):
+                _list_item(document, text, bullet_id)
+        else:
+            document.add_paragraph("当前没有可校准的位次依据；不制造数字，先保留路径判断并补充最小考试信息。")
+    elif rank is None:
+        document.add_paragraph("当前没有可校准的位次依据；不制造数字，先保留路径判断并补充最小考试信息。")
     elif rank.status is EvidenceStatus.INFERRED:
         for text in (
             f"推断位次区间：{rank.lower_rank}–{rank.upper_rank}",
@@ -488,7 +505,8 @@ def _pathway_section(document, model, bullet_id):
         for item in model.pathways:
             document.add_heading(f"{item.title} · {item.institution}", level=2)
             for detail in (
-                f"状态：{status_labels[item.status]}；资格：{item.eligibility}",
+                f"投入结论：{item.investment_decision}；资格状态：{item.qualification_status}",
+                f"运行状态：{status_labels[item.status]}；资格代码：{item.eligibility}",
                 f"政策证据状态：{_STATUS_LABEL[item.evidence_status]}；政策来源编号：{_ids(item.source_ids)}",
                 f"专业选项：{_ids(item.professional_options) if item.professional_options else '当前证据未提供'}",
                 f"培养安排：{item.training_arrangements or '当前证据未提供'}",
@@ -497,7 +515,10 @@ def _pathway_section(document, model, bullet_id):
                 f"服务/就业义务：{item.service_employment_obligations or '当前证据未提供'}",
                 f"退出/违约规则：{item.penalty_exit_rules or '当前证据未提供'}",
                 f"费用/补助：{item.fees_and_subsidies or '当前证据未提供'}",
+                f"已满足条件：{'；'.join(item.satisfied_conditions) or '无'}",
                 f"待核实约束：{'；'.join(item.missing_constraints) or '无'}",
+                f"时间线：{'；'.join(item.timeline) or '待当年政策确认'}",
+                f"当前行动：{'；'.join(item.preparation_actions) or '待补充可执行动作'}",
                 f"计算依据：{item.calculation_basis}",
             ):
                 _list_item(document, detail, bullet_id)
@@ -659,9 +680,22 @@ def _model_from_cli(args):
         from . import generate_report as report_cli
     else:
         import generate_report as report_cli
-    report_profile, recommendation_profile, pathway_profile = report_cli._load_public_profile(
-        args.profile
-    )
+    loaded_profile = report_cli._load_public_profile(args.profile)
+    if isinstance(loaded_profile, report_cli.PlanningProfile):
+        planning_profile = loaded_profile
+        if args.secondary_subject is not None:
+            payload = planning_profile.to_dict()
+            payload.pop("mode")
+            payload.pop("digest")
+            payload["secondary_subjects"] = list(args.secondary_subject)
+            planning_profile = report_cli.PlanningProfile.create(payload)
+        dataset = report_cli._resolve_public_dataset(args.dataset, planning_profile)
+        evidence = report_cli._validated_evidence_snapshot(args.evidence)
+        return report_cli.build_pathway_atlas_model(
+            planning_profile, dataset, evidence
+        )
+
+    report_profile, recommendation_profile, pathway_profile = loaded_profile
     if args.secondary_subject is not None:
         subjects = tuple(args.secondary_subject)
         report_profile = StudentProfile(
@@ -694,7 +728,13 @@ def _model_from_cli(args):
         dataset.config.ordinary_batch_policy,
         facts,
     )
-    pathways = evaluate_pathways(pathway_profile, (), model=None)
+    policies = report_cli.bridge_pathway_policies(
+        evidence,
+        province=pathway_profile.province,
+        subject_mode=pathway_profile.subject_mode,
+        target_year=pathway_profile.current_year,
+    )
+    pathways = evaluate_pathways(pathway_profile, policies, model=None)
     return build_report_model(
         report_profile,
         recommendations,

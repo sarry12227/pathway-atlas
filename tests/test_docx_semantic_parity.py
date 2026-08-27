@@ -23,6 +23,7 @@ from lxml import etree
 from scripts import docx_export
 from scripts.contracts import EvidenceStatus, RecommendationResult
 from scripts.report_model import ReportModel, build_report_model, render_markdown
+from scripts.school_recommend import recommend_schools
 from tests.test_generate_report_evidence import (
     evidence_snapshot,
     formal_pathway_result,
@@ -32,6 +33,8 @@ from tests.test_generate_report_evidence import (
     recommendations,
     student,
 )
+from tests.test_pathway_atlas_blackbox import pathway_result as decisive_pathway_result
+from tests.test_scenario_recommendations import policy, profile, rows, scenario
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -65,6 +68,46 @@ def xml_part(path: Path, name: str):
 
 
 class DocxSemanticParityTest(unittest.TestCase):
+    def test_rank_scenarios_and_decisive_pathways_have_markdown_docx_parity(self):
+        safe_rows = []
+        for index, value in enumerate(rows()):
+            safe = dict(value)
+            safe["source_ids"] = [
+                f"parity-{index}-a",
+                f"parity-{index}-b",
+                f"parity-{index}-c",
+            ]
+            safe_rows.append(safe)
+        report = build_report_model(
+            student(rank=22000),
+            recommend_schools(
+                safe_rows,
+                profile(),
+                policy(),
+                rank_scenario=scenario(),
+            ),
+            rank=scenario(),
+            pathways=decisive_pathway_result(),
+            evidence=evidence_snapshot(),
+        )
+        markdown = render_markdown(report)
+        with tempfile.TemporaryDirectory() as temporary:
+            output = docx_export.export_docx(report, Path(temporary) / "parity.docx")
+            text = document_text(output)
+
+        for literal in (
+            "乐观位次：18000",
+            "中性位次：22000",
+            "保守位次：27000",
+            "观察大学",
+            "重点准备",
+            "待核验",
+            "本学期准备材料",
+            "历史回退 2025→2026",
+        ):
+            self.assertIn(literal, markdown)
+            self.assertIn(literal, text)
+
     def test_docx_gate_uses_shared_semantics_and_exception_never_echoes_amount(self):
         safe = "武汉大学学费 30000元；国家助学金 6000元"
         rejected_amount = "30600元"

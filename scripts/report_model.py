@@ -29,6 +29,7 @@ if __package__:
         validate_public_output_text,
     )
     from .rank_calc import RankEstimate
+    from .rank_locator import RankScenario
     from .validate_evidence import ValidatedEvidenceSnapshot
 else:  # pragma: no cover - direct scripts-path compatibility
     from contracts import (
@@ -42,6 +43,7 @@ else:  # pragma: no cover - direct scripts-path compatibility
     )
     from path_recommend import PathwayItem, PathwayResult, validate_public_output_text
     from rank_calc import RankEstimate
+    from rank_locator import RankScenario
     from validate_evidence import ValidatedEvidenceSnapshot
 
 
@@ -272,7 +274,7 @@ def _recommendation_basis(data_year: int, min_rank: int, profile_rank: int) -> s
 def _canonical_action_items(
     recommendation_status: EvidenceStatus,
     recommendations: tuple["ReportRecommendation", ...],
-    rank: RankEstimate | None,
+    rank: RankEstimate | RankScenario | None,
     pathways_available: bool,
     pathways: tuple["ReportPathway", ...],
 ) -> tuple[str, ...]:
@@ -285,8 +287,13 @@ def _canonical_action_items(
         EvidenceStatus.INFERRED,
     }:
         actions.append("优先补齐或复核冲突、屏蔽、部分覆盖及缺失的普通批证据")
-    if rank is None or rank.status is not EvidenceStatus.INFERRED:
+    if rank is None or rank.status not in {
+        EvidenceStatus.OFFICIAL,
+        EvidenceStatus.INFERRED,
+    }:
         actions.append("如需校排名折算，补充版本明确且来源可核验的喜报锚点")
+    elif isinstance(rank, RankScenario) and rank.status is EvidenceStatus.INFERRED:
+        actions.append("获得省级正式成绩后，用官方一分一段位次替换当前推断并重算院校池")
     if recommendations:
         actions.append("按冲稳保分层逐校核对当年招生章程、专业组与选科要求")
     else:
@@ -305,7 +312,7 @@ class StudentProfile(_Serializable):
     subject_mode: str
     subject_group: str
     secondary_subjects: tuple[str, ...]
-    rank: int
+    rank: int | None
     grade: str
     current_year: int
     subject_selection_key: str = ""
@@ -338,7 +345,8 @@ class StudentProfile(_Serializable):
                 profile_text=True,
             ),
         )
-        object.__setattr__(self, "rank", _positive_int(self.rank, "rank"))
+        if self.rank is not None:
+            object.__setattr__(self, "rank", _positive_int(self.rank, "rank"))
         year = _positive_int(self.current_year, "current_year", minimum=2000)
         if year > 2100:
             raise ValueError("current_year must not exceed 2100")
@@ -360,10 +368,14 @@ class ReportRecommendation(_Serializable):
     source_ids: tuple[str, ...]
     evidence_status: EvidenceStatus
     calculation_basis: str
+    supporting_years: tuple[int, ...] = ()
+    required_year_majority: int = 1
+    scenario_reach_counts: tuple[int, int, int] = (0, 0, 0)
+    scenario_confidence: str = "official"
 
     def __post_init__(self) -> None:
-        if self.strategy not in {"冲", "稳", "保"}:
-            raise ValueError("strategy must be 冲, 稳, or 保")
+        if self.strategy not in {"冲", "稳", "保", "观察"}:
+            raise ValueError("strategy must be 冲, 稳, 保, or 观察")
         for name in (
             "school_name",
             "school_level",
@@ -393,6 +405,30 @@ class ReportRecommendation(_Serializable):
         object.__setattr__(self, "evidence_status", _status(self.evidence_status))
         if self.evidence_status not in _ACCEPTED_EXACT:
             raise ValueError("numeric recommendations require accepted exact evidence")
+        object.__setattr__(
+            self,
+            "supporting_years",
+            _year_tuple(self.supporting_years, "supporting_years"),
+        )
+        object.__setattr__(
+            self,
+            "required_year_majority",
+            _positive_int(self.required_year_majority, "required_year_majority"),
+        )
+        if (
+            not isinstance(self.scenario_reach_counts, (tuple, list))
+            or len(self.scenario_reach_counts) != 3
+        ):
+            raise TypeError("scenario_reach_counts must contain three counts")
+        counts = tuple(
+            _nonnegative_int(value, "scenario_reach_count")
+            for value in self.scenario_reach_counts
+        )
+        if any(value > len(self.supporting_years) for value in counts):
+            raise ValueError("scenario reach count exceeds supporting years")
+        object.__setattr__(self, "scenario_reach_counts", counts)
+        if self.scenario_confidence not in {"official", "high", "medium", "low"}:
+            raise ValueError("unsupported scenario confidence")
 
 
 @dataclass(frozen=True)
@@ -415,6 +451,15 @@ class ReportPathway(_Serializable):
     evidence_status: EvidenceStatus
     calculation_basis: str
     target_rank: int | None
+    investment_decision: str = "观察"
+    qualification_status: str = "待核验"
+    satisfied_conditions: tuple[str, ...] = ()
+    timeline: tuple[str, ...] = ()
+    preparation_actions: tuple[str, ...] = ()
+    target_year: int | None = None
+    data_year: int | None = None
+    fallback_distance: int = 0
+    year_basis: str = "unverified"
 
     def __post_init__(self) -> None:
         for name in ("policy_id", "pathway_type", "title", "institution", "status", "eligibility", "calculation_basis"):
@@ -491,6 +536,30 @@ class ReportPathway(_Serializable):
             object.__setattr__(self, "target_rank", _positive_int(self.target_rank, "target_rank"))
             if self.status != "formal":
                 raise ValueError("only formal pathways may carry a target rank")
+        if self.investment_decision not in {"主攻", "重点准备", "备选", "观察", "不建议"}:
+            raise ValueError("unsupported pathway investment decision")
+        if self.qualification_status not in {"已满足", "部分满足", "暂未满足", "待核验", "不适用"}:
+            raise ValueError("unsupported pathway qualification status")
+        for name in ("satisfied_conditions", "timeline", "preparation_actions"):
+            object.__setattr__(
+                self,
+                name,
+                _text_tuple(getattr(self, name), name),
+            )
+        if self.target_year is None or self.data_year is None:
+            if self.target_year is not None or self.data_year is not None:
+                raise ValueError("incomplete pathway year metadata")
+            if self.fallback_distance != 0 or self.year_basis != "unverified":
+                raise ValueError("unverified pathway year metadata is inconsistent")
+        else:
+            target = _positive_int(self.target_year, "target_year", minimum=2000)
+            data = _positive_int(self.data_year, "data_year", minimum=2000)
+            distance = _nonnegative_int(self.fallback_distance, "fallback_distance")
+            if target - data != distance or distance > 3:
+                raise ValueError("pathway fallback metadata is inconsistent")
+            expected_basis = "current_year" if distance == 0 else "historical_fallback"
+            if self.year_basis != expected_basis:
+                raise ValueError("pathway year basis is inconsistent")
 
 
 @dataclass(frozen=True, init=False)
@@ -514,7 +583,7 @@ class ReportModel(_Serializable):
     zero_score_excluded_count: int
     input_years: tuple[int, ...]
     usable_years: tuple[int, ...]
-    rank: RankEstimate | None
+    rank: RankEstimate | RankScenario | None
     pathways_available: bool
     pathways: tuple[ReportPathway, ...]
     pathway_warnings: tuple[str, ...]
@@ -627,7 +696,10 @@ class ReportModel(_Serializable):
         object.__setattr__(self, "usable_years", _year_tuple(self.usable_years, "usable_years"))
         if set(self.usable_years).difference(self.input_years):
             raise ValueError("usable years must be a subset of input years")
+        scenario_rank = self.rank if isinstance(self.rank, RankScenario) else None
         if recommendations:
+            if self.profile.rank is None:
+                raise ValueError("numeric recommendations require a profile rank")
             if self.verified_rank_coverage is None:
                 raise ValueError("numeric recommendations require verified rank coverage")
             lower, upper = self.verified_rank_coverage
@@ -643,32 +715,64 @@ class ReportModel(_Serializable):
                 for item in recommendations
             ):
                 raise ValueError("recommendation aggregate status overstates item evidence")
-            for item in recommendations:
-                if not lower <= item.min_rank <= upper:
-                    raise ValueError("recommendation rank must be inside verified coverage")
-                expected_delta = item.min_rank - self.profile.rank
-                if item.delta != expected_delta:
-                    raise ValueError("recommendation delta must derive from profile rank")
-                expected_strategy = (
-                    "冲"
-                    if item.delta < ordinary_batch_policy.challenge_delta_lt
-                    else (
-                        "稳"
-                        if item.delta <= ordinary_batch_policy.stable_delta_le
-                        else "保"
+            if scenario_rank is not None:
+                if (
+                    scenario_rank.central_rank != self.profile.rank
+                    or scenario_rank.optimistic_rank != lower
+                    or scenario_rank.conservative_rank != upper
+                ):
+                    raise ValueError("rank scenario does not match report profile or coverage")
+                for item in recommendations:
+                    if not item.supporting_years:
+                        raise ValueError("scenario recommendation requires supporting years")
+                    if item.data_year != max(item.supporting_years):
+                        raise ValueError("scenario recommendation year is not the latest support")
+                    if set(item.supporting_years).difference(self.usable_years):
+                        raise ValueError("scenario recommendation years must be usable")
+                    counts = item.scenario_reach_counts
+                    majority = item.required_year_majority
+                    expected_strategy = (
+                        "保" if counts[2] >= majority else
+                        "稳" if counts[1] >= majority else
+                        "冲" if counts[0] >= 1 else "观察"
                     )
-                )
-                if item.strategy != expected_strategy:
-                    raise ValueError("recommendation strategy contradicts ordinary batch policy")
-                expected_basis = _recommendation_basis(
-                    item.data_year,
-                    item.min_rank,
-                    self.profile.rank,
-                )
-                if item.calculation_basis != expected_basis:
-                    raise ValueError("recommendation calculation basis is not canonical")
-                if item.data_year not in self.usable_years:
-                    raise ValueError("recommendation year must be usable")
+                    if item.strategy != expected_strategy:
+                        raise ValueError("scenario recommendation classification is inconsistent")
+                    years = "、".join(str(year) for year in item.supporting_years)
+                    expected_basis = (
+                        f"{years} 年同省同选科可比投档记录；多数门槛 "
+                        f"{majority}；乐观、中性、保守触达 "
+                        f"{counts[0]}、{counts[1]}、{counts[2]}"
+                    )
+                    if item.calculation_basis != expected_basis:
+                        raise ValueError("scenario recommendation basis is not canonical")
+            else:
+                for item in recommendations:
+                    if not lower <= item.min_rank <= upper:
+                        raise ValueError("recommendation rank must be inside verified coverage")
+                    expected_delta = item.min_rank - self.profile.rank
+                    if item.delta != expected_delta:
+                        raise ValueError("recommendation delta must derive from profile rank")
+                    expected_strategy = (
+                        "冲"
+                        if item.delta < ordinary_batch_policy.challenge_delta_lt
+                        else (
+                            "稳"
+                            if item.delta <= ordinary_batch_policy.stable_delta_le
+                            else "保"
+                        )
+                    )
+                    if item.strategy != expected_strategy:
+                        raise ValueError("recommendation strategy contradicts ordinary batch policy")
+                    expected_basis = _recommendation_basis(
+                        item.data_year,
+                        item.min_rank,
+                        self.profile.rank,
+                    )
+                    if item.calculation_basis != expected_basis:
+                        raise ValueError("recommendation calculation basis is not canonical")
+                    if item.data_year not in self.usable_years:
+                        raise ValueError("recommendation year must be usable")
             for strategy, cap in ordinary_batch_policy.tier_caps.items():
                 if sum(item.strategy == strategy for item in recommendations) > cap:
                     raise ValueError("recommendation tier exceeds ordinary batch policy cap")
@@ -682,19 +786,22 @@ class ReportModel(_Serializable):
             if self.verified_rank_coverage is None:
                 raise ValueError("outside-coverage reason requires a known interval")
             lower, upper = self.verified_rank_coverage
-            if lower <= self.profile.rank <= upper:
+            if self.profile.rank is not None and lower <= self.profile.rank <= upper:
                 raise ValueError("outside-coverage reason contradicts profile rank")
         if self.recommendation_empty_reason == "no_match_within_verified_coverage":
             if self.verified_rank_coverage is None:
                 raise ValueError("verified empty result requires a coverage interval")
             lower, upper = self.verified_rank_coverage
-            if not lower <= self.profile.rank <= upper:
+            if self.profile.rank is None or not lower <= self.profile.rank <= upper:
                 raise ValueError("verified empty result requires rank inside coverage")
 
         if self.rank is not None:
-            if not isinstance(self.rank, RankEstimate):
-                raise TypeError("rank must be a RankEstimate or None")
-            object.__setattr__(self, "rank", RankEstimate(**self.rank.to_dict()))
+            if isinstance(self.rank, RankEstimate):
+                object.__setattr__(self, "rank", RankEstimate(**self.rank.to_dict()))
+            elif isinstance(self.rank, RankScenario):
+                object.__setattr__(self, "rank", RankScenario._create(**self.rank.to_dict()))
+            else:
+                raise TypeError("rank must be a RankEstimate, RankScenario, or None")
         if not isinstance(self.pathways_available, bool):
             raise TypeError("pathways_available must be boolean")
         if isinstance(self.pathways, (str, bytes, bytearray)):
@@ -806,7 +913,11 @@ class ReportModel(_Serializable):
             for source_id in item.source_ids
         }
         if self.rank is not None:
-            expected_sources.update(self.rank.contributing_source_ids)
+            expected_sources.update(
+                self.rank.source_ids
+                if isinstance(self.rank, RankScenario)
+                else self.rank.contributing_source_ids
+            )
         for item in pathways:
             expected_sources.update(item.source_ids)
         expected_sources.update(self.model_source_ids)
@@ -834,7 +945,7 @@ class ReportModel(_Serializable):
                     *self.recommendation_warnings,
                     *self.pathway_warnings,
                     *(
-                        ("喜报位次模型未提供，未执行校排名折算",)
+                        ("喜报位次证据不足：模型未提供；不执行校排名折算",)
                         if self.rank is None
                         else ()
                     ),
@@ -964,7 +1075,8 @@ def _snapshot_manifest(manifest: EvidenceManifest, tier: CapabilityTier) -> tupl
 
 def _project_recommendation(
     item: RecommendationItem,
-    profile_rank: int,
+    profile_rank: int | None,
+    rank: RankEstimate | RankScenario | None,
 ) -> ReportRecommendation:
     if not isinstance(item, RecommendationItem):
         raise TypeError("recommendation items must be RecommendationItem records")
@@ -972,6 +1084,22 @@ def _project_recommendation(
         raise TypeError("recommendation match flags must be boolean")
     if not item.subject_match:
         raise ValueError("rendered recommendations must pass subject filters")
+    if profile_rank is None:
+        raise ValueError("numeric recommendations require a profile rank")
+    if isinstance(rank, RankScenario):
+        years = "、".join(str(year) for year in item.supporting_years)
+        counts = item.scenario_reach_counts
+        calculation_basis = (
+            f"{years} 年同省同选科可比投档记录；多数门槛 "
+            f"{item.required_year_majority}；乐观、中性、保守触达 "
+            f"{counts[0]}、{counts[1]}、{counts[2]}"
+        )
+    else:
+        calculation_basis = _recommendation_basis(
+            item.data_year,
+            item.min_rank,
+            profile_rank,
+        )
     return ReportRecommendation(
         strategy=item.strategy,
         school_name=item.school_name,
@@ -985,11 +1113,11 @@ def _project_recommendation(
         data_year=item.data_year,
         source_ids=item.source_ids,
         evidence_status=item.evidence_status,
-        calculation_basis=_recommendation_basis(
-            item.data_year,
-            item.min_rank,
-            profile_rank,
-        ),
+        calculation_basis=calculation_basis,
+        supporting_years=item.supporting_years,
+        required_year_majority=item.required_year_majority,
+        scenario_reach_counts=item.scenario_reach_counts,
+        scenario_confidence=item.scenario_confidence,
     )
 
 
@@ -1015,13 +1143,22 @@ def _project_pathway(item: PathwayItem) -> ReportPathway:
         evidence_status=item.evidence_status,
         calculation_basis=item.calculation_basis,
         target_rank=item.target_rank,
+        investment_decision=item.investment_decision,
+        qualification_status=item.qualification_status,
+        satisfied_conditions=item.satisfied_conditions,
+        timeline=item.timeline,
+        preparation_actions=item.preparation_actions,
+        target_year=item.target_year,
+        data_year=item.data_year,
+        fallback_distance=item.fallback_distance,
+        year_basis=item.year_basis,
     )
 
 
 def build_report_model(
     profile: StudentProfile,
     recommendations: RecommendationResult,
-    rank: RankEstimate | None,
+    rank: RankEstimate | RankScenario | None,
     pathways: PathwayResult | None,
     evidence: ValidatedEvidenceSnapshot,
 ) -> ReportModel:
@@ -1041,8 +1178,10 @@ def build_report_model(
     retrieval_date_snapshot = _date_tuple(evidence.retrieval_dates, "retrieval_dates")
     if not isinstance(recommendations, RecommendationResult):
         raise TypeError("recommendations must be a RecommendationResult")
+    if rank is not None and not isinstance(rank, (RankEstimate, RankScenario)):
+        raise TypeError("rank must be a RankEstimate, RankScenario, or None")
     projected_recommendations = tuple(
-        _project_recommendation(item, profile_snapshot.rank)
+        _project_recommendation(item, profile_snapshot.rank, rank)
         for item in tuple(recommendations.items)
     )
     ordinary_batch_policy = OrdinaryBatchPolicy(
@@ -1052,10 +1191,10 @@ def build_report_model(
     recommendation_warnings = _text_tuple(recommendations.warnings, "recommendation warnings")
     input_years = _year_tuple(recommendations.input_years, "recommendation input years")
     usable_years = _year_tuple(recommendations.usable_years, "recommendation usable years")
-    if rank is not None:
-        if not isinstance(rank, RankEstimate):
-            raise TypeError("rank must be a RankEstimate or None")
+    if isinstance(rank, RankEstimate):
         rank_snapshot = RankEstimate(**rank.to_dict())
+    elif isinstance(rank, RankScenario):
+        rank_snapshot = RankScenario._create(**rank.to_dict())
     else:
         rank_snapshot = None
 
@@ -1099,7 +1238,11 @@ def build_report_model(
         for source_id in item.source_ids
     }
     if rank_snapshot is not None:
-        source_ids.update(rank_snapshot.contributing_source_ids)
+        source_ids.update(
+            rank_snapshot.source_ids
+            if isinstance(rank_snapshot, RankScenario)
+            else rank_snapshot.contributing_source_ids
+        )
     for item in projected_pathways:
         source_ids.update(item.source_ids)
     source_ids.update(model_source_ids)
@@ -1117,7 +1260,7 @@ def build_report_model(
                 *degradations,
                 *recommendation_warnings,
                 *pathway_warnings,
-                *(("喜报位次模型未提供，未执行校排名折算",) if rank_snapshot is None else ()),
+                *(("喜报位次证据不足：模型未提供；不执行校排名折算",) if rank_snapshot is None else ()),
                 *(("多元升学结果未提供，本章节降级",) if not pathways_available else ()),
             )
         )
@@ -1233,7 +1376,7 @@ def render_markdown(model: ReportModel) -> str:
         "",
         f"- 年级：{_md(profile.grade)}",
         f"- 选科模式：{_md(profile.subject_mode)}；科目组：{_md(profile.subject_selection_key)}；再选科目：{_ids(profile.secondary_subjects)}",
-        f"- 用户提供省位次：{profile.rank}",
+        f"- 当前定位位次：{profile.rank if profile.rank is not None else '暂无可靠位次'}",
         f"- 能力档位：{_TIER_LABEL[model.capability_tier]}",
         f"- 查询覆盖：{_md(model.query_coverage)}",
         f"- 证据状态：{_STATUS_LABEL[model.evidence_status]}",
@@ -1268,8 +1411,25 @@ def render_markdown(model: ReportModel) -> str:
         lines.extend(f"- {_md(item)}" for item in model.warnings)
 
     lines.extend(["", "## 二、成绩定位", ""])
-    if model.rank is None:
-        lines.append("喜报位次证据不足：本次直接采用用户提供的省位次，不执行校排名折算。")
+    if isinstance(model.rank, RankScenario):
+        rank = model.rank
+        if rank.status in {EvidenceStatus.OFFICIAL, EvidenceStatus.INFERRED}:
+            lines.extend(
+                [
+                    f"- 乐观位次：{rank.optimistic_rank}",
+                    f"- 中性位次：{rank.central_rank}",
+                    f"- 保守位次：{rank.conservative_rank}",
+                    f"- 位次性质：{'官方' if rank.status is EvidenceStatus.OFFICIAL else '推断参考'}",
+                    f"- 置信度：{_md(rank.confidence)}",
+                    f"- 计算依据：{_md(rank.basis)}",
+                    f"- 依据年份：{'、'.join(str(year) for year in rank.contributing_years) or '无'}",
+                    f"- 位次来源编号：{_ids(rank.source_ids)}",
+                ]
+            )
+        else:
+            lines.append("当前没有可校准的位次依据；不制造数字，先保留路径判断并补充最小考试信息。")
+    elif model.rank is None:
+        lines.append("当前没有可校准的位次依据；不制造数字，先保留路径判断并补充最小考试信息。")
     elif model.rank.status is EvidenceStatus.INFERRED:
         rank = model.rank
         lines.extend(
@@ -1321,16 +1481,17 @@ def render_markdown(model: ReportModel) -> str:
         lines.extend(
             _table(
                 (
-                    "路径", "院校", "状态", "政策证据状态", "政策来源编号",
+                    "路径", "院校", "投入结论", "资格状态", "政策证据状态", "政策来源编号",
                     "专业选项", "培养安排", "转段规则", "毕业/升学出口",
                     "服务/就业义务", "退出/违约规则", "费用/补助",
-                    "待核实约束", "计算依据",
+                    "已满足条件", "待核实约束", "时间线", "当前行动", "计算依据",
                 ),
                 (
                     (
                         item.title,
                         item.institution,
-                        "正式候选" if item.status == "formal" else ("待核实" if item.status == "pending_verification" else "不符合"),
+                        item.investment_decision,
+                        item.qualification_status,
                         _STATUS_LABEL[item.evidence_status],
                         "、".join(item.source_ids),
                         "、".join(item.professional_options) or "当前证据未提供",
@@ -1340,7 +1501,10 @@ def render_markdown(model: ReportModel) -> str:
                         item.service_employment_obligations or "当前证据未提供",
                         item.penalty_exit_rules or "当前证据未提供",
                         item.fees_and_subsidies or "当前证据未提供",
+                        "；".join(item.satisfied_conditions) or "无",
                         "；".join(item.missing_constraints) or "无",
+                        "；".join(item.timeline) or "待当年政策确认",
+                        "；".join(item.preparation_actions) or "待补充可执行动作",
                         item.calculation_basis,
                     )
                     for item in model.pathways

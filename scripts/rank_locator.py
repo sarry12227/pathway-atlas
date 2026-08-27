@@ -260,7 +260,11 @@ def _score_payload(row: ValidatedScoreRow) -> dict[str, str | int]:
 def _matching_score_rows(
     profile: PlanningProfile,
     score_rows: Iterable[ValidatedScoreRow],
+    subject_group: str | None = None,
 ) -> tuple[dict[str, str | int], ...]:
+    expected_subject_group = subject_group or profile.subject_group
+    if not isinstance(expected_subject_group, str) or not expected_subject_group.strip():
+        raise TypeError("score subject group must be non-empty text")
     window = set(year_window(profile.exam_year))
     rows = tuple(_score_payload(row) for row in score_rows)
     return tuple(
@@ -268,7 +272,7 @@ def _matching_score_rows(
             (
                 row
                 for row in rows
-                if row["subject_group"] == profile.subject_group and row["year"] in window
+                if row["subject_group"] == expected_subject_group and row["year"] in window
             ),
             key=lambda row: (-int(row["year"]), -int(row["score"])),
         )
@@ -278,8 +282,9 @@ def _matching_score_rows(
 def _cohort_context(
     profile: PlanningProfile,
     score_rows: Iterable[ValidatedScoreRow],
+    subject_group: str | None = None,
 ) -> tuple[tuple[int, ...], tuple[int, ...]]:
-    rows = _matching_score_rows(profile, score_rows)
+    rows = _matching_score_rows(profile, score_rows, subject_group)
     by_year: dict[int, int] = {}
     for row in rows:
         year = int(row["year"])
@@ -605,16 +610,19 @@ def locate_rank(
     evidence_facts: Iterable[Any],
     score_rows: Iterable[ValidatedScoreRow],
     anchors: Iterable[RankAnchor] = (),
+    score_subject_group: str | None = None,
 ) -> RankScenario:
     """Return an official or explicitly inferred rank scenario."""
 
     if not isinstance(profile, PlanningProfile):
         raise TypeError("profile must be a PlanningProfile")
-    rows = _matching_score_rows(profile, score_rows)
+    rows = _matching_score_rows(profile, score_rows, score_subject_group)
     official = _official_scenario(profile, rows)
     if official is not None:
         return official
-    cohort_years, cohorts = _cohort_context(profile, score_rows)
+    cohort_years, cohorts = _cohort_context(
+        profile, score_rows, score_subject_group
+    )
     if not cohorts:
         return _missing(("official_cohort_size_missing",))
 

@@ -923,10 +923,16 @@ class PublicPackageBoundaryTest(unittest.TestCase):
         report_tree = ast.parse((ROOT / "scripts/generate_report.py").read_text("utf-8"))
 
         signature = inspect.signature(school_module.recommend_schools)
-        self.assertEqual(list(signature.parameters), ["rows", "profile", "policy"])
-        for parameter in signature.parameters.values():
+        self.assertEqual(
+            list(signature.parameters),
+            ["rows", "profile", "policy", "rank_scenario"],
+        )
+        for parameter in tuple(signature.parameters.values())[:3]:
             self.assertIs(parameter.kind, inspect.Parameter.POSITIONAL_OR_KEYWORD)
             self.assertIs(parameter.default, inspect.Parameter.empty)
+        scenario_parameter = signature.parameters["rank_scenario"]
+        self.assertIs(scenario_parameter.kind, inspect.Parameter.KEYWORD_ONLY)
+        self.assertIsNone(scenario_parameter.default)
         self.assertFalse(hasattr(school_module, "params_from_config"))
         self.assertFalse(hasattr(school_module, "_tier_threshold_labels"))
 
