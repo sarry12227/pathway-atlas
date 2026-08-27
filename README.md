@@ -1,6 +1,6 @@
 一句话让Agent调用该skill：
 
-> ```bash
+```bash
 请使用你当前环境的 Skill 安装能力，从 GitHub `https://github.com/sarry12227/pathway-atlas` 安装 `pathway-atlas`（多元星途）；如果 GitHub 无法访问，请改用 Gitee 镜像 `https://gitee.com/sarry1/pathway-atlas`。若环境没有专用安装工具，请将仓库克隆或下载到当前 Agent 的 Skills 目录，确认根目录存在 `SKILL.md` 且其中 `name` 为 `pathway-atlas`，然后重新加载并调用它。
 ```
 
