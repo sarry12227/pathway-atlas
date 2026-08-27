@@ -13,6 +13,7 @@ if __package__:
     from .contracts import EvidenceStatus, RecommendationProfile
     from .data_loader import DataError
     from .path_recommend import PathwayProfile, evaluate_pathways
+    from .planning_profile import PlanningProfile, load_planning_profile
     from .report_model import (
         StudentProfile,
         build_report_model,
@@ -32,6 +33,7 @@ else:
     from contracts import EvidenceStatus, RecommendationProfile
     from data_loader import DataError
     from path_recommend import PathwayProfile, evaluate_pathways
+    from planning_profile import PlanningProfile, load_planning_profile
     from report_model import (
         StudentProfile,
         build_report_model,
@@ -130,6 +132,11 @@ def _profile_collection(payload: dict, name: str) -> tuple[str, ...]:
 
 def _load_public_profile(path: Path):
     payload = _strict_json_file(path, "用户画像")
+    if isinstance(payload, dict) and payload.get("schema_version") == "2.0":
+        try:
+            return load_planning_profile(payload)
+        except (TypeError, ValueError) as error:
+            raise EvidenceReportInputError("用户画像值不符合公开契约") from error
     fields = {
         "schema_version",
         "province",
@@ -488,9 +495,10 @@ def _evidence_main(argv) -> int:
         return 3
     args = _build_evidence_parser().parse_args(argv)
     try:
-        report_profile, recommendation_profile, pathway_profile = _load_public_profile(
-            args.profile
-        )
+        loaded_profile = _load_public_profile(args.profile)
+        if isinstance(loaded_profile, PlanningProfile):
+            raise EvidenceReportInputError("规划画像尚未完成位次定位")
+        report_profile, recommendation_profile, pathway_profile = loaded_profile
         dataset = _resolve_public_dataset(args.dataset, report_profile)
         report_profile, recommendation_profile = _profiles_with_canonical_subject_key(
             dataset, report_profile, recommendation_profile

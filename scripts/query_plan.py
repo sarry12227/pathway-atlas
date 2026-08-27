@@ -34,6 +34,13 @@ if __package__:
         _MISSING_LOCAL_CAPABILITY = "contracts"
     if _MISSING_LOCAL_CAPABILITY is None:
         try:
+            from .planning_profile import PlanningProfile, load_planning_profile
+        except ModuleNotFoundError as error:
+            if error.name != f"{__package__}.planning_profile":
+                raise
+            _MISSING_LOCAL_CAPABILITY = "planning_profile"
+    if _MISSING_LOCAL_CAPABILITY is None:
+        try:
             from .path_recommend import validate_public_output_text
         except ModuleNotFoundError as error:
             if error.name != f"{__package__}.path_recommend":
@@ -59,6 +66,13 @@ else:  # pragma: no cover - exercised by the real CLI and flat-import tests
         _MISSING_LOCAL_CAPABILITY = "contracts"
     if _MISSING_LOCAL_CAPABILITY is None:
         try:
+            from planning_profile import PlanningProfile, load_planning_profile
+        except ModuleNotFoundError as error:
+            if error.name != "planning_profile":
+                raise
+            _MISSING_LOCAL_CAPABILITY = "planning_profile"
+    if _MISSING_LOCAL_CAPABILITY is None:
+        try:
             from path_recommend import validate_public_output_text
         except ModuleNotFoundError as error:
             if error.name != "path_recommend":
@@ -77,7 +91,8 @@ else:  # pragma: no cover - exercised by the real CLI and flat-import tests
             _MISSING_LOCAL_CAPABILITY = "province_registry"
 
 if _MISSING_LOCAL_CAPABILITY is not None:
-    OrdinaryBatchPolicy = RecommendationProfile = ProvinceConfig = None
+    OrdinaryBatchPolicy = RecommendationProfile = PlanningProfile = ProvinceConfig = None
+    load_planning_profile = None
     validate_public_output_text = _parse_config = canonical_subject_selection_key = None
 
 
@@ -1059,7 +1074,7 @@ def _make_task(
 
 
 def build_query_plan(
-    profile: RecommendationProfile,
+    profile: RecommendationProfile | PlanningProfile,
     province: ProvinceConfig,
     exam_year: Any,
     *,
@@ -1069,8 +1084,8 @@ def build_query_plan(
 ) -> QueryPlan:
     """Return an immutable plan for one anonymous recommendation profile."""
 
-    if not isinstance(profile, RecommendationProfile):
-        raise TypeError("profile must be a RecommendationProfile")
+    if not isinstance(profile, (RecommendationProfile, PlanningProfile)):
+        raise TypeError("profile must be a recommendation or planning profile")
     province = _validate_province_config(province)
     year = _normalize_exam_year(exam_year)
     if catalog is None:
@@ -1081,18 +1096,28 @@ def build_query_plan(
     province_name = discovery.province
     if province.mode != discovery.mode:
         raise ValueError("province policy mode conflicts with discovery catalog mode")
-    profile_province = _public_text(profile.target_province, "profile target_province")
+    if isinstance(profile, PlanningProfile):
+        profile_province_value = profile.province
+        primary_value = profile.subject_group
+        secondary_values = profile.secondary_subjects
+        profile_school = profile.high_school
+    else:
+        profile_province_value = profile.target_province
+        primary_value = profile.subject_group
+        secondary_values = profile.secondary_subjects
+        profile_school = None
+    profile_province = _public_text(profile_province_value, "profile target_province")
     if catalog.resolve(profile_province).province != province_name:
         raise ValueError("profile and province configuration do not match")
-    primary = _public_text(profile.subject_group, "profile subject_group")
+    primary = _public_text(primary_value, "profile subject_group")
     secondary = tuple(
         _public_text(item, "profile secondary_subject")
-        for item in profile.secondary_subjects
+        for item in secondary_values
     )
     subject_group = canonical_subject_selection_key(province, primary, list(secondary))
     _public_text(subject_group, "canonical subject_group")
 
-    school = None
+    school = profile_school
     if high_school_name is not None:
         school = _public_text(high_school_name, "high_school_name")
     pathways = _text_collection(
@@ -1341,8 +1366,11 @@ def _profile_array(payload: dict[str, Any], name: str) -> tuple[str, ...]:
     return _text_collection(value, f"profile {name}")
 
 
-def _load_profile(path: Any) -> tuple[RecommendationProfile, str, int]:
+def _load_profile(path: Any) -> tuple[RecommendationProfile | PlanningProfile, str, int]:
     payload = _strict_json_file(path)
+    if isinstance(payload, dict) and payload.get("schema_version") == "2.0":
+        profile = load_planning_profile(payload)
+        return profile, profile.subject_mode, profile.exam_year
     if not isinstance(payload, dict) or set(payload) != _PROFILE_FIELDS:
         raise ValueError("profile fields do not match the strict anonymous contract")
     if payload["schema_version"] != "1.0":

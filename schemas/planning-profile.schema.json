@@ -1,0 +1,139 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pathway-atlas.example/schemas/planning-profile.schema.json",
+  "title": "PathwayAtlas anonymous planning profile input",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "gender",
+    "province",
+    "city",
+    "high_school",
+    "grade",
+    "exam_year",
+    "class_level",
+    "subject_mode",
+    "subject_group",
+    "secondary_subjects",
+    "score_basis",
+    "rank_observations",
+    "best_rank",
+    "usual_rank",
+    "awards",
+    "activities",
+    "target_schools",
+    "target_school_reasons",
+    "target_majors",
+    "target_major_reasons",
+    "target_regions",
+    "excluded_regions",
+    "future_plan",
+    "concerns",
+    "desired_outcomes",
+    "eligibility_facts"
+  ],
+  "properties": {
+    "schema_version": {"const": "2.0"},
+    "gender": {"enum": ["男", "女", "不便回答"]},
+    "province": {"$ref": "#/$defs/publicText"},
+    "city": {"$ref": "#/$defs/nullablePublicText"},
+    "high_school": {"$ref": "#/$defs/nullablePublicText"},
+    "grade": {"enum": ["高一", "高二", "高三"]},
+    "exam_year": {"type": "integer", "minimum": 2000, "maximum": 2100},
+    "class_level": {"$ref": "#/$defs/nullablePublicText"},
+    "subject_mode": {"enum": ["3+1+2", "3+3"]},
+    "subject_group": {"$ref": "#/$defs/publicText"},
+    "secondary_subjects": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/publicText"}
+    },
+    "score_basis": {
+      "oneOf": [
+        {"type": "null"},
+        {"enum": ["原始分", "赋分", "原始分与赋分", "不确定"]}
+      ]
+    },
+    "rank_observations": {
+      "type": "array",
+      "maxItems": 24,
+      "items": {"$ref": "#/$defs/rankObservation"}
+    },
+    "best_rank": {"$ref": "#/$defs/nullablePositiveInteger"},
+    "usual_rank": {"$ref": "#/$defs/nullablePositiveInteger"},
+    "awards": {"$ref": "#/$defs/publicTextArray"},
+    "activities": {"$ref": "#/$defs/publicTextArray"},
+    "target_schools": {"$ref": "#/$defs/publicTextArray"},
+    "target_school_reasons": {"$ref": "#/$defs/publicTextArray"},
+    "target_majors": {"$ref": "#/$defs/publicTextArray"},
+    "target_major_reasons": {"$ref": "#/$defs/publicTextArray"},
+    "target_regions": {"$ref": "#/$defs/publicTextArray"},
+    "excluded_regions": {"$ref": "#/$defs/publicTextArray"},
+    "future_plan": {"$ref": "#/$defs/publicText"},
+    "concerns": {"$ref": "#/$defs/publicTextArray"},
+    "desired_outcomes": {"$ref": "#/$defs/publicTextArray"},
+    "eligibility_facts": {"$ref": "#/$defs/publicTextArray"}
+  },
+  "$defs": {
+    "publicText": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "pattern": "^\\S(?:.*\\S)?$"
+    },
+    "nullablePublicText": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "#/$defs/publicText"}
+      ]
+    },
+    "publicTextArray": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/publicText"}
+    },
+    "nullablePositiveInteger": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "integer", "minimum": 1}
+      ]
+    },
+    "nullableScore": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "integer", "minimum": 0, "maximum": 1500}
+      ]
+    },
+    "rankObservation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "exam_date",
+        "scope",
+        "score",
+        "max_score",
+        "rank",
+        "cohort_size"
+      ],
+      "properties": {
+        "exam_date": {"type": "string", "format": "date"},
+        "scope": {
+          "enum": ["school", "city_joint", "province_joint", "province_official"]
+        },
+        "score": {"$ref": "#/$defs/nullableScore"},
+        "max_score": {"$ref": "#/$defs/nullablePositiveInteger"},
+        "rank": {"$ref": "#/$defs/nullablePositiveInteger"},
+        "cohort_size": {"$ref": "#/$defs/nullablePositiveInteger"},
+        "subject_group": {"$ref": "#/$defs/publicText"},
+        "high_school": {"$ref": "#/$defs/nullablePublicText"},
+        "class_level": {"$ref": "#/$defs/nullablePublicText"},
+        "source": {
+          "enum": ["user_reported", "school_report", "joint_exam_report", "official_score"]
+        }
+      }
+    }
+  }
+}
