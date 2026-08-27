@@ -16,6 +16,7 @@ from scripts.data_loader import DataError, load_admission_rows, load_toudang
 from scripts import validate_data as validator_module
 from scripts.validate_data import (
     ValidatedDatasetSnapshot,
+    ValidatedScoreRow,
     ValidationIssue,
     validate_dataset,
     validate_dataset_snapshot,
@@ -71,11 +72,28 @@ class ValidationContractTest(unittest.TestCase):
         assert snapshot is not None
         self.assertEqual(snapshot.config.province, "演示甲省")
         self.assertEqual(snapshot.admission_rows[0].to_dict()["school_name"], "虚构甲大学")
+        self.assertTrue(snapshot.score_rows)
+        self.assertIsInstance(snapshot.score_rows[0], ValidatedScoreRow)
+        self.assertEqual(
+            snapshot.score_rows[0].to_dict(),
+            {
+                "year": 2026,
+                "score": 650,
+                "rank": 1000,
+                "cumulative_count": 1000,
+                "subject_group": "物理",
+            },
+        )
         with self.assertRaises(FrozenInstanceError):
             snapshot.admission_rows = ()
+        with self.assertRaises(FrozenInstanceError):
+            snapshot.score_rows = ()
         payload = snapshot.admission_rows[0].to_dict()
         payload["school_name"] = "外部篡改"
         self.assertEqual(snapshot.admission_rows[0].to_dict()["school_name"], "虚构甲大学")
+        score_payload = snapshot.score_rows[0].to_dict()
+        score_payload["rank"] = 1
+        self.assertEqual(snapshot.score_rows[0].to_dict()["rank"], 1000)
 
     def test_invalid_dataset_snapshot_fails_closed_without_data(self):
         result = validate_dataset_snapshot((FIXTURES / "duplicate-program").resolve())

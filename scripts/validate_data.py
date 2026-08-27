@@ -164,11 +164,42 @@ def admission_row_hash(row: ValidatedAdmissionRow) -> str:
 
 
 @dataclass(frozen=True)
+class ValidatedScoreRow:
+    """One score-table row captured by the validator's authenticated read."""
+
+    _items: tuple[tuple[str, str | int], ...]
+
+    def __post_init__(self) -> None:
+        expected = {"year", "score", "rank", "cumulative_count", "subject_group"}
+        if tuple(sorted(self._items)) != self._items:
+            raise ValueError("validated score row must be a sorted snapshot")
+        if {key for key, _value in self._items} != expected:
+            raise ValueError("validated score row fields do not match the contract")
+        payload = dict(self._items)
+        for name in ("year", "score", "rank", "cumulative_count"):
+            value = payload[name]
+            if not isinstance(value, int) or isinstance(value, bool):
+                raise TypeError(f"validated score row {name} must be an integer")
+        if not isinstance(payload["subject_group"], str) or not payload["subject_group"]:
+            raise TypeError("validated score row subject_group must be non-empty text")
+        if payload["rank"] < 1 or payload["cumulative_count"] < 1:
+            raise ValueError("validated score row ranks must be positive")
+
+    @classmethod
+    def from_mapping(cls, row: dict[str, str | int]) -> "ValidatedScoreRow":
+        return cls(tuple(sorted(row.items())))
+
+    def to_dict(self) -> dict[str, str | int]:
+        return dict(self._items)
+
+
+@dataclass(frozen=True)
 class ValidatedDatasetSnapshot:
     """Authenticated province metadata and data parsed during one validation pass."""
 
     config: ProvinceConfig
     admission_rows: tuple[ValidatedAdmissionRow, ...]
+    score_rows: tuple[ValidatedScoreRow, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.config, ProvinceConfig):
@@ -177,6 +208,10 @@ class ValidatedDatasetSnapshot:
         if not all(isinstance(row, ValidatedAdmissionRow) for row in rows):
             raise TypeError("snapshot rows must be ValidatedAdmissionRow records")
         object.__setattr__(self, "admission_rows", rows)
+        score_rows = tuple(self.score_rows)
+        if not all(isinstance(row, ValidatedScoreRow) for row in score_rows):
+            raise TypeError("snapshot score_rows must be ValidatedScoreRow records")
+        object.__setattr__(self, "score_rows", score_rows)
 
     def validate_subjects(
         self,
@@ -279,7 +314,11 @@ def _validate_table(
     parent_identity: _DirectoryIdentity,
     dataset_identity: _DirectoryIdentity,
     operation_hook: Callable[[], None] | None = None,
-) -> tuple[list[ValidationIssue], tuple[ValidatedAdmissionRow, ...]]:
+) -> tuple[
+    list[ValidationIssue],
+    tuple[ValidatedAdmissionRow, ...],
+    tuple[ValidatedScoreRow, ...],
+]:
     issues: list[ValidationIssue] = []
     rule = _KNOWN_TABLES[table]
     _verify_dataset_identity(parent_identity, dataset_identity)
@@ -297,11 +336,11 @@ def _validate_table(
             code = "data_file_changed"
         if "格式损坏" in text or "严格 UTF-8" in text:
             code = "invalid_csv"
-        return [_issue(code, f"文件级错误：{text}", table, path)], ()
+        return [_issue(code, f"文件级错误：{text}", table, path)], (), ()
     _verify_dataset_identity(parent_identity, dataset_identity)
 
     if not headers or not rows:
-        return [_issue("empty_file", "文件级错误：文件为空（无数据行）", table, path)], ()
+        return [_issue("empty_file", "文件级错误：文件为空（无数据行）", table, path)], (), ()
 
     canonical_headers = _canonical_headers(table, headers)
     missing = [field for field in rule["required_headers"] if field not in canonical_headers]
@@ -313,12 +352,13 @@ def _validate_table(
                 table,
                 path,
             )
-        ], ()
+        ], (), ()
 
     seen: set[tuple[str, ...]] = set()
     school_identities: dict[tuple[int, str, str], str] = {}
     valid_years: set[int] = set()
     admission_rows: list[ValidatedAdmissionRow] = []
+    score_rows: list[ValidatedScoreRow] = []
     for line, source_row in enumerate(rows, start=2):
         try:
             row = _normalize_admission_row(source_row) if table == "tou_dang" else source_row
@@ -348,6 +388,19 @@ def _validate_table(
                 issues.append(_issue("invalid_integer", f"行{line}：{field} 不是严格整数", table, path, line, field))
             else:
                 parsed[field] = number
+
+        if table == "yifenyiduan" and set(rule["integers"]) <= set(parsed):
+            score_rows.append(
+                ValidatedScoreRow.from_mapping(
+                    {
+                        "year": parsed["year"],
+                        "score": parsed["score"],
+                        "rank": parsed["rank"],
+                        "cumulative_count": parsed["cumulative_count"],
+                        "subject_group": row.get("subject_group", "").strip(),
+                    }
+                )
+            )
 
         year = parsed.get("year")
         if year is not None:
@@ -409,7 +462,7 @@ def _validate_table(
     if "year" in rule["integers"] and not valid_years:
         issues.append(_issue("missing_year_coverage", "文件级错误：没有 2000..2100 内的有效年份覆盖", table, path))
     _verify_dataset_identity(parent_identity, dataset_identity)
-    return issues, tuple(admission_rows)
+    return issues, tuple(admission_rows), tuple(score_rows)
 
 
 def validate_dataset(province_dir: os.PathLike[str] | str) -> list[ValidationIssue]:
@@ -470,6 +523,7 @@ def _validate_dataset_snapshot(
     found = 0
     issues: list[ValidationIssue] = []
     admission_rows: tuple[ValidatedAdmissionRow, ...] = ()
+    score_rows: tuple[ValidatedScoreRow, ...] = ()
     try:
         if operation_hook is not None:
             operation_hook()
@@ -489,7 +543,7 @@ def _validate_dataset_snapshot(
             table_hook = None
             if table_operation_hook is not None:
                 table_hook = lambda table=table, path=path: table_operation_hook(table, path)
-            table_issues, table_rows = _validate_table(
+            table_issues, table_rows, table_score_rows = _validate_table(
                 path,
                 table,
                 config,
@@ -500,6 +554,8 @@ def _validate_dataset_snapshot(
             issues.extend(table_issues)
             if table == "tou_dang":
                 admission_rows = table_rows
+            if table == "yifenyiduan":
+                score_rows = table_score_rows
             _verify_dataset_identity(parent_identity, dataset_identity)
         _verify_dataset_identity(parent_identity, dataset_identity)
         if found == 0:
@@ -509,7 +565,11 @@ def _validate_dataset_snapshot(
         if ordered:
             return DatasetValidationResult(None, ordered)
         return DatasetValidationResult(
-            ValidatedDatasetSnapshot(config=config, admission_rows=admission_rows),
+            ValidatedDatasetSnapshot(
+                config=config,
+                admission_rows=admission_rows,
+                score_rows=score_rows,
+            ),
             (),
         )
     except ProvincePathError:
