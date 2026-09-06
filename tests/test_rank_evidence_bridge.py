@@ -150,7 +150,7 @@ class RankEvidenceBridgeTest(unittest.TestCase):
         query_plan = plan(student)
         task = next(t for t in query_plan.tasks if t.kind == "score_table")
         with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp, "table.html")
+            path = Path(tmp).resolve() / "table.html"
             path.write_text(
                 '<table><caption>一分一段表</caption><tr><th>分数</th><th>累计人数</th></tr>'
                 '<tr><td>610</td><td>18000</td></tr><tr><td>609</td><td>18500</td></tr></table>',

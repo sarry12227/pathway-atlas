@@ -121,7 +121,7 @@ def _workflow_errors(document: dict[str, Any]) -> list[str]:
     if job.get("runs-on") != "${{ matrix.os }}":
         errors.append("runs-on")
     timeout = job.get("timeout-minutes")
-    if not isinstance(timeout, int) or not 1 <= timeout <= 30:
+    if not isinstance(timeout, int) or not 1 <= timeout <= 90:
         errors.append("timeout")
 
     strategy = job.get("strategy")
@@ -450,7 +450,7 @@ def _release_workflow_errors(document: dict[str, Any]) -> list[str]:
     if job.get("runs-on") != "ubuntu-latest":
         errors.append("runs-on")
     timeout = job.get("timeout-minutes")
-    if not isinstance(timeout, int) or isinstance(timeout, bool) or not 1 <= timeout <= 30:
+    if not isinstance(timeout, int) or isinstance(timeout, bool) or not 1 <= timeout <= 90:
         errors.append("timeout")
     steps = job.get("steps")
     if not isinstance(steps, list) or not all(isinstance(step, dict) for step in steps):

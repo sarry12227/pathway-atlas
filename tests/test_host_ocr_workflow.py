@@ -64,7 +64,7 @@ class HostOcrWorkflowTest(unittest.TestCase):
 
     def test_exact_ocr_ingest_replays_as_the_genuine_subtype(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve()
             workflow, task = self.ingest_exact_ocr(root)
 
             restored = host_workflow.PlanningWorkflow.resume(
@@ -88,7 +88,7 @@ class HostOcrWorkflowTest(unittest.TestCase):
 
     def test_ocr_replay_rejects_changed_mapping_and_cell_locator(self):
         with tempfile.TemporaryDirectory() as temporary:
-            workflow, _task = self.ingest_exact_ocr(Path(temporary))
+            workflow, _task = self.ingest_exact_ocr(Path(temporary).resolve())
             outcome = workflow.context.task_outcomes[0]
             record = planning_session._task_outcome_journal_record(outcome)
 

@@ -19,7 +19,8 @@ jobs:
   test:
     name: ${{ matrix.os }} / Python ${{ matrix.python-version }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    # Full receipt/replay tests and the strict gate each need over 20 minutes.
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:

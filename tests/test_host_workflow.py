@@ -15,7 +15,7 @@ class HostWorkflowTest(unittest.TestCase):
         from tests.test_school_fit_evidence_bridge import charter_values, source
         from tests.test_school_fit_public_text_bridge import _document
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+            root = Path(tmp).resolve()
             workflow = host_workflow.PlanningWorkflow.start(root, _profile(), _report(), confirmed=True)
             self.assertGreater(workflow.status()["pending"], 3)
             self.assertEqual(len(workflow.status()["next"]), 3)
@@ -39,7 +39,7 @@ class HostWorkflowTest(unittest.TestCase):
     def test_cli_prose_receipt_keeps_source_and_windows_text_spans_on_resume(self):
         from tests.test_pathway_evidence_bridge import candidate
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+            root = Path(tmp).resolve()
             workflow = host_workflow.PlanningWorkflow.start(root, _profile(), _report(), confirmed=True)
             task = next(t for t in workflow.pending() if t.kind == "strong_foundation")
             text = f"官方招生简章\n示例高校{task.year}年招生\n报名入口：https://example.edu.cn/apply"
@@ -76,7 +76,7 @@ class HostWorkflowTest(unittest.TestCase):
     def test_cli_ingests_realistic_captionless_score_table(self):
         from tests.test_rank_evidence_bridge import candidate
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+            root = Path(tmp).resolve()
             workflow = host_workflow.PlanningWorkflow.start(root, _profile(), _report(), confirmed=True)
             task = max((t for t in workflow.pending() if t.kind == "score_table"), key=lambda t: t.year)
             raw = root / "public.html"
@@ -111,7 +111,7 @@ class HostWorkflowTest(unittest.TestCase):
         from scripts.questionnaire_intake import build_profile_from_questionnaire
         from tests.test_questionnaire_intake import structured_answers
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+            root = Path(tmp).resolve()
             profile = build_profile_from_questionnaire(structured_answers())
             workflow = host_workflow.PlanningWorkflow.start(root, profile, _report(), confirmed=True)
             session_id = workflow.session.session_id
