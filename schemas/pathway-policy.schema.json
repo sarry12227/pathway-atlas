@@ -19,6 +19,42 @@
       "source_id_claim_gate"
     ]
   },
+  "x-pathway-extraction": {
+    "projection": "scripts.adapters.pathway_extraction.PathwayPolicyProjection",
+    "factory": "scripts.adapters.pathway_extraction.extract_pathway_policy",
+    "evidence_bridge": "scripts.adapters.pathway_bridge.bridge_pathway_policy_evidence",
+    "replay": "scripts.adapters.pathway_extraction.replay_pathway_policy_projection",
+    "adapter_outputs": [
+      "html-table",
+      "xlsx-worksheet",
+      "pdfplumber-text",
+      "host-ocr-rows"
+    ],
+    "required_fields": [
+      "institution",
+      "province",
+      "subject_mode",
+      "year",
+      "eligibility_requirements",
+      "grade_requirements",
+      "subject_requirements",
+      "award_requirements",
+      "activity_requirements",
+      "disqualifying_facts",
+      "professional_options",
+      "training_arrangements",
+      "transition_rules",
+      "outcomes",
+      "service_employment_obligations",
+      "penalty_exit_rules",
+      "fees_and_subsidies",
+      "dates_and_deadlines",
+      "application_materials",
+      "preparation_actions"
+    ],
+    "coverage_states": ["complete", "partial", "conflict", "missing"],
+    "decisive_evidence_statuses": ["official", "corroborated", "reference"]
+  },
   "type": "object",
   "additionalProperties": false,
   "required": [

@@ -50,7 +50,8 @@ CI 另行在 Ubuntu、Windows、macOS 上覆盖 Python 3.10 与 3.13；本地排
 - [ ] `demo-312` 与 `demo-33` 两种省份模式都通过数据校验。
 - [ ] 已提交的三独立来源证据 fixture 通过校验。
 - [ ] 从已提交 dataset/profile/evidence 生成真实 Markdown。
-- [ ] 从同一输入生成真实 DOCX，文件非空；所有报告仍在 clone 外。
+- [ ] 由宿主内部 v3 工作流（当前画像、canonical QueryPlan 与新鲜认证
+  证据包）从同一报告模型生成真实 DOCX，文件非空；所有报告仍在 clone 外。
 
 ```powershell
 Push-Location $clonePath
@@ -59,10 +60,10 @@ Push-Location $clonePath
 & $releasePython scripts\validate_data.py tests\fixtures\provinces\demo-33
 & $releasePython scripts\validate_evidence.py tests\fixtures\evidence\three-source-consensus
 $markdownReport = Join-Path $artifactPath "anonymous-admission-report.md"
-$docxReport = Join-Path $artifactPath "anonymous-admission-report.docx"
 & $releasePython scripts\generate_report.py --dataset tests\fixtures\provinces\demo-312 --profile tests\fixtures\profiles\demo.json --evidence tests\fixtures\evidence\three-source-consensus | Out-File -LiteralPath $markdownReport -Encoding utf8NoBOM
-& $releasePython scripts\docx_export.py --dataset tests\fixtures\provinces\demo-312 --profile tests\fixtures\profiles\demo.json --evidence tests\fixtures\evidence\three-source-consensus --output $docxReport
-if ((Get-Item -LiteralPath $markdownReport).Length -eq 0 -or (Get-Item -LiteralPath $docxReport).Length -eq 0) { throw "empty rehearsal report" }
+# The public skill/host workflow, not a hand-authored JSON/path command, must
+# replay the canonical v3 context and place its DOCX in $artifactPath.
+if ((Get-Item -LiteralPath $markdownReport).Length -eq 0) { throw "empty rehearsal Markdown report" }
 Pop-Location
 ```
 

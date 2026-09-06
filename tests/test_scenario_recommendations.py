@@ -157,6 +157,107 @@ class ScenarioRecommendationTest(unittest.TestCase):
         self.assertEqual(item.scenario_confidence, "low")
         self.assertIn("仅覆盖 2026", result.warnings)
 
+    def test_official_singleton_coverage_cannot_support_a_wider_rank_scenario(self):
+        singleton = [
+            row(
+                "单点覆盖大学",
+                2026,
+                22000,
+                evidence_status="official",
+                coverage_status="official",
+                coverage_min_rank=22000,
+                coverage_max_rank=22000,
+                source_ids=("official-singleton-2026",),
+            )
+        ]
+
+        result = recommend_schools(
+            singleton,
+            profile(),
+            policy(),
+            rank_scenario=scenario(),
+        )
+
+        self.assertEqual(result.items, ())
+        self.assertEqual(result.usable_years, ())
+        self.assertEqual(result.verified_rank_coverage, (22000, 22000))
+        self.assertEqual(result.rank_bounds, (18000, 22000, 27000))
+
+    def test_partial_scenario_rows_remain_observations_within_declared_interval(self):
+        partial_rows = [
+            row(
+                "部分线索大学",
+                year,
+                min_rank,
+                coverage_status="partial",
+                source_ids=(f"partial-school-{year}",),
+            )
+            for year, min_rank in zip((2024, 2025, 2026), (24000, 23000, 22000))
+        ]
+        result = recommend_schools(
+            partial_rows,
+            profile(),
+            policy(),
+            rank_scenario=scenario(),
+        )
+        self.assertEqual(result.items, ())
+        self.assertEqual(result.empty_reason, "partial_observations_only")
+        self.assertEqual(result.coverage_status, EvidenceStatus.PARTIAL)
+        self.assertEqual(result.usable_years, ())
+        self.assertIsNone(result.verified_rank_coverage)
+        self.assertEqual(
+            {(item.school_name, item.data_year) for item in result.observations},
+            {("部分线索大学", year) for year in (2024, 2025, 2026)},
+        )
+        for item in result.observations:
+            self.assertEqual(item.evidence_status, EvidenceStatus.PARTIAL)
+            self.assertEqual(item.source_ids, (f"partial-school-{item.data_year}",))
+            self.assertFalse(hasattr(item, "min_score"))
+            self.assertFalse(hasattr(item, "min_rank"))
+            self.assertFalse(hasattr(item, "delta"))
+            self.assertFalse(hasattr(item, "strategy"))
+
+    def test_partial_scenario_rows_are_observations_when_either_bound_is_outside(self):
+        for coverage_min, coverage_max in ((18001, 50000), (1000, 26999)):
+            partial_rows = [
+                row(
+                    "部分线索大学",
+                    year,
+                    min_rank,
+                    coverage_status="partial",
+                    coverage_min_rank=coverage_min,
+                    coverage_max_rank=coverage_max,
+                    source_ids=(f"partial-school-{year}",),
+                )
+                for year, min_rank in zip(
+                    (2024, 2025, 2026), (24000, 23000, 22000)
+                )
+            ]
+            with self.subTest(
+                coverage_min=coverage_min, coverage_max=coverage_max
+            ):
+                result = recommend_schools(
+                    partial_rows,
+                    profile(),
+                    policy(),
+                    rank_scenario=scenario(),
+                )
+                self.assertEqual(result.items, ())
+                self.assertEqual(result.empty_reason, "partial_observations_only")
+                self.assertEqual(result.coverage_status, EvidenceStatus.PARTIAL)
+                self.assertEqual(result.usable_years, ())
+                self.assertIsNone(result.verified_rank_coverage)
+                self.assertEqual(
+                    {item.school_name for item in result.observations},
+                    {"部分线索大学"},
+                )
+                self.assertTrue(
+                    all(not hasattr(item, "min_rank") for item in result.observations)
+                )
+                self.assertTrue(
+                    any("不进入精确冲稳保" in item for item in result.warnings)
+                )
+
     def test_profile_and_rank_scenario_must_be_exactly_bound(self):
         mismatched = RankScenario._create(
             **{

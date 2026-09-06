@@ -6,6 +6,7 @@ import argparse
 import ctypes
 import errno
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -279,12 +280,29 @@ def _run_release_check(root: Path, version: str) -> None:
     try:
         completed = subprocess.run(
             [sys.executable, str(checker), "--root", str(root), "--expected-version", version, "--ci"],
-            cwd=root, check=False, capture_output=True, env=_release_environment(), timeout=900,
+            cwd=root, check=False, capture_output=True, env=_release_environment(), timeout=4800,
         )
     except (OSError, subprocess.TimeoutExpired) as error:
         raise BuildReleaseError("release check failed") from error
     if completed.returncode != 0:
-        raise BuildReleaseError("release check failed")
+        identifiers: list[str] = []
+        try:
+            payload = json.loads(completed.stdout)
+            results = payload.get("results", []) if isinstance(payload, dict) else []
+            for result in results if isinstance(results, list) else []:
+                if not isinstance(result, dict) or result.get("ok") is not False:
+                    continue
+                name = result.get("name")
+                if isinstance(name, str) and re.fullmatch(r"[a-z_]{1,64}", name):
+                    identifiers.append(name)
+                details = result.get("details", [])
+                for detail in details if isinstance(details, list) else []:
+                    if isinstance(detail, str) and re.fullmatch(r"failed-test:[A-Za-z0-9_.]{1,256}", detail):
+                        identifiers.append(detail)
+        except (TypeError, ValueError):
+            pass
+        suffix = ": " + "; ".join(identifiers[:20]) if identifiers else ""
+        raise BuildReleaseError("release check failed" + suffix)
 
 
 def _write_archive(root: Path, destination: Path, blobs: Sequence[IndexBlob]) -> None:

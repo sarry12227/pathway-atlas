@@ -15,11 +15,14 @@ from pathlib import Path
 from scripts.data_loader import DataError, load_admission_rows, load_toudang
 from scripts import validate_data as validator_module
 from scripts.validate_data import (
+    ValidatedAdmissionRow,
     ValidatedDatasetSnapshot,
     ValidatedScoreRow,
     ValidationIssue,
+    admission_row_hash,
     validate_dataset,
     validate_dataset_snapshot,
+    validate_runtime_admission_row,
 )
 
 
@@ -63,6 +66,90 @@ def write_csv(path, headers, rows):
 
 
 class ValidationContractTest(unittest.TestCase):
+    def test_runtime_admission_row_authenticates_optional_decision_metadata(self):
+        payload = {
+            "year": 2026,
+            "province": "测试省",
+            "subject_group": "物理",
+            "school_code": "A01",
+            "school_name": "合成武汉大学",
+            "program_group": "第01组",
+            "min_score": 600,
+            "min_rank": 1000,
+            "remarks": "",
+            "city_location": "武汉",
+            "school_province": "湖北",
+            "majors_in_group": ("人工智能", "计算机科学与技术"),
+            "institution_type": "public",
+            "affordable_for": ("limited", "moderate", "flexible"),
+            "adjustment_required": False,
+        }
+
+        row = validate_runtime_admission_row(
+            payload,
+            province="测试省",
+            subject_group="物理",
+            score_scale=750,
+            allowed_years=(2026,),
+        )
+
+        self.assertIsInstance(row, ValidatedAdmissionRow)
+        self.assertEqual(row.to_dict(), payload)
+        changed = dict(payload)
+        changed["city_location"] = "上海"
+        changed_row = validate_runtime_admission_row(
+            changed,
+            province="测试省",
+            subject_group="物理",
+            score_scale=750,
+            allowed_years=(2026,),
+        )
+        self.assertNotEqual(admission_row_hash(row), admission_row_hash(changed_row))
+
+    def test_runtime_admission_decision_metadata_is_strict_and_unknown_is_absent(self):
+        base = {
+            "year": 2026,
+            "province": "测试省",
+            "subject_group": "物理",
+            "school_code": "A01",
+            "school_name": "合成大学",
+            "program_group": "第01组",
+            "min_score": 600,
+            "min_rank": 1000,
+            "remarks": "",
+        }
+        unknown = validate_runtime_admission_row(
+            base,
+            province="测试省",
+            subject_group="物理",
+            score_scale=750,
+            allowed_years=(2026,),
+        )
+        self.assertEqual(unknown.to_dict(), base)
+
+        invalid_values = {
+            "city_location": " 武汉",
+            "school_province": "湖北\n",
+            "majors_in_group": ["计算机科学与技术"],
+            "institution_type": "unknown",
+            "affordable_for": ("flexible", "limited"),
+            "adjustment_required": 0,
+        }
+        for field, value in invalid_values.items():
+            with self.subTest(field=field):
+                payload = dict(base)
+                payload[field] = value
+                with self.assertRaises((TypeError, ValueError)):
+                    validate_runtime_admission_row(
+                        payload,
+                        province="测试省",
+                        subject_group="物理",
+                        score_scale=750,
+                        allowed_years=(2026,),
+                    )
+                with self.assertRaises((TypeError, ValueError)):
+                    ValidatedAdmissionRow.from_mapping(payload)
+
     def test_validated_snapshot_is_authenticated_deep_frozen_and_detached(self):
         result = validate_dataset_snapshot((FIXTURES / "demo-312").resolve())
 

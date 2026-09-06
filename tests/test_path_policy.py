@@ -722,12 +722,14 @@ class PathwayContractTest(unittest.TestCase):
             "录取后学费补助20%",
             "被录取后可享受学费减免百分之二十",
         )
-        base_item = path_recommend.evaluate_pathways(profile(), (policy(),)).items[0]
         for fact in legitimate_facts:
             with self.subTest(fact=fact):
                 record = policy(calculation_basis=fact)
                 self.assertEqual(record.calculation_basis, fact)
-                self.assertEqual(replace(base_item, calculation_basis=fact).calculation_basis, fact)
+                item = path_recommend.evaluate_pathways(
+                    profile(), (record,)
+                ).items[0]
+                self.assertIn(fact, item.calculation_basis)
                 result = path_recommend.PathwayResult(warnings=(fact,))
                 self.assertEqual(result.warnings, (fact,))
                 self.assertEqual(model(province=fact).province, fact)
@@ -817,7 +819,10 @@ class PathwayContractTest(unittest.TestCase):
         for benign in ("Saxophone", "Secretarial", "Token Economy"):
             with self.subTest(benign=benign):
                 self.assertEqual(policy(training_arrangements=benign).training_arrangements, benign)
-                self.assertEqual(replace(item, outcomes=benign).outcomes, benign)
+                benign_item = path_recommend.evaluate_pathways(
+                    profile(), (policy(outcomes=benign),)
+                ).items[0]
+                self.assertEqual(benign_item.outcomes, benign)
                 self.assertEqual(path_recommend.PathwayResult(warnings=(benign,)).warnings, (benign,))
 
     def test_marketing_source_ids_are_rejected_and_model_sources_stay_structured(self):
@@ -892,12 +897,12 @@ class PathwayContractTest(unittest.TestCase):
                     model(source_ids=(source_id,)).source_ids,
                     (source_id,),
                 )
-                self.assertEqual(
-                    replace(
-                        base_item, policy_source_ids=(source_id,)
-                    ).policy_source_ids,
-                    (source_id,),
-                )
+                accepted_item = path_recommend.evaluate_pathways(
+                    profile(),
+                    (policy(policy_source_ids=(source_id,)),),
+                    model(source_ids=(source_id,)),
+                ).items[0]
+                self.assertEqual(accepted_item.policy_source_ids, (source_id,))
                 self.assertEqual(
                     path_recommend.PathwayResult(
                         items=(base_item,),

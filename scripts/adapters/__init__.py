@@ -549,6 +549,21 @@ def _file_identity(metadata: os.stat_result) -> tuple[int, int, int, int]:
     )
 
 
+def __getattr__(name: str) -> Any:
+    """Lazily expose the rank bridge without creating an import cycle."""
+
+    if name in {
+        "RankBridgeError",
+        "RankEvidenceBridge",
+        "bridge_rank_evidence",
+        "validate_rank_evidence_bridge",
+    }:
+        from . import rank_bridge
+
+        return getattr(rank_bridge, name)
+    raise AttributeError(name)
+
+
 __all__ = [
     "CellStatus",
     "ColumnMapping",
@@ -560,8 +575,12 @@ __all__ = [
     "PublicLocatorError",
     "PublicLocatorPathError",
     "PublicLocatorPrivacyError",
+    "RankBridgeError",
+    "RankEvidenceBridge",
     "StructuredAdapterError",
     "StructuredFileError",
     "StructuredValidationError",
+    "bridge_rank_evidence",
+    "validate_rank_evidence_bridge",
     "validate_public_locator",
 ]

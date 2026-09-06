@@ -17,6 +17,7 @@ from scripts.source_policy import evaluate_claims
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE_POLICY = ROOT / "references" / "source-policy.md"
 RETRIEVAL_PLAYBOOK = ROOT / "references" / "retrieval-playbook.md"
+HOST_WORKFLOW = ROOT / "references" / "host-workflow.md"
 EVIDENCE_SCHEMA = ROOT / "schemas" / "evidence-bundle.schema.json"
 HOST_GUIDES = tuple(
     ROOT / "references" / "hosts" / name
@@ -95,10 +96,39 @@ class InstructionContractTest(unittest.TestCase):
         if SOURCE_POLICY.exists() and RETRIEVAL_PLAYBOOK.exists():
             self.source_bytes, self.source = read_utf8(SOURCE_POLICY)
             self.playbook_bytes, self.playbook = read_utf8(RETRIEVAL_PLAYBOOK)
+        if HOST_WORKFLOW.exists():
+            self.host_workflow_bytes, self.host_workflow = read_utf8(HOST_WORKFLOW)
 
     def test_required_references_exist(self):
         self.assertTrue(SOURCE_POLICY.is_file(), "missing references/source-policy.md")
         self.assertTrue(RETRIEVAL_PLAYBOOK.is_file(), "missing references/retrieval-playbook.md")
+        self.assertTrue(HOST_WORKFLOW.is_file(), "missing references/host-workflow.md")
+
+    def test_playbook_drives_one_resumable_planning_session(self):
+        for marker in (
+            "scripts/planning_session.py", "init", "confirm", "next", "ingest",
+            "finalize", "compute", "status", "Y → Y-1 → Y-2 → Y-3",
+            "打开原页面", "搜索摘要", "unavailable reason", "exact adapter",
+            "不得虚构 `province.json`", "host-workflow.md", "--limit 1..100",
+            "--newer-task <completed-task-id>", "ocr_rows",
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, self.playbook)
+        self.assertLess(self.playbook.index("confirm"), self.playbook.index("开始检索"))
+        finalization = section(self.playbook, "## 7. 最终化并验证证据")
+        self.assertLess(finalization.index("validate_evidence"), finalization.index("compute"))
+
+    def test_host_guides_map_real_tools_to_the_shared_session_loop(self):
+        for path in HOST_GUIDES:
+            _source, text = read_utf8(path)
+            with self.subTest(path=path.name):
+                self.assertIn("[retrieval playbook](../retrieval-playbook.md)", text)
+                self.assertNotIn("## Ordered handoff", text)
+                self.assertNotIn("## Preflight", text)
+                for loop_marker in ("planning_session.py status", "task-by-task", "validate_evidence.py"):
+                    self.assertNotIn(loop_marker, text)
+                self.assertNotIn("structured OCR row JSON", text)
+                self.assertNotRegex(text, r"(?i)ask the user to (?:run|provide).*(?:command|JSON|path)")
 
     def test_playbook_uses_the_typed_admission_bridge_as_a_thin_handoff(self):
         extraction = section(self.playbook, "## 5. 通过匹配适配器提取")
@@ -117,6 +147,20 @@ class InstructionContractTest(unittest.TestCase):
             r"(?:至少|required|minimum)[^。\n|]{0,12}[0-9]",
         )
 
+    def test_playbook_names_the_factory_only_completed_chain(self):
+        required = (
+            "build_task_evidence_outcome",
+            "evidence_outcome=",
+            "build_evidence_manifest_outcome",
+            "build_calculation_outcome",
+            "build_report_publication_outcome",
+            "同一宿主进程",
+            "裸 digest",
+        )
+        for marker in required:
+            with self.subTest(marker=marker):
+                self.assertIn(marker, self.playbook)
+
     def test_required_host_guides_exist(self):
         self.assertEqual(
             tuple(sorted(path.name for path in (ROOT / "references" / "hosts").glob("*.md"))),
@@ -124,10 +168,35 @@ class InstructionContractTest(unittest.TestCase):
         )
 
     def assert_host_contract(self, path, text):
-        intro = text.split("## Capability map", 1)[0]
+        self.assertEqual(
+            headings(text),
+            (
+                f"# {path.stem.replace('-', ' ').title()} host capability mapping",
+                "## Intake boundary",
+                "## Capability map",
+                "## Safety boundary",
+            )
+            if path.name != "claude-code.md"
+            else (
+                "# Claude Code host capability mapping",
+                "## Intake boundary",
+                "## Capability map",
+                "## Safety boundary",
+            ),
+        )
+        intro = text.split("## Intake boundary", 1)[0]
         intro_lines = [line for line in intro.splitlines()[1:] if line.strip()]
         self.assertEqual(len(intro_lines), 2)
         self.assertTrue(all(line.startswith("- ") for line in intro_lines))
+        intake = section(text, "## Intake boundary")
+        for marker in (
+            "parse_numbered_questionnaire",
+            "build_profile_from_questionnaire",
+            "ordinary conversation text",
+            "never ask the user for JSON or a path",
+            "remains `unknown` or empty",
+        ):
+            self.assertIn(marker, intake)
         links = re.findall(r"\[[^\]]+\]\(([^)]+)\)", text)
         self.assertEqual(links, ["../retrieval-playbook.md", "../source-policy.md"])
         for target in links:
@@ -148,39 +217,20 @@ class InstructionContractTest(unittest.TestCase):
         for excluded in ("local_exec", "file_output", "offline"):
             self.assertNotIn(f"--host-capability {excluded}", text)
 
-        preflight = section(text, "## Preflight")
-        command = re.findall(r"^python scripts/preflight\.py .+$", preflight, flags=re.MULTILINE)
-        self.assertEqual(
-            command,
-            [
-                "python scripts/preflight.py [--host-capability search] "
-                "[--host-capability browse] [--host-capability vision]"
-            ],
-        )
-        self.assertIn("Square brackets", preflight)
-        self.assertEqual(
-            tuple(re.findall(r"`(full|standard|offline)`", preflight)),
-            tuple(item.value for item in CapabilityTier),
-        )
-        self.assertEqual(tuple(re.findall(r"`(docx|openpyxl|pdfplumber)`", preflight)), OPTIONAL_MODULES)
-        self.assertNotIn("complete", preflight.casefold())
-        self.assertIn("workflow gates", preflight)
-
         fallback_markers = {
-            "search": ("user-supplied URLs/local artifacts", "offline mode"),
-            "browse": ("do not claim page verification", "saved public artifact", "offline mode"),
+            "search": ("already authenticated material", "offline mode", "discovery unavailable"),
+            "browse": ("do not claim page verification", "already authenticated material", "offline mode"),
             "vision": (
                 "machine-readable HTML/XLSX/PDF/text",
-                "structured OCR row JSON",
-                "decoded QR payload",
+                "host-decoded QR payload",
                 "missing",
             ),
-            "local_exec": ("stop before deterministic calculation", "ask the user to run", "move to a host"),
+            "local_exec": ("stop before deterministic calculation", "disclose the limitation", "move the session"),
             "file_output": ("path-neutral structured handoff", "do not claim", "written"),
             "offline": (
                 "no-live-network",
                 "no search/browse",
-                "authenticated local inputs",
+                "already attached authenticated inputs",
                 "current/live facts unavailable",
             ),
         }
@@ -188,24 +238,6 @@ class InstructionContractTest(unittest.TestCase):
             fallback = by_capability[capability]["Absent fallback"]
             for marker in markers:
                 self.assertIn(marker, fallback)
-
-        handoff = section(text, "## Ordered handoff")
-        steps = re.findall(r"^([1-6])\. (.+)$", handoff, flags=re.MULTILINE)
-        self.assertEqual(tuple(number for number, _ in steps), tuple("123456"))
-        bodies = tuple(body for _, body in steps)
-        required_by_step = (
-            ("actual tools", "preflight.py", "search/browse/vision"),
-            ("QueryPlan", "ProvinceConfig.mode"),
-            ("linked retrieval playbook", "task-by-task"),
-            ("adapter", "secure downloader"),
-            ("EvidenceStore", "field provenance", "validate_evidence.py", "deterministic calculation"),
-            ("public CLIs", "anonymous", "degradation"),
-        )
-        for body, required in zip(bodies, required_by_step):
-            for marker in required:
-                self.assertIn(marker, body)
-        self.assertLess(handoff.index("validate_evidence.py"), handoff.index("deterministic calculation"))
-        self.assertLess(handoff.index("deterministic calculation"), handoff.index("public CLIs"))
 
         self.assertIn("current session", text)
         self.assertIn("apply the linked policy/playbook unchanged", text)
@@ -265,31 +297,29 @@ class InstructionContractTest(unittest.TestCase):
                     self.assertIn(marker, text)
 
     def test_host_preflight_examples_execute_against_runtime_vocabulary(self):
-        for path in HOST_GUIDES:
-            _source, text = read_utf8(path)
-            preflight = section(text, "## Preflight")
-            rendered = re.search(r"^python scripts/preflight\.py (.+)$", preflight, flags=re.MULTILINE)
-            self.assertIsNotNone(rendered)
-            args = rendered.group(1).replace("[", "").replace("]", "").split()
-            completed = subprocess.run(
-                [sys.executable, "scripts/preflight.py", *args],
-                cwd=ROOT,
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
-            report = json.loads(completed.stdout)
-            self.assertEqual(tuple(report["host_capabilities"]), tuple(sorted(HOST_CAPABILITIES)))
-            offline = subprocess.run(
-                [sys.executable, "scripts/preflight.py"],
-                cwd=ROOT,
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            self.assertEqual(offline.returncode, 0, offline.stdout + offline.stderr)
-            self.assertEqual(json.loads(offline.stdout)["tier"], CapabilityTier.OFFLINE.value)
+        preflight = section(self.playbook, "## 1. 能力预检")
+        rendered = re.search(r"^python scripts/preflight\.py (.+)$", preflight, flags=re.MULTILINE)
+        self.assertIsNotNone(rendered)
+        args = rendered.group(1).replace("[", "").replace("]", "").split()
+        completed = subprocess.run(
+            [sys.executable, "scripts/preflight.py", *args],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+        report = json.loads(completed.stdout)
+        self.assertEqual(tuple(report["host_capabilities"]), tuple(sorted(HOST_CAPABILITIES)))
+        offline = subprocess.run(
+            [sys.executable, "scripts/preflight.py"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(offline.returncode, 0, offline.stdout + offline.stderr)
+        self.assertEqual(json.loads(offline.stdout)["tier"], CapabilityTier.OFFLINE.value)
 
     def test_host_guide_mutation_canaries_reject_unsafe_workflow_drift(self):
         for path in HOST_GUIDES:
@@ -308,17 +338,8 @@ class InstructionContractTest(unittest.TestCase):
                 text.replace("current/live facts unavailable", "current facts verified", 1),
                 text.replace("stop before deterministic calculation", "continue deterministic calculation", 1),
                 file_output_mutation,
-                text.replace(
-                    "[--host-capability vision]",
-                    "[--host-capability vision] [--host-capability local_exec]",
-                    1,
-                ),
+                text + "\nPass --host-capability local_exec.\n",
                 text + "\nTwo independent sources are enough; lower the source threshold.\n",
-                text.replace(
-                    "require `validate_evidence.py` success before deterministic calculation",
-                    "perform deterministic calculation before `validate_evidence.py`",
-                    1,
-                ),
             )
             for index, mutated in enumerate(mutations):
                 with self.subTest(path=path.name, mutation=index), self.assertRaises(AssertionError):
@@ -587,7 +608,11 @@ class InstructionContractTest(unittest.TestCase):
 
     def test_relative_links_exist_and_legacy_migration_inputs_are_not_normative(self):
         links = []
-        for path, text in ((SOURCE_POLICY, self.source), (RETRIEVAL_PLAYBOOK, self.playbook)):
+        for path, text in (
+            (SOURCE_POLICY, self.source),
+            (RETRIEVAL_PLAYBOOK, self.playbook),
+            (HOST_WORKFLOW, self.host_workflow),
+        ):
             for target in re.findall(r"\[[^\]]+\]\(([^)]+)\)", text):
                 self.assertNotRegex(target, r"^[a-zA-Z][a-zA-Z0-9+.-]*://")
                 self.assertNotIn(target, {"web-search-playbook.md", "gaokao-provinces.md"})
@@ -596,7 +621,11 @@ class InstructionContractTest(unittest.TestCase):
         self.assertEqual(
             links,
             [("source-policy.md", "retrieval-playbook.md")]
-            + [("retrieval-playbook.md", "source-policy.md")] * 4,
+            + [
+                ("retrieval-playbook.md", "source-policy.md"),
+                ("retrieval-playbook.md", "host-workflow.md"),
+            ]
+            + [("retrieval-playbook.md", "source-policy.md")] * 3,
         )
 
     def test_public_command_probes_named_by_playbook_execute(self):
@@ -607,6 +636,7 @@ class InstructionContractTest(unittest.TestCase):
                 "python -m scripts.preflight --help",
                 "python -m scripts.query_plan --help",
                 "python -m scripts.validate_evidence --help",
+                "python -m scripts.planning_session --help",
             ],
         )
         for command in commands:
@@ -619,9 +649,59 @@ class InstructionContractTest(unittest.TestCase):
             )
             self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
 
+    def test_host_workflow_guide_matches_the_executable_facade(self):
+        commands = re.findall(
+            r"^python -m scripts\.host_workflow ([a-z]+)(?: .*)?$",
+            self.host_workflow,
+            flags=re.MULTILINE,
+        )
+        self.assertEqual(
+            set(commands),
+            {"start", "next", "ingest", "unavailable", "finish"},
+        )
+        self.assertNotIn("status", commands)
+        normalized = " ".join(self.host_workflow.split())
+        for marker in (
+            "`pending` is the total",
+            "`next` contains only the requested display slice",
+            "default limit is 3",
+            "range is 1 through 100",
+            "newest year first",
+            "There is no separate `status` command",
+            "--reason newer_comparable_year_accepted --newer-task <completed-task-id>",
+            "typed receipt from the journal",
+            "never skips older tasks automatically",
+            '"adapter": "ocr_rows"',
+            '"ocr_path":',
+            "min_exact_confidence` at 0.95",
+            "page/image/bbox",
+            "UTF-8-sig",
+            "normalizes CRLF and CR to LF",
+            "candidate hash still covers the original saved bytes",
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, normalized)
+
+        completed = subprocess.run(
+            [sys.executable, "-m", "scripts.host_workflow", "--help"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+        for marker in (
+            "{start,next,ingest,unavailable,finish}",
+            "--limit LIMIT",
+            "--newer-task NEWER_TASK",
+            "--submission SUBMISSION",
+        ):
+            self.assertIn(marker, completed.stdout)
+
     def test_references_are_strict_utf8_deterministic_and_public_safe(self):
         self.assertEqual(self.source_bytes, SOURCE_POLICY.read_bytes())
         self.assertEqual(self.playbook_bytes, RETRIEVAL_PLAYBOOK.read_bytes())
+        self.assertEqual(self.host_workflow_bytes, HOST_WORKFLOW.read_bytes())
         combined = self.source + "\n" + self.playbook
         forbidden = (
             r"(?i)(?:[a-z]:[\\/]|\\\\[^\\\s]+[\\/]|/(?:home|users|tmp|var)/)",
@@ -637,6 +717,15 @@ class InstructionContractTest(unittest.TestCase):
         for pattern in forbidden:
             with self.subTest(pattern=pattern):
                 self.assertIsNone(re.search(pattern, combined))
+        host_forbidden = (
+            r"(?i)(?:\b[a-z]:\\|\\\\[^\\\s]+[\\/]|/(?:home|users|tmp|var)/)",
+            forbidden[1],
+            forbidden[2],
+            forbidden[3],
+        )
+        for pattern in host_forbidden:
+            with self.subTest(host_pattern=pattern):
+                self.assertIsNone(re.search(pattern, self.host_workflow))
 
     def test_mutation_canaries_detect_semantic_contract_regressions(self):
         policy_mutations = (

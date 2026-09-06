@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 """Generate an evidence-aware deterministic Markdown admission report."""
 import argparse
+from dataclasses import replace
+import hashlib
 import json
 import os
 import re
@@ -11,19 +13,38 @@ from pathlib import Path
 if __package__:
     from .compliance_scan import scan_text
     from .contracts import EvidenceStatus, RecommendationProfile
-    from .contracts import RecommendationResult
     from .data_loader import DataError
+    from .decision_policy import DecisionPolicySnapshot
     from .path_recommend import PathwayProfile, evaluate_pathways
-    from .adapters.pathway_bridge import bridge_pathway_policies
+    from .adapters.pathway_bridge import (
+        PathwayBridgeError,
+        bridge_pathway_observations,
+        bridge_pathway_policies,
+    )
+    from .adapters.school_fit_bridge import (
+        validate_school_fit_enriched_admission_row,
+    )
     from .planning_profile import PlanningProfile, load_planning_profile
-    from .rank_locator import RankScenario, locate_rank
+    from .province_registry import canonical_discovery_subject_key
+    from .query_plan import QueryPlan, build_query_plan, load_province_catalog
+    from .rank_locator import RankScenario, locate_rank, unavailable_rank_scenario
+    from .research_snapshot import (
+        ProvinceResearchSnapshot,
+        build_research_snapshot,
+        validate_research_snapshot,
+    )
     from .report_model import (
         StudentProfile,
         build_report_model,
         render_markdown,
         validate_profile_text,
     )
-    from .school_recommend import SchoolRecommendError, recommend_schools
+    from .school_recommend import (
+        SchoolDecisionResult,
+        SchoolRecommendError,
+        personalize_school_recommendations,
+        recommend_schools,
+    )
     from .validate_data import (
         ValidatedAdmissionRow,
         admission_row_hash,
@@ -34,19 +55,36 @@ if __package__:
 else:
     from compliance_scan import scan_text
     from contracts import EvidenceStatus, RecommendationProfile
-    from contracts import RecommendationResult
     from data_loader import DataError
+    from decision_policy import DecisionPolicySnapshot
     from path_recommend import PathwayProfile, evaluate_pathways
-    from adapters.pathway_bridge import bridge_pathway_policies
+    from adapters.pathway_bridge import (
+        PathwayBridgeError,
+        bridge_pathway_observations,
+        bridge_pathway_policies,
+    )
+    from adapters.school_fit_bridge import validate_school_fit_enriched_admission_row
     from planning_profile import PlanningProfile, load_planning_profile
-    from rank_locator import RankScenario, locate_rank
+    from province_registry import canonical_discovery_subject_key
+    from query_plan import QueryPlan, build_query_plan, load_province_catalog
+    from rank_locator import RankScenario, locate_rank, unavailable_rank_scenario
+    from research_snapshot import (
+        ProvinceResearchSnapshot,
+        build_research_snapshot,
+        validate_research_snapshot,
+    )
     from report_model import (
         StudentProfile,
         build_report_model,
         render_markdown,
         validate_profile_text,
     )
-    from school_recommend import SchoolRecommendError, recommend_schools
+    from school_recommend import (
+        SchoolDecisionResult,
+        SchoolRecommendError,
+        personalize_school_recommendations,
+        recommend_schools,
+    )
     from validate_data import (
         ValidatedAdmissionRow,
         admission_row_hash,
@@ -62,6 +100,17 @@ class EvidenceReportInputError(ValueError):
 
 class EvidenceReportCapabilityError(RuntimeError):
     """A caller-required optional report capability is unavailable."""
+
+
+def _canonical_digest(value) -> str:
+    encoded = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
 
 def _reconfigure_utf8() -> None:
@@ -120,7 +169,7 @@ def _strict_json_file(path: Path, label: str):
 def _validated_evidence_snapshot(bundle: Path):
     """Return only validate_evidence's public authenticated bundle snapshot."""
 
-    result = validate_bundle_snapshot(bundle)
+    result = validate_bundle_snapshot(bundle, _allow_empty=True)
     if result.snapshot is None or result.issues:
         raise EvidenceReportInputError("证据包未通过完整性与来源门禁")
     return result.snapshot
@@ -138,7 +187,7 @@ def _profile_collection(payload: dict, name: str) -> tuple[str, ...]:
 
 def _load_public_profile(path: Path):
     payload = _strict_json_file(path, "用户画像")
-    if isinstance(payload, dict) and payload.get("schema_version") == "2.0":
+    if isinstance(payload, dict) and payload.get("schema_version") in {"2.0", "3.0"}:
         try:
             return load_planning_profile(payload)
         except (TypeError, ValueError) as error:
@@ -249,7 +298,7 @@ def _profiles_with_canonical_subject_key(
 
 
 _ADMISSION_FACT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
-_ADMISSION_VALUE_FIELDS = {
+_ADMISSION_COMPATIBILITY_VALUE_FIELDS = {
     "year",
     "province",
     "subject_group",
@@ -263,6 +312,7 @@ _ADMISSION_VALUE_FIELDS = {
     "coverage_status",
     "row_hash",
 }
+_ADMISSION_VALUE_FIELDS = _ADMISSION_COMPATIBILITY_VALUE_FIELDS | {"dataset_row"}
 
 
 def _admission_fixed_projection(record):
@@ -288,8 +338,23 @@ def _strict_admission_fact(record):
     if _ADMISSION_FACT_ID.fullmatch(suffix) is None:
         return None
     value = record.get("value")
-    if not isinstance(value, dict) or set(value) != _ADMISSION_VALUE_FIELDS:
+    if not isinstance(value, dict) or frozenset(value) not in {
+        frozenset(_ADMISSION_COMPATIBILITY_VALUE_FIELDS),
+        frozenset(_ADMISSION_VALUE_FIELDS),
+    }:
         return None
+    if "dataset_row" in value:
+        projection = value["dataset_row"]
+        if not isinstance(projection, dict) or not projection:
+            return None
+        try:
+            canonical_row = ValidatedAdmissionRow.from_mapping(dict(projection))
+        except (TypeError, ValueError):
+            return None
+        if admission_row_hash(canonical_row) != value.get("row_hash"):
+            return None
+        if _admission_fixed_projection(projection) != _admission_fixed_projection(value):
+            return None
     status = record.get("status")
     if status not in {
         EvidenceStatus.OFFICIAL.value,
@@ -352,14 +417,13 @@ def _admission_fact_index(facts):
     return index, frozenset(projections)
 
 
-def _public_recommendations(
+def _public_admission_rows(
     admission_rows: tuple[ValidatedAdmissionRow, ...],
     profile: RecommendationProfile,
-    policy,
     facts,
     rank_scenario: RankScenario | None = None,
-):
-    """Run Task 3 without assigning unscoped facts to admission rows.
+) -> tuple[dict, ...]:
+    """Bind exact admission facts to authenticated rows without deciding.
 
     v1 evidence facts must name the exact normalized admission field before a
     row can carry numeric provenance.  The current public replay fixture has a
@@ -372,9 +436,17 @@ def _public_recommendations(
             isinstance(row, ValidatedAdmissionRow) for row in admission_rows
         ):
             raise TypeError("admission rows must come from validated snapshot")
-        authenticated_rows = tuple(
-            (row.to_dict(), admission_row_hash(row)) for row in admission_rows
-        )
+        authenticated_rows = []
+        for row in admission_rows:
+            projection = row.to_dict()
+            if "admission_evidence_row_hash" in projection:
+                _base_row, expected_hash = validate_school_fit_enriched_admission_row(
+                    row
+                )
+            else:
+                expected_hash = admission_row_hash(row)
+            authenticated_rows.append((projection, expected_hash))
+        authenticated_rows = tuple(authenticated_rows)
         matching_years = [
             row["year"]
             for row, _row_hash in authenticated_rows
@@ -449,8 +521,27 @@ def _public_recommendations(
                         }
                     )
             bounded_rows.append(row)
+        return tuple(bounded_rows)
+    except (DataError, SchoolRecommendError, TypeError, ValueError) as error:
+        raise EvidenceReportInputError("普通批数据无法形成安全推荐结果") from error
+
+
+def _public_recommendations(
+    admission_rows: tuple[ValidatedAdmissionRow, ...],
+    profile: RecommendationProfile,
+    policy,
+    facts,
+    rank_scenario: RankScenario | None = None,
+):
+    rows = _public_admission_rows(
+        admission_rows,
+        profile,
+        facts,
+        rank_scenario=rank_scenario,
+    )
+    try:
         return recommend_schools(
-            bounded_rows,
+            rows,
             profile,
             policy,
             rank_scenario=rank_scenario,
@@ -461,31 +552,62 @@ def _public_recommendations(
 
 def build_pathway_atlas_model(
     planning_profile: PlanningProfile,
-    dataset,
-    evidence,
+    research_snapshot: ProvinceResearchSnapshot,
+    evidence_bundle: Path,
+    query_plan: QueryPlan,
+    *,
+    decision_policy: DecisionPolicySnapshot | None = None,
 ):
-    """Run the complete evidence-first planning pipeline once for both renderers."""
+    """Run one public-snapshot calculation and fresh pathway-bundle replay."""
 
     if not isinstance(planning_profile, PlanningProfile):
         raise TypeError("planning_profile must be a PlanningProfile")
-    facts = tuple(record.to_dict() for record in evidence.facts)
-    subject_key = canonical_subject_selection_key(
-        dataset.config,
+    if not isinstance(evidence_bundle, Path):
+        raise TypeError("evidence_bundle must be a host-internal Path")
+    if not isinstance(query_plan, QueryPlan):
+        raise TypeError("query_plan must be the current canonical QueryPlan")
+    reviewed = decision_policy or DecisionPolicySnapshot.load_default()
+    if type(reviewed) is not DecisionPolicySnapshot:
+        raise TypeError("decision_policy must be a strict DecisionPolicySnapshot")
+    try:
+        snapshot = validate_research_snapshot(research_snapshot, planning_profile)
+    except (TypeError, ValueError) as error:
+        raise EvidenceReportInputError("省份研究快照未通过公开计算入口校验") from error
+    if (
+        snapshot.policy_id != reviewed.policy_id
+        or snapshot.policy_digest != _canonical_digest(reviewed.to_dict())
+    ):
+        raise EvidenceReportInputError("省份研究快照与决策规则版本不一致")
+    query_plan_digest = _canonical_digest(query_plan.to_dict())
+    if (
+        snapshot.profile_digest != planning_profile.digest
+        or snapshot.query_plan_digest != query_plan_digest
+        or snapshot.research_year != query_plan.research_year
+    ):
+        raise EvidenceReportInputError("省份研究快照与当前画像或查询计划不一致")
+    evidence = _validated_evidence_snapshot(evidence_bundle)
+    if snapshot.evidence_digest != evidence.manifest_hash:
+        raise EvidenceReportInputError("省份研究快照与证据包版本不一致")
+    subject_key = canonical_discovery_subject_key(
+        planning_profile.subject_mode,
         planning_profile.subject_group,
-        list(planning_profile.secondary_subjects),
+        planning_profile.secondary_subjects,
     )
-    rank_scenario = locate_rank(
-        planning_profile,
-        evidence_facts=facts,
-        score_rows=dataset.score_rows,
-        score_subject_group=subject_key,
+    rank_scenario = (
+        unavailable_rank_scenario("research_evidence_unavailable")
+        if not evidence.facts
+        else locate_rank(planning_profile, research_snapshot=snapshot)
     )
     numeric_rank = (
         rank_scenario.central_rank
         if rank_scenario.status in {EvidenceStatus.OFFICIAL, EvidenceStatus.INFERRED}
         else None
     )
-    retrieval_year = max(int(value[:4]) for value in evidence.retrieval_dates)
+    retrieval_year = (
+        max(int(value[:4]) for value in evidence.retrieval_dates)
+        if evidence.retrieval_dates
+        else query_plan.research_year
+    )
     report_profile = StudentProfile(
         province=planning_profile.province,
         subject_mode=planning_profile.subject_mode,
@@ -497,16 +619,11 @@ def build_pathway_atlas_model(
         subject_selection_key=subject_key,
     )
     if numeric_rank is None:
-        recommendations = RecommendationResult(
-            ordinary_batch_policy=dataset.config.ordinary_batch_policy,
+        school_decisions = SchoolDecisionResult(
             items=(),
-            input_years=tuple(
-                sorted({int(row.to_dict()["year"]) for row in dataset.admission_rows})
-            ),
-            usable_years=(),
-            verified_rank_coverage=None,
-            coverage_status=EvidenceStatus.MISSING,
-            empty_reason="rank_calibration_missing",
+            decisions=(),
+            rank_scenario=rank_scenario,
+            policy_status="rank_delta_policy_unavailable",
             warnings=("没有可校准的位次依据，未制造普通批数值",),
         )
     else:
@@ -524,36 +641,77 @@ def build_pathway_atlas_model(
             rank_confidence=rank_scenario.confidence,
             rank_source_ids=rank_scenario.source_ids,
         )
-        recommendations = _public_recommendations(
-            dataset.admission_rows,
+        authenticated_rows = _public_admission_rows(
+            snapshot.admission_rows,
             recommendation_profile,
-            dataset.config.ordinary_batch_policy,
-            facts,
+            snapshot.admission_facts,
             rank_scenario=rank_scenario,
         )
-    pathway_policies = bridge_pathway_policies(
-        evidence,
-        province=planning_profile.province,
-        subject_mode=planning_profile.subject_mode,
-        target_year=planning_profile.exam_year,
-    )
-    pathways = evaluate_pathways(
-        PathwayProfile(
-            rank=numeric_rank,
+        school_decisions = personalize_school_recommendations(
+            authenticated_rows,
+            planning_profile,
+            rank_scenario=rank_scenario,
+            decision_policy=reviewed,
+            subject_selection_key=subject_key,
+        )
+    try:
+        pathway_policies = bridge_pathway_policies(
+            evidence_bundle,
             province=planning_profile.province,
             subject_mode=planning_profile.subject_mode,
-            current_year=planning_profile.exam_year,
-            eligibility_facts=planning_profile.eligibility_facts,
-        ),
+            target_year=query_plan.research_year,
+            expected_profile_digest=planning_profile.digest,
+            expected_query_plan_digest=query_plan_digest,
+        )
+        pathway_observations = bridge_pathway_observations(
+            evidence_bundle,
+            profile=planning_profile,
+            plan=query_plan,
+        )
+    except PathwayBridgeError as error:
+        raise EvidenceReportInputError(
+            "路径政策证据与当前画像或查询计划不一致"
+        ) from error
+    pathways = evaluate_pathways(
+        planning_profile,
         pathway_policies,
         model=None,
+        rank_scenario=rank_scenario,
+        decision_policy=reviewed,
+        query_plan=query_plan,
+        observations=pathway_observations,
     )
+    pathway_conflicts = tuple(
+        sorted(
+            fact["field"].removeprefix("pathway_policy:")
+            for frozen in evidence.facts
+            for fact in (frozen.to_dict(),)
+            if isinstance(fact.get("field"), str)
+            and fact["field"].startswith("pathway_policy:")
+            and fact.get("status") == EvidenceStatus.CONFLICT.value
+        )
+    )
+    if pathway_conflicts:
+        pathways = replace(
+            pathways,
+            warnings=tuple(
+                dict.fromkeys(
+                    (
+                        *pathways.warnings,
+                        "路径政策证据冲突："
+                        + "、".join(pathway_conflicts)
+                        + "；冲突值未纳入路径判断",
+                    )
+                )
+            ),
+        )
     return build_report_model(
         report_profile,
-        recommendations,
+        school_decisions,
         rank=rank_scenario,
         pathways=pathways,
         evidence=evidence,
+        planning_profile=planning_profile,
     )
 
 
@@ -608,15 +766,30 @@ def _evidence_main(argv) -> int:
     args = _build_evidence_parser().parse_args(argv)
     try:
         loaded_profile = _load_public_profile(args.profile)
-        profile_for_dataset = (
-            loaded_profile if isinstance(loaded_profile, PlanningProfile) else loaded_profile[0]
-        )
-        dataset = _resolve_public_dataset(args.dataset, profile_for_dataset)
-        evidence = _validated_evidence_snapshot(args.evidence)
         if isinstance(loaded_profile, PlanningProfile):
-            model = build_pathway_atlas_model(loaded_profile, dataset, evidence)
+            reviewed = DecisionPolicySnapshot.load_default()
+            query_plan = build_query_plan(
+                loaded_profile,
+                load_province_catalog(),
+                reviewed,
+            )
+            research_snapshot = build_research_snapshot(
+                loaded_profile,
+                query_plan,
+                args.evidence,
+                reviewed,
+            )
+            model = build_pathway_atlas_model(
+                loaded_profile,
+                research_snapshot,
+                args.evidence,
+                query_plan,
+                decision_policy=reviewed,
+            )
         else:
             report_profile, recommendation_profile, pathway_profile = loaded_profile
+            dataset = _resolve_public_dataset(args.dataset, report_profile)
+            evidence = _validated_evidence_snapshot(args.evidence)
             report_profile, recommendation_profile = _profiles_with_canonical_subject_key(
                 dataset, report_profile, recommendation_profile
             )
@@ -627,18 +800,11 @@ def _evidence_main(argv) -> int:
                 dataset.config.ordinary_batch_policy,
                 facts,
             )
-            policies = bridge_pathway_policies(
-                evidence,
-                province=pathway_profile.province,
-                subject_mode=pathway_profile.subject_mode,
-                target_year=pathway_profile.current_year,
-            )
-            pathways = evaluate_pathways(pathway_profile, policies, model=None)
             model = build_report_model(
                 report_profile,
                 recommendations,
                 rank=None,
-                pathways=pathways,
+                pathways=None,
                 evidence=evidence,
             )
         markdown = render_markdown(model)

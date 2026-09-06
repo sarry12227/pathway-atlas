@@ -190,6 +190,21 @@ class BuildReleaseTest(unittest.TestCase):
         self.assertNotIn(sensitive, stderr.getvalue())
         self.assertFalse((self.root / "dist").exists())
 
+    def test_failed_gate_reports_safe_check_and_test_identifiers(self) -> None:
+        payload = {"results": [
+            {"name": "docx_tests", "ok": False, "details": ["unsafe/detail"]},
+            {"name": "full_tests", "ok": False, "details": ["failed-test:test_report.ReportTest.test_partial"]},
+            {"name": "unsafe/detail", "ok": False, "details": []},
+        ]}
+        completed = subprocess.CompletedProcess([], 2, json.dumps(payload).encode(), b"untrusted stderr")
+        with mock.patch.object(build_release.subprocess, "run", return_value=completed):
+            with self.assertRaises(build_release.BuildReleaseError) as error:
+                build_release._run_release_check(self.root, "0.1.0")
+        self.assertIn("docx_tests", str(error.exception))
+        self.assertIn("test_report.ReportTest.test_partial", str(error.exception))
+        self.assertNotIn("unsafe/detail", str(error.exception))
+        self.assertNotIn("untrusted stderr", str(error.exception))
+
     def test_release_checker_can_import_a_sibling_module_as_the_real_gate_does(self) -> None:
         (self.root / "scripts" / "gate_helper.py").write_text(
             "ALLOW_RELEASE = True\n", encoding="utf-8"

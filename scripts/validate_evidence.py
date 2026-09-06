@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 from datetime import date, datetime
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -74,7 +75,15 @@ class FrozenJsonRecord:
 
     @classmethod
     def _from_mapping(cls, value: dict[str, Any]) -> "FrozenJsonRecord":
-        return cls(json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+        return cls(
+            json.dumps(
+                value,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+        )
 
     def to_dict(self) -> dict[str, Any]:
         value = json.loads(self._canonical_json)
@@ -83,16 +92,42 @@ class FrozenJsonRecord:
         return value
 
 
+def _snapshot_records(value: Any, label: str) -> tuple[FrozenJsonRecord, ...]:
+    if isinstance(value, (str, bytes, bytearray)):
+        raise TypeError(f"{label} must be frozen JSON records")
+    try:
+        records = tuple(value)
+    except TypeError:
+        raise TypeError(f"{label} must be frozen JSON records") from None
+    if any(type(item) is not FrozenJsonRecord for item in records):
+        raise TypeError(f"{label} must be frozen JSON records")
+    return tuple(FrozenJsonRecord._from_mapping(item.to_dict()) for item in records)
+
+
+def _facts_digest(facts: tuple[FrozenJsonRecord, ...]) -> str:
+    encoded = json.dumps(
+        [item.to_dict() for item in facts],
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
 @dataclass(frozen=True, init=False)
 class ValidatedEvidenceSnapshot:
-    """Factory-only, hash-bound snapshot of one successfully validated bundle."""
+    """Immutable bundle snapshot with a diagnostic canonical facts digest."""
 
     manifest: EvidenceManifest
     capability: CapabilityReport
     retrieval_dates: tuple[str, ...]
     facts: tuple[FrozenJsonRecord, ...]
     rejections: tuple[FrozenJsonRecord, ...]
+    candidates: tuple[FrozenJsonRecord, ...]
+    contexts: tuple[FrozenJsonRecord, ...]
     manifest_hash: str
+    facts_digest: str
 
     def __init__(self) -> None:
         raise TypeError("ValidatedEvidenceSnapshot is factory-only")
@@ -105,14 +140,25 @@ class ValidatedEvidenceSnapshot:
         retrieval_dates: tuple[str, ...],
         facts: tuple[FrozenJsonRecord, ...],
         rejections: tuple[FrozenJsonRecord, ...],
+        *,
+        candidates: tuple[FrozenJsonRecord, ...] = (),
+        contexts: tuple[FrozenJsonRecord, ...] = (),
     ) -> "ValidatedEvidenceSnapshot":
+        fact_records = _snapshot_records(facts, "facts")
+        rejection_records = _snapshot_records(rejections, "rejections")
+        candidate_records = _snapshot_records(candidates, "candidates")
+        context_records = _snapshot_records(contexts, "contexts")
+        digest = _facts_digest(fact_records)
         instance = object.__new__(cls)
         object.__setattr__(instance, "manifest", manifest)
         object.__setattr__(instance, "capability", capability)
-        object.__setattr__(instance, "retrieval_dates", retrieval_dates)
-        object.__setattr__(instance, "facts", facts)
-        object.__setattr__(instance, "rejections", rejections)
+        object.__setattr__(instance, "retrieval_dates", tuple(retrieval_dates))
+        object.__setattr__(instance, "facts", fact_records)
+        object.__setattr__(instance, "rejections", rejection_records)
+        object.__setattr__(instance, "candidates", candidate_records)
+        object.__setattr__(instance, "contexts", context_records)
         object.__setattr__(instance, "manifest_hash", manifest.manifest_hash)
+        object.__setattr__(instance, "facts_digest", digest)
         return instance
 
 
@@ -486,6 +532,8 @@ def _validate_shapes(
     contexts: list[Any],
     facts: list[Any],
     rejections: list[Any],
+    *,
+    allow_empty: bool = False,
 ) -> list[dict[str, str]]:
     errors: list[dict[str, str]] = []
     manifest_ok = _check_object(manifest, _MANIFEST_FIELDS, "manifest.json", errors)
@@ -493,7 +541,7 @@ def _validate_shapes(
     if manifest_ok and capability_ok and manifest["capability_tier"] != capability["tier"]:
         errors.append(_error("schema", "manifest and capability tiers disagree", "manifest.json"))
 
-    if not candidates:
+    if not candidates and not allow_empty:
         errors.append(_error("schema", "at least one candidate is required", "candidates.jsonl"))
     for index, candidate in enumerate(candidates, 1):
         location = f"candidates.jsonl:{index}"
@@ -508,7 +556,7 @@ def _validate_shapes(
                         location,
                     )
                 )
-    if not facts:
+    if not facts and not allow_empty:
         errors.append(_error("schema", "at least one fact is required", "normalized/facts.jsonl"))
     for index, fact in enumerate(facts, 1):
         _check_object(fact, _FACT_FIELDS, f"normalized/facts.jsonl:{index}", errors)
@@ -877,6 +925,7 @@ def _validate_bundle_with_payload(
     bundle: Path,
     *,
     _operation_hook: Callable[[str], None] | None = None,
+    _allow_empty: bool = False,
 ) -> tuple[dict[str, Any], dict[str, Any] | None, _BundleReader | None]:
     summary: dict[str, Any] = {
         "valid": False,
@@ -909,7 +958,15 @@ def _validate_bundle_with_payload(
     summary["candidate_count"] = len(candidates)
     summary["fact_count"] = len(facts)
     summary["independent_source_count"] = _independent_candidate_count(candidates)
-    errors = _validate_shapes(manifest, capability, candidates, contexts, facts, rejections)
+    errors = _validate_shapes(
+        manifest,
+        capability,
+        candidates,
+        contexts,
+        facts,
+        rejections,
+        allow_empty=_allow_empty,
+    )
     errors.extend(
         _validate_privacy(
             [
@@ -946,6 +1003,7 @@ def _validate_bundle_with_payload(
         "manifest": manifest,
         "capability": capability,
         "candidates": candidates,
+        "contexts": contexts,
         "facts": facts,
         "rejections": rejections,
     }
@@ -967,11 +1025,14 @@ def validate_bundle_snapshot(
     bundle: Path,
     *,
     _operation_hook: Callable[[str], None] | None = None,
+    _allow_empty: bool = False,
 ) -> EvidenceValidationResult:
     """Return a factory-only snapshot only when the exact read bundle is valid."""
 
     summary, payload, reader = _validate_bundle_with_payload(
-        bundle, _operation_hook=_operation_hook
+        bundle,
+        _operation_hook=_operation_hook,
+        _allow_empty=_allow_empty,
     )
     if not summary["valid"] or payload is None:
         issues = tuple(
@@ -991,6 +1052,7 @@ def validate_bundle_snapshot(
         manifest_value = payload["manifest"]
         capability_value = payload["capability"]
         candidates = payload["candidates"]
+        contexts = payload["contexts"]
         facts = payload["facts"]
         rejections = payload["rejections"]
         manifest = EvidenceManifest(
@@ -1014,7 +1076,10 @@ def validate_bundle_snapshot(
         retrieval_dates = tuple(
             sorted({_retrieval_date(item["retrieved_at"]) for item in candidates})
         )
-        if not retrieval_dates or any(item is None for item in retrieval_dates):
+        if (
+            (not retrieval_dates and not _allow_empty)
+            or any(item is None for item in retrieval_dates)
+        ):
             raise ValueError("validated candidates lack retrieval dates")
         if reader is None:
             raise BundleArtifactError("bundle directory identity is unavailable")
@@ -1026,6 +1091,12 @@ def validate_bundle_snapshot(
             tuple(item for item in retrieval_dates if item is not None),
             tuple(FrozenJsonRecord._from_mapping(item) for item in facts),
             tuple(FrozenJsonRecord._from_mapping(item) for item in rejections),
+            candidates=tuple(
+                FrozenJsonRecord._from_mapping(item) for item in candidates
+            ),
+            contexts=tuple(
+                FrozenJsonRecord._from_mapping(item) for item in contexts
+            ),
         )
     except BundleArtifactError as error:
         return EvidenceValidationResult(

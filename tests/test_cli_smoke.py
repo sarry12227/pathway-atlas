@@ -149,7 +149,7 @@ Path(os.environ["SHENGXUE_SENTINEL_ACTIVE"]).write_text("active", encoding="utf-
                     "min_rank": 1100,
                     "coverage_min_rank": 1,
                     "coverage_max_rank": 10000,
-                    "coverage_status": "partial",
+                    "coverage_status": "reference",
                     "row_hash": admission_row_hash(snapshot_312.admission_rows[0]),
                 },
                 unit=None,
@@ -177,7 +177,7 @@ Path(os.environ["SHENGXUE_SENTINEL_ACTIVE"]).write_text("active", encoding="utf-
                     "min_rank": 900,
                     "coverage_min_rank": 1,
                     "coverage_max_rank": 10000,
-                    "coverage_status": "partial",
+                    "coverage_status": "reference",
                     "row_hash": admission_row_hash(snapshot_33.admission_rows[0]),
                 },
                 unit=None,
@@ -224,6 +224,7 @@ Path(os.environ["SHENGXUE_SENTINEL_ACTIVE"]).write_text("active", encoding="utf-
         python: Path | None = None,
         block_docx: bool = False,
         expected_network_hook: str | None = None,
+        cwd: Path | None = None,
     ) -> CliResult:
         executable = Path(sys.executable) if python is None else python
         active = self.sandbox / "sentinel-active"
@@ -242,7 +243,7 @@ Path(os.environ["SHENGXUE_SENTINEL_ACTIVE"]).write_text("active", encoding="utf-
             environment.pop("SHENGXUE_BLOCK_DOCX", None)
         process = subprocess.run(
             [str(executable), *(str(item) for item in arguments)],
-            cwd=ROOT,
+            cwd=ROOT if cwd is None else cwd,
             env=environment,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -267,12 +268,14 @@ Path(os.environ["SHENGXUE_SENTINEL_ACTIVE"]).write_text("active", encoding="utf-
         *arguments: object,
         python: Path | None = None,
         block_docx: bool = False,
+        cwd: Path | None = None,
     ) -> CliResult:
         return self._run(
             SCRIPTS / name,
             *arguments,
             python=python,
             block_docx=block_docx,
+            cwd=cwd,
         )
 
     def _assert_safe_failure(self, result: CliResult, expected: int = 2):
@@ -456,12 +459,12 @@ Path(os.environ["SHENGXUE_SENTINEL_ACTIVE"]).write_text("active", encoding="utf-
         for literal in (
             "# 匿名升学规划报告（演示甲省）",
             "查询覆盖：",
-            "数据覆盖：部分覆盖",
-            "证据状态：部分覆盖",
+            "数据覆盖：多源参考",
+            "整份报告最低证据状态：缺失",
             "检索日期：2026-08-23",
             "清单哈希：sha256:",
             "屏蔽值、冲突、部分覆盖与缺失数据",
-            "AI 生成，仅供参考",
+            "基于公开数据由 AI 整理，仅供参考",
             "虚构甲大学",
             "645",
             "1100",
@@ -470,11 +473,13 @@ Path(os.environ["SHENGXUE_SENTINEL_ACTIVE"]).write_text("active", encoding="utf-
             "| 稳 | 虚构甲大学 | 645 | 1100 | 多源参考 | cli-s1、cli-s2、cli-s3 |",
         ):
             self.assertIn(literal, first.stdout)
-        self.assertGreaterEqual(first.stdout.count("AI 生成，仅供参考"), 3)
+        self.assertGreaterEqual(
+            first.stdout.count("基于公开数据由 AI 整理，仅供参考"), 3
+        )
         for forbidden in ("张三", "13800138000", "http://", "https://", str(ROOT)):
             self.assertNotIn(forbidden, first.stdout)
 
-    def test_demo_33_real_markdown_and_docx_paths_use_canonical_combination(self):
+    def test_demo_33_markdown_path_and_legacy_docx_bundle_boundary(self):
         markdown = self._script(
             "generate_report.py",
             "--dataset",
@@ -487,11 +492,10 @@ Path(os.environ["SHENGXUE_SENTINEL_ACTIVE"]).write_text("active", encoding="utf-
         self.assertEqual(markdown.returncode, 0, markdown.stdout + markdown.stderr)
         for literal in (
             "物理+化学+地理", "虚构乙大学", "615", "900",
-            "cli-s1、cli-s2、cli-s3", "AI 生成，仅供参考",
+            "cli-s1、cli-s2、cli-s3", "基于公开数据由 AI 整理，仅供参考",
         ):
             self.assertIn(literal, markdown.stdout)
 
-        self._assert_document_runtime()
         output = self.sandbox / "anonymous-admission-report.docx"
         docx = self._script(
             "docx_export.py",
@@ -505,11 +509,29 @@ Path(os.environ["SHENGXUE_SENTINEL_ACTIVE"]).write_text("active", encoding="utf-
             output,
             python=self.documents_python,
         )
-        self.assertEqual(docx.returncode, 0, docx.stdout + docx.stderr)
-        text = _docx_text(output)
+        self._assert_safe_failure(docx)
+        self.assertEqual(docx.stderr.strip(), "错误[DOCX_002]：DOCX 生成或发布失败")
+        self.assertFalse(output.exists())
+
+        # The public DOCX entry point is intentionally v3-only: replay its
+        # authenticated typed fixture, rather than restoring a v1 bypass.
+        from tests.test_docx_semantic_parity import typed_atlas_artifacts
+
+        with typed_atlas_artifacts() as (_planning, _query_plan, bundle, profile_path):
+            output = self.sandbox / "anonymous-admission-report.docx"
+            typed = self._script(
+                "docx_export.py",
+                "--dataset", PROVINCES / "demo-312",
+                "--profile", profile_path,
+                "--evidence", bundle,
+                "--output", output,
+                python=self.documents_python,
+            )
+            self.assertEqual(typed.returncode, 0, typed.stdout + typed.stderr)
+            text = _docx_text(output)
         for literal in (
-            "物理+化学+地理", "虚构乙大学", "615", "900", "cli-s1",
-            "cli-s2", "cli-s3", "AI 生成，仅供参考",
+            "湖北", "合成示例大学", "official-admission", "official-pathway",
+            "基于公开数据由 AI 整理，仅供参考",
         ):
             self.assertIn(literal, text)
 
@@ -569,66 +591,72 @@ Path(os.environ["SHENGXUE_SENTINEL_ACTIVE"]).write_text("active", encoding="utf-
             )
         )
 
-    def test_docx_uses_the_same_snapshot_and_is_byte_deterministic(self):
-        """Catches a second DOCX model, non-anonymous output, or unstable package bytes."""
-        self._assert_document_runtime()
-        directories = (self.sandbox / "first", self.sandbox / "second")
-        for directory in directories:
-            directory.mkdir(exist_ok=True)
-            output = directory / "anonymous-admission-report.docx"
-            result = self._script(
+    def test_docx_replays_typed_snapshot_deterministically_and_rejects_legacy(self):
+        """The v3 public flow is deterministic, exclusive, and profile-bound."""
+        legacy_output = self.sandbox / "legacy-report.docx"
+        legacy = self._script(
+            "docx_export.py",
+            "--dataset", PROVINCES / "demo-312",
+            "--profile", PROFILE,
+            "--evidence", self.replay_evidence,
+            "--output", legacy_output,
+            python=self.documents_python,
+        )
+        self._assert_safe_failure(legacy)
+        self.assertEqual(legacy.stderr.strip(), "错误[DOCX_002]：DOCX 生成或发布失败")
+        self.assertFalse(legacy_output.exists())
+
+        from tests.test_docx_semantic_parity import typed_atlas_artifacts
+
+        with typed_atlas_artifacts() as (_planning, _query_plan, bundle, profile_path):
+            command = (
                 "docx_export.py",
-                "--dataset",
-                PROVINCES / "demo-312",
-                "--profile",
-                PROFILE,
-                "--evidence",
-                self.replay_evidence,
-                "--secondary-subject",
-                "化学",
-                "--secondary-subject",
-                "地理",
-                "--output",
-                output,
+                "--dataset", PROVINCES / "demo-312",
+                "--profile", profile_path,
+                "--evidence", bundle,
+            )
+            directories = (self.sandbox / "typed-first", self.sandbox / "typed-second")
+            for directory in directories:
+                directory.mkdir(exist_ok=True)
+                result = self._script(
+                    *command, python=self.documents_python, cwd=directory
+                )
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                payload = json.loads(result.stdout)
+                self.assertTrue(payload["anonymous"])
+                self.assertEqual(payload["filename"], "anonymous-admission-report.docx")
+                self.assertNotIn("docx_path", payload)
+
+            first = directories[0] / "anonymous-admission-report.docx"
+            second = directories[1] / "anonymous-admission-report.docx"
+            self.assertEqual(first.read_bytes(), second.read_bytes())
+            text = _docx_text(first)
+            for literal in (
+                "匿名升学规划报告", "合成示例大学", "official-admission",
+                "official-pathway", "基于公开数据由 AI 整理，仅供参考",
+            ):
+                self.assertIn(literal, text)
+
+            override = self.sandbox / "override.docx"
+            repeated_secondary = self._script(
+                *command,
+                "--secondary-subject", "化学",
+                "--secondary-subject", "生物",
+                "--output", override,
                 python=self.documents_python,
             )
-            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            payload = json.loads(result.stdout)
-            self.assertTrue(payload["anonymous"])
-            self.assertEqual(payload["filename"], "anonymous-admission-report.docx")
-            self.assertNotIn("docx_path", payload)
-            self.assertEqual(payload["secondary_subjects"], ["化学", "地理"])
+            self._assert_safe_failure(repeated_secondary)
+            self.assertFalse(override.exists())
 
-        first = directories[0] / "anonymous-admission-report.docx"
-        second = directories[1] / "anonymous-admission-report.docx"
-        first_bytes = first.read_bytes()
-        second_bytes = second.read_bytes()
-        self.assertEqual(first_bytes, second_bytes)
-        self.assertEqual(
-            hashlib.sha256(first_bytes).digest(), hashlib.sha256(second_bytes).digest()
-        )
-        text = _docx_text(first)
-        for literal in (
-            "匿名升学规划报告（演示甲省）",
-            "化学、地理",
-            "查询覆盖",
-            "数据覆盖",
-            "检索日期",
-            "2026-08-23",
-            "证据状态",
-            "AI 生成，仅供参考",
-            "虚构甲大学",
-            "645",
-            "1100",
-            "+0",
-            "cli-s1",
-            "cli-s2",
-            "cli-s3",
-            "参考",
-        ):
-            self.assertIn(literal, text)
-        for forbidden in ("张三", "13800138000", "http://", "https://", str(ROOT)):
-            self.assertNotIn(forbidden, text)
+            competing_dir = self.sandbox / "typed-competing"
+            competing_dir.mkdir()
+            competitor = competing_dir / "anonymous-admission-report.docx"
+            competitor.write_bytes(b"competitor-owned")
+            refused = self._script(
+                *command, python=self.documents_python, cwd=competing_dir
+            )
+            self._assert_safe_failure(refused)
+            self.assertEqual(competitor.read_bytes(), b"competitor-owned")
 
     def test_missing_document_capability_is_exit_three_without_weakening_installed_gate(self):
         """Catches late ImportError/exit-2 handling while real DOCX stays mandatory above."""
@@ -641,6 +669,378 @@ Path(os.environ["SHENGXUE_SENTINEL_ACTIVE"]).write_text("active", encoding="utf-
         self._assert_safe_failure(result, expected=3)
         self.assertIn("缺少能力", result.stderr)
         self.assertIn("python-docx", result.stderr)
+
+
+class PlanningSessionCliSmokeTest(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.session_dir = Path(self.temporary.name)
+        self.script = SCRIPTS / "planning_session.py"
+        self.session_id = "fedcba9876543210fedcba9876543210"
+        from scripts.decision_policy import DecisionPolicySnapshot
+        from scripts.planning_profile import PlanningProfile
+        from scripts.query_plan import build_query_plan, load_province_catalog
+        from tests.test_planning_profile import reference_payload
+
+        profile_payload = reference_payload()
+        self.profile_payload = profile_payload
+        profile = PlanningProfile.create(profile_payload)
+        self.profile = self.session_dir / "profile.json"
+        self.profile.write_text(
+            json.dumps(profile_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+            encoding="utf-8",
+            newline="\n",
+        )
+        self.profile_digest = profile.digest
+        plan = build_query_plan(
+            profile,
+            load_province_catalog(),
+            DecisionPolicySnapshot.load_default(),
+        )
+        self.query_plan = self.session_dir / "query-plan.json"
+        self.query_plan.write_text(
+            json.dumps(
+                plan.to_dict(),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+            encoding="utf-8",
+            newline="\n",
+        )
+        self.plan_digest = self._digest_bytes(
+            json.dumps(
+                plan.to_dict(),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        )
+        self.task_id = plan.tasks[0].task_id
+        self.task_ids = tuple(task.task_id for task in plan.tasks)
+        from scripts.evidence import EvidenceStore
+        from scripts.preflight import detect_capabilities
+
+        evidence_root = self.session_dir / "evidence"
+        evidence_root.mkdir()
+        evidence_store = EvidenceStore.create(
+            evidence_root.resolve(), detect_capabilities(set())
+        )
+        evidence_store.finalize()
+        self.evidence_bundle = evidence_store.session_path
+
+    @staticmethod
+    def _digest(label):
+        return "sha256:" + hashlib.sha256(label.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _digest_bytes(value):
+        return "sha256:" + hashlib.sha256(value).hexdigest()
+
+    def _session(self, *arguments):
+        environment = os.environ.copy()
+        environment["PYTHONIOENCODING"] = "utf-8"
+        return subprocess.run(
+            [
+                sys.executable,
+                str(self.script),
+                "--session-dir",
+                str(self.session_dir),
+                *arguments,
+            ],
+            cwd=ROOT,
+            env=environment,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+
+    def _ok(self, *arguments):
+        result = self._session(*arguments)
+        self.assertEqual(result.returncode, 0, result.stderr.decode("utf-8", "replace"))
+        payload = json.loads(result.stdout.decode("utf-8"))
+        self.assertEqual(
+            set(payload),
+            {
+                "session_id",
+                "revision",
+                "stage",
+                "coverage",
+                "next_actions",
+                "degradations",
+            },
+        )
+        return payload
+
+    def _resolve_remaining(self):
+        from scripts.planning_session import PlanningSessionStore
+
+        store = PlanningSessionStore(self.session_dir)
+        session = store.load(self.session_id)
+        resolved = {*session.completed_task_ids, *session.unavailable_task_ids}
+        for task_id in session.expected_task_ids:
+            if task_id not in resolved:
+                self._ok(
+                    "ingest",
+                    "--session-id",
+                    self.session_id,
+                    "--profile",
+                    self.profile,
+                    "--query-plan",
+                    self.query_plan,
+                    "--task-id",
+                    task_id,
+                    "--outcome",
+                    "unavailable",
+                    "--unavailable-reason",
+                    "capability_unavailable",
+                )
+        return store.load(self.session_id)
+
+    def test_recoverable_cli_drives_every_command_without_network_or_path_output(self):
+        task = self.task_id
+        self.assertEqual(
+            self._ok(
+                "init", "--session-id", self.session_id, "--profile", self.profile
+            )["stage"],
+            "intake",
+        )
+        self.assertEqual(
+            self._ok(
+                "confirm",
+                "--session-id",
+                self.session_id,
+                "--profile",
+                self.profile,
+            )["stage"],
+            "profile_confirmed",
+        )
+        preflight = self._ok(
+            "next", "--session-id", self.session_id, "--profile", self.profile
+        )
+        self.assertEqual(preflight["stage"], "preflight_complete")
+        self.assertIn("missing_vision", preflight["degradations"])
+        self.assertEqual(
+            self._ok(
+                "next",
+                "--session-id",
+                self.session_id,
+                "--query-plan",
+                self.query_plan,
+                "--profile",
+                self.profile,
+            )["stage"],
+            "query_plan_ready",
+        )
+        actions = self._ok(
+            "next",
+            "--session-id",
+            self.session_id,
+            "--query-plan",
+            self.query_plan,
+            "--profile",
+            self.profile,
+        )["next_actions"]
+        self.assertTrue(actions)
+        self.assertEqual(actions[0]["type"], "query_task")
+        self.assertEqual(actions[0]["payload"]["task_id"], task)
+        self.assertIn("query_variants", actions[0]["payload"])
+        # A raw CLI process cannot safely deserialize a factory-only task
+        # receipt, so completed ingestion fails closed even with typed context.
+        completed = self._session(
+            "ingest",
+            "--session-id",
+            self.session_id,
+            "--profile",
+            self.profile,
+            "--query-plan",
+            self.query_plan,
+            "--task-id",
+            task,
+            "--outcome",
+            "completed",
+        )
+        self.assertEqual(completed.returncode, 2)
+        unchanged = self._ok("status", "--session-id", self.session_id)
+        self.assertEqual(unchanged["stage"], "query_plan_ready")
+        self.assertIn("missing_vision", unchanged["degradations"])
+        self.assertEqual(
+            self._ok(
+                "ingest",
+                "--session-id",
+                self.session_id,
+                "--profile",
+                self.profile,
+                "--query-plan",
+                self.query_plan,
+                "--task-id",
+                task,
+                "--outcome",
+                "unavailable",
+                "--unavailable-reason",
+                "capability_unavailable",
+            )["stage"],
+            "research_in_progress",
+        )
+        incomplete = self._session(
+            "finalize",
+            "--session-id",
+            self.session_id,
+            "--profile",
+            self.profile,
+            "--query-plan",
+            self.query_plan,
+            "--evidence-bundle",
+            self.evidence_bundle,
+        )
+        self.assertEqual(incomplete.returncode, 2)
+        self._resolve_remaining()
+        self.assertEqual(
+            self._ok("status", "--session-id", self.session_id)[
+                "next_actions"
+            ],
+            [{"type": "finalize_evidence"}],
+        )
+        self.assertEqual(
+            self._ok(
+                "finalize",
+                "--session-id",
+                self.session_id,
+                "--profile",
+                self.profile,
+                "--query-plan",
+                self.query_plan,
+                "--evidence-bundle",
+                self.evidence_bundle,
+            )["stage"],
+            "evidence_finalized",
+        )
+        final = self._ok(
+            "compute",
+            "--session-id",
+            self.session_id,
+            "--profile",
+            self.profile,
+            "--query-plan",
+            self.query_plan,
+            "--evidence-bundle",
+            self.evidence_bundle,
+        )
+        self.assertEqual(final["stage"], "report_published")
+        status = self._ok("status", "--session-id", self.session_id)
+        self.assertEqual(status, final)
+        self.assertNotIn(str(self.session_dir), json.dumps(final, ensure_ascii=False))
+        from scripts.planning_session import PlanningSessionStore
+
+        snapshot = PlanningSessionStore(self.session_dir).load(self.session_id)
+        self.assertIsNotNone(snapshot.evidence_receipt_digest)
+        self.assertIsNotNone(snapshot.calculation_receipt_digest)
+        self.assertIsNotNone(snapshot.publication_receipt_digest)
+
+    def test_cli_replay_and_unknown_arguments_fail_path_neutrally(self):
+        self._ok(
+            "init", "--session-id", self.session_id, "--profile", self.profile
+        )
+        self._ok(
+            "confirm", "--session-id", self.session_id, "--profile", self.profile
+        )
+        for arguments in (
+            ("confirm", "--session-id", self.session_id, "--profile", self.profile),
+            ("status", "--session-id", self.session_id, "--unknown", "private"),
+        ):
+            result = self._session(*arguments)
+            self.assertEqual(result.returncode, 2)
+            visible = (result.stdout + result.stderr).decode("utf-8", "replace")
+            self.assertNotIn(str(self.session_dir), visible)
+            self.assertNotIn("Traceback", visible)
+
+    def test_legacy_naked_digest_authority_is_rejected_path_neutrally(self):
+        self._ok(
+            "init", "--session-id", self.session_id, "--profile", self.profile
+        )
+        for arguments in (
+            (
+                "finalize",
+                "--session-id",
+                self.session_id,
+                "--manifest-hash",
+                self._digest("manifest"),
+            ),
+            (
+                "compute",
+                "--session-id",
+                self.session_id,
+                "--calculation-digest",
+                self._digest("calculation"),
+            ),
+            (
+                "compute",
+                "--session-id",
+                self.session_id,
+                "--report-digest",
+                self._digest("report"),
+            ),
+        ):
+            result = self._session(*arguments)
+            self.assertEqual(result.returncode, 2)
+            visible = (result.stdout + result.stderr).decode("utf-8", "replace")
+            self.assertNotIn(str(self.session_dir), visible)
+            self.assertNotIn("Traceback", visible)
+
+    def test_confirm_revises_a_later_session_and_clears_downstream_state(self):
+        self._ok(
+            "init", "--session-id", self.session_id, "--profile", self.profile
+        )
+        self._ok(
+            "confirm",
+            "--session-id",
+            self.session_id,
+            "--profile",
+            self.profile,
+        )
+        self._ok(
+            "next", "--session-id", self.session_id, "--profile", self.profile
+        )
+        self._ok(
+            "next",
+            "--session-id",
+            self.session_id,
+            "--profile",
+            self.profile,
+            "--query-plan",
+            self.query_plan,
+        )
+        revised_payload = json.loads(json.dumps(self.profile_payload))
+        revised_payload["constraints"]["risk_preference"] = "conservative"
+        revised_path = self.session_dir / "revised-profile.json"
+        revised_path.write_text(
+            json.dumps(
+                revised_payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+            encoding="utf-8",
+            newline="\n",
+        )
+        revised = self._ok(
+            "confirm",
+            "--session-id",
+            self.session_id,
+            "--profile",
+            revised_path,
+        )
+        self.assertEqual(revised["stage"], "profile_confirmed")
+        self.assertEqual(revised["coverage"]["expected"], 0)
+        replay = self._session(
+            "confirm",
+            "--session-id",
+            self.session_id,
+            "--profile",
+            revised_path,
+        )
+        self.assertEqual(replay.returncode, 2)
 
 
 if __name__ == "__main__":

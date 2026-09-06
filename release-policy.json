@@ -56,174 +56,357 @@
     "reports",
     "work"
   ],
-  "allowlist": [],
+  "allowlist": [
+    {
+      "path": "tests/test_pathway_evidence_bridge.py",
+      "kind": "absolute_local_path",
+      "line_sha256": "f17808c0320ab406bb565ccf59ba3fd2db7d4e23a83805398caaf17cd6547e46",
+      "reason": "Reviewed synthetic privacy rejection or non-disclosure regression literal"
+    },
+    {
+      "path": "tests/test_planning_session.py",
+      "kind": "phone",
+      "line_sha256": "8b7d772a0131ae4d3dd52893ee4b2fe8cca8acdf53f65407a67990e739731fa4",
+      "reason": "Reviewed synthetic privacy rejection or non-disclosure regression literal"
+    },
+    {
+      "path": "tests/test_planning_session.py",
+      "kind": "absolute_local_path",
+      "line_sha256": "5481fc02719ac8a62b4d4e8cd6c97a298508b7787e53bd2da42942f2c860a6c9",
+      "reason": "Reviewed synthetic privacy rejection or non-disclosure regression literal"
+    },
+    {
+      "path": "tests/test_planning_session.py",
+      "kind": "absolute_local_path",
+      "line_sha256": "3d0ee2b074d47385cec6de70f03b59d4454fb3024dac390a0f696b148f56269f",
+      "reason": "Reviewed synthetic privacy rejection or non-disclosure regression literal"
+    },
+    {
+      "path": "tests/test_planning_session.py",
+      "kind": "absolute_local_path",
+      "line_sha256": "58f81a10aa0abe332dc97fa3d786a08f98919d3a8e4ae59ee3d3b5d6361efbcc",
+      "reason": "Reviewed synthetic privacy rejection or non-disclosure regression literal"
+    },
+    {
+      "path": "tests/test_planning_session.py",
+      "kind": "absolute_local_path",
+      "line_sha256": "ae7b7727c5575892786648d33023fce7b211fbd4a3a88cd3e42aaf78df8e48ab",
+      "reason": "Reviewed synthetic privacy rejection or non-disclosure regression literal"
+    },
+    {
+      "path": "tests/test_rank_evidence_bridge.py",
+      "kind": "absolute_local_path",
+      "line_sha256": "76106508ab76de9c9f1ec15e6f7bec2fd0da3df71d9044a312194d2f40f5dcc9",
+      "reason": "Reviewed synthetic privacy rejection or non-disclosure regression literal"
+    },
+    {
+      "path": "tests/test_rank_evidence_bridge.py",
+      "kind": "absolute_local_path",
+      "line_sha256": "29f35f1f7c9483b2dfad411174fa641ffd1637cd3f6b2f961ec342940ddfa9d9",
+      "reason": "Reviewed synthetic privacy rejection or non-disclosure regression literal"
+    },
+    {
+      "path": "tests/test_rank_evidence_bridge.py",
+      "kind": "secret",
+      "line_sha256": "4376537f658f9906ac34328f3337cda53e58fefca9ff8a817aef86f264e0c3e3",
+      "reason": "Reviewed synthetic privacy rejection or non-disclosure regression literal"
+    },
+    {
+      "path": "tests/test_rank_evidence_bridge.py",
+      "kind": "absolute_local_path",
+      "line_sha256": "e333a8e40c9e125aa44b742b897325fadb9a78dd111e37f0a4b21b81dde68a67",
+      "reason": "Reviewed synthetic privacy rejection or non-disclosure regression literal"
+    },
+    {
+      "path": "tests/test_rank_evidence_bridge.py",
+      "kind": "absolute_local_path",
+      "line_sha256": "e389171b7e5d40773180bcde878e9846b4b554ab54403bcf44cbb1965088b197",
+      "reason": "Reviewed synthetic privacy rejection or non-disclosure regression literal"
+    },
+    {
+      "path": "tests/test_research_snapshot.py",
+      "kind": "absolute_local_path",
+      "line_sha256": "49e52c5454a6b875c5e61d1aa405fda758a3b845f55e838302b7aa796a914f35",
+      "reason": "Reviewed synthetic privacy rejection or non-disclosure regression literal"
+    },
+    {
+      "path": "tests/test_public_text_adapter.py",
+      "kind": "pricing_or_sales",
+      "line_sha256": "00dc6dc6a883cfa1c67c4bcbd586b445e5a2cb20203b36070ddd368773f19789",
+      "reason": "Synthetic numeric quote-binding regression rejects an incorrect tuition amount"
+    },
+    {
+      "path": "tests/test_host_ocr_workflow.py",
+      "kind": "absolute_local_path",
+      "line_sha256": "ce4147a11a67bfe7a68e08f6b02ca119d888e3486d26da760847953348b3f1e7",
+      "reason": "Synthetic unsafe OCR locator is deliberately rejected by the replay regression"
+    }
+  ],
   "file_allowlist": [
     {
       "path": ".scratch/shengxue-skill-open-source/spec.md",
-      "kinds": ["private_system_reference"],
+      "kinds": [
+        "private_system_reference"
+      ],
       "file_sha256": "8952a7bde9b0d45ecdbf58465a92790937f9b01bd1f646e5f6046b2420f88027",
       "reason": "historical specification reference"
     },
     {
       "path": "docs/superpowers/plans/2026-08-22-01-evidence-foundation.md",
-      "kinds": ["absolute_local_path"],
+      "kinds": [
+        "absolute_local_path"
+      ],
       "file_sha256": "3b34c9ec4ef7e395c935c2919886aae4144c4539e678f801a80794950c0cd9f3",
       "reason": "historical implementation-plan example"
     },
     {
       "path": "docs/superpowers/plans/2026-08-22-02-engine-hardening.md",
-      "kinds": ["absolute_local_path", "private_system_reference"],
+      "kinds": [
+        "absolute_local_path",
+        "private_system_reference"
+      ],
       "file_sha256": "b3d5b8d24812b4809ad3a095f4a0103f9c55c5355e3ab78f3cb8aa3157b51223",
       "reason": "historical implementation-plan example"
     },
     {
       "path": "docs/superpowers/plans/2026-08-22-04-open-source-release.md",
-      "kinds": ["absolute_local_path", "phone", "private_system_reference", "secret", "student_pii"],
+      "kinds": [
+        "absolute_local_path",
+        "phone",
+        "private_system_reference",
+        "secret",
+        "student_pii"
+      ],
       "file_sha256": "2e4d329eb39374cf3365526e78ee69425b7f9843f3e17288b507e7954a7841c3",
       "reason": "historical implementation-plan example"
     },
     {
       "path": "docs/superpowers/plans/2026-08-26-pathway-atlas-brand-migration.md",
-      "kinds": ["absolute_local_path"],
+      "kinds": [
+        "absolute_local_path"
+      ],
       "file_sha256": "a547dfa66aa09c6008007b3e0681a19101fe0f3cc8072e47c26cb99113bfc990",
       "reason": "historical implementation-plan example"
     },
     {
       "path": "docs/superpowers/plans/2026-08-27-pathway-atlas-brand-distribution.md",
-      "kinds": ["absolute_local_path"],
+      "kinds": [
+        "absolute_local_path"
+      ],
       "file_sha256": "d79a77c03c82432338316461736013b08a790d4020736e4326328c12bfcfea2e",
       "reason": "historical implementation-plan example"
     },
     {
       "path": "scripts/compliance_scan.py",
-      "kinds": ["absolute_local_path", "pricing_or_sales"],
+      "kinds": [
+        "absolute_local_path",
+        "pricing_or_sales"
+      ],
       "file_sha256": "da847909c9a021c190f4e522c3df6230c354fca0b1af5ad252411888ef8734ff",
       "reason": "scanner rule literal"
     },
     {
       "path": "scripts/path_recommend.py",
-      "kinds": ["pricing_or_sales"],
-      "file_sha256": "5432d9c7a77612cbc25b0526f824e3f8c29ba73dabd25fe6468b1505db264485",
+      "kinds": [
+        "pricing_or_sales"
+      ],
+      "file_sha256": "01ac811aaf07d79edf590dfcd553fe13c20510fc55235a803c9702f2bf6bbf59",
       "reason": "numeric parser rule literal"
     },
     {
       "path": "tests/test_build_release.py",
-      "kinds": ["secret"],
-      "file_sha256": "9148a44ff7554eb4679ea7f49e8133575a7b84c8a678cae111520b90fa327841",
+      "kinds": [
+        "secret"
+      ],
+      "file_sha256": "e27cbe2b119c2558d6385dcab5ccdf93ee503016df02bedfb2d3dcb8cb479b68",
       "reason": "synthetic negative fixture"
     },
     {
       "path": "tests/test_cli_smoke.py",
-      "kinds": ["absolute_local_path", "phone", "pricing_or_sales"],
-      "file_sha256": "8a125a4d39c59745bca7a79407d3a727097128d9bbb086ce30213dff9b5d0a15",
+      "kinds": [
+        "absolute_local_path",
+        "phone",
+        "pricing_or_sales"
+      ],
+      "file_sha256": "451e10eac464fc1e6d2e4e03770255d30982cda12c6c1e94d28d8421673badbe",
       "reason": "synthetic negative fixture"
     },
     {
       "path": "tests/test_community_files.py",
-      "kinds": ["absolute_local_path", "pricing_or_sales", "private_system_reference"],
+      "kinds": [
+        "absolute_local_path",
+        "pricing_or_sales",
+        "private_system_reference"
+      ],
       "file_sha256": "db688bc3929f67257f3d58171e305c075fa08362f0a8f2d771555228c4a81311",
       "reason": "synthetic negative fixture"
     },
     {
       "path": "tests/test_compliance_scan.py",
-      "kinds": ["absolute_local_path", "identity_number", "phone", "pricing_or_sales", "private_system_reference", "secret", "student_pii"],
+      "kinds": [
+        "absolute_local_path",
+        "identity_number",
+        "phone",
+        "pricing_or_sales",
+        "private_system_reference",
+        "secret",
+        "student_pii"
+      ],
       "file_sha256": "655039755dafcf353284d54bdab8eced46ca4c0ca096c5d02f16705911854c9e",
       "reason": "synthetic negative fixture"
     },
     {
       "path": "tests/test_contracts.py",
-      "kinds": ["phone"],
+      "kinds": [
+        "phone"
+      ],
       "file_sha256": "0a1bb6956fd716fee2ec57b250d6eee19dac2e1cbaefe21395135e3e75a1c0a5",
       "reason": "synthetic negative fixture"
     },
     {
       "path": "tests/test_docx_semantic_parity.py",
-      "kinds": ["absolute_local_path", "phone", "pricing_or_sales"],
-      "file_sha256": "a2b694057ae061d6a9c0bb78c3ca0b62d93bf4f7db9bfe3a944b94a11823b3ef",
+      "kinds": [
+        "absolute_local_path",
+        "phone",
+        "pricing_or_sales"
+      ],
+      "file_sha256": "94cb1b9a30c4ce7a649b8577d8988c6080b8cfbba6bd1ef6a0ef9c1329398c7c",
       "reason": "synthetic negative fixture"
     },
     {
       "path": "tests/test_downloader.py",
-      "kinds": ["absolute_local_path"],
+      "kinds": [
+        "absolute_local_path"
+      ],
       "file_sha256": "f445c6b7dbccd79272fc6cfca38e7748a7a5780df3a5b1aed15b039ec8370bbf",
       "reason": "synthetic negative fixture"
     },
     {
       "path": "tests/test_evidence.py",
-      "kinds": ["absolute_local_path", "identity_number", "phone", "secret"],
+      "kinds": [
+        "absolute_local_path",
+        "identity_number",
+        "phone",
+        "secret"
+      ],
       "file_sha256": "1da5aceabd6fde9e32b6f34b368b27d79a329ca82c133034397d68b28975efd4",
       "reason": "synthetic negative fixture"
     },
     {
       "path": "tests/test_generate_report_evidence.py",
-      "kinds": ["absolute_local_path", "phone", "pricing_or_sales", "student_pii"],
-      "file_sha256": "3b8010cb3b033e507a92496006ba64e69f2ab81cfb5c2c006652bf4cdd11b97f",
+      "kinds": [
+        "absolute_local_path",
+        "phone",
+        "pricing_or_sales",
+        "student_pii"
+      ],
+      "file_sha256": "9dfe2d01641123914b3e36db3220dbf78a279bb20bf960bddd2c7e285781ebda",
       "reason": "synthetic negative fixture"
     },
     {
       "path": "tests/test_live_smoke_contract.py",
-      "kinds": ["absolute_local_path"],
+      "kinds": [
+        "absolute_local_path"
+      ],
       "file_sha256": "10b4deb4a96d736d3b722af2fc72d7a792b751f6a04b12dea5d8e3adc84f1fbb",
       "reason": "synthetic negative fixture"
     },
     {
       "path": "tests/test_path_policy.py",
-      "kinds": ["absolute_local_path", "phone", "secret", "student_pii"],
-      "file_sha256": "00ed516812e22a9649bf788337a65499869967b85fccab0256e45859302ac7af",
+      "kinds": [
+        "absolute_local_path",
+        "phone",
+        "secret",
+        "student_pii"
+      ],
+      "file_sha256": "898b9f87dd0a5ce639d786f020702ae12aae48b1391931789accf5a23d882286",
       "reason": "synthetic negative fixture"
     },
     {
       "path": "tests/test_planning_profile.py",
-      "kinds": ["absolute_local_path", "phone", "secret"],
-      "file_sha256": "d4f6e8ae3d8607b2da9e7e71d816e45aa740645964e8c23815b76c134f6e8770",
+      "kinds": [
+        "absolute_local_path",
+        "phone",
+        "secret"
+      ],
+      "file_sha256": "d865cdf3c4560c0a76c9b29a1a003929ea5b425b16825913358190662126cca3",
       "reason": "synthetic negative fixture"
     },
     {
       "path": "tests/test_public_package_boundary.py",
-      "kinds": ["absolute_local_path", "pricing_or_sales", "private_system_reference"],
+      "kinds": [
+        "absolute_local_path",
+        "pricing_or_sales",
+        "private_system_reference"
+      ],
       "file_sha256": "f4ceb1c7edb3de5e26411a9ad98f50f803e11465ad0c70f68dbdcc35e8247118",
       "reason": "synthetic negative fixture"
     },
     {
       "path": "tests/test_query_plan.py",
-      "kinds": ["absolute_local_path", "phone", "secret", "student_pii"],
-      "file_sha256": "579da7e2cb35175581625c3a377e603a958df0a1b407f9df7ff3a1da43dbb44e",
+      "kinds": [
+        "absolute_local_path",
+        "phone",
+        "secret",
+        "student_pii"
+      ],
+      "file_sha256": "d760c6937b9a31911f312a8885f7ea5be68503a7523e1617cdc82c0c1c52c263",
       "reason": "synthetic negative fixture"
     },
     {
       "path": "tests/test_release_check.py",
-      "kinds": ["absolute_local_path", "pricing_or_sales", "secret", "student_pii"],
-      "file_sha256": "7002130378ecb7afa2ee1c2311b431556b99947a188353356fbcc9a44f8858ca",
+      "kinds": [
+        "absolute_local_path",
+        "pricing_or_sales",
+        "secret",
+        "student_pii"
+      ],
+      "file_sha256": "9bb64b63c8150a01219c508157faceb0a15469029b0d57a50da8cc79e2229c7d",
       "reason": "synthetic negative fixture"
     },
     {
       "path": "tests/test_replay_scenarios.py",
-      "kinds": ["absolute_local_path"],
+      "kinds": [
+        "absolute_local_path"
+      ],
       "file_sha256": "743d5b051169b3af1a3c360a36420fe8ad5e961e1d1c091d665612ab2b50948e",
       "reason": "synthetic negative fixture"
     },
     {
       "path": "tests/test_structured_adapters.py",
-      "kinds": ["absolute_local_path"],
-      "file_sha256": "7b3dfebd8e7c4fd4fa4d7d61fdb903f1d40b62daac0e5b0b5238bdfafffde4fa",
+      "kinds": [
+        "absolute_local_path"
+      ],
+      "file_sha256": "d633854f3501ecad28f189ece74985d03ddfe215753e43e5559530f3b63215ef",
       "reason": "synthetic negative fixture"
     },
     {
       "path": "tests/test_unstructured_adapters.py",
-      "kinds": ["absolute_local_path", "secret"],
-      "file_sha256": "a51d90b77191eb33c5e79659c58453c70dca58b114005b5bfc38906581de81e7",
+      "kinds": [
+        "absolute_local_path",
+        "secret"
+      ],
+      "file_sha256": "fbb2eafaa872d8db788480b6b42b54d3c1cbd037937cfaa5e7519a8eee7cc1cf",
       "reason": "synthetic negative fixture"
     },
     {
       "path": "tests/test_validate_data.py",
-      "kinds": ["absolute_local_path", "phone"],
-      "file_sha256": "ae9525c5dfc28b7405bd633601f657891e814afd3d6d0e45c9f64288f4bad4ac",
+      "kinds": [
+        "absolute_local_path",
+        "phone"
+      ],
+      "file_sha256": "6ea46c80ac9e7b3d079e8e1e252de300346ab3911d2e8b259ebd3d6284f8c222",
       "reason": "synthetic negative fixture"
     },
     {
       "path": "tests/test_validate_evidence.py",
-      "kinds": ["absolute_local_path", "identity_number", "phone", "secret"],
-      "file_sha256": "c3548a120068417847ad3bbe3669d168c3a38ea9b83a5fdbfd50037afd088f9e",
+      "kinds": [
+        "absolute_local_path",
+        "identity_number",
+        "phone",
+        "secret"
+      ],
+      "file_sha256": "39c76d8b2e7dc481bd578a70029b32b3fb511fdb19e097de9897df5b9dc4e12f",
       "reason": "synthetic negative fixture"
     }
   ],
@@ -303,7 +486,13 @@
     "tests/test_structured_adapters.py",
     "tests/test_unstructured_adapters.py",
     "tests/test_docx_semantic_parity.py",
-    "tests/test_workflows.py"
+    "tests/test_workflows.py",
+    "scripts/host_workflow.py",
+    "scripts/questionnaire_intake.py",
+    "scripts/planning_session.py",
+    "scripts/adapters/public_text.py",
+    "scripts/adapters/school_fit_bridge.py",
+    "references/host-workflow.md"
   ],
   "required_release_prefixes": [
     "tests/fixtures/evidence",

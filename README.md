@@ -4,7 +4,6 @@
 请使用你当前环境的 Skill 安装能力，从 GitHub `https://github.com/sarry12227/pathway-atlas` 安装 `pathway-atlas`（多元星途）；如果 GitHub 无法访问，请改用 Gitee 镜像 `https://gitee.com/sarry1/pathway-atlas`。若环境没有专用安装工具，请将仓库克隆或下载到当前 Agent 的 Skills 目录，确认根目录存在 `SKILL.md` 且其中 `name` 为 `pathway-atlas`，然后重新加载并调用它。
 ```
 
-
 <p align="center"><img src="assets/brand/pathway-atlas-horizontal.svg" alt="多元星途 PathwayAtlas" width="100%"></p>
 
 # 多元星途 · PathwayAtlas
@@ -28,14 +27,16 @@
 
 ## 用户旅程
 
-一次完整会话遵循仓库根目录 [SKILL.md](SKILL.md) 的六阶段协议：
+一次完整会话遵循仓库根目录 [SKILL.md](SKILL.md) 的六阶段协议，并由 `planning_session.py` 保存唯一、可恢复的状态。用户不接触内部 JSON、文件路径或命令：
 
-1. **信息采集**：从首条消息自动回填已知信息，再完成不超过 20 题的匿名规划问卷并请用户确认；不要求姓名、电话、身份证、住址，也不让用户手工创建内部 JSON。
-2. **能力预检**：Agent 检查当前宿主实际可用的搜索、浏览、视觉、本地执行和文件输出能力，再运行 `preflight.py` 保存能力档与降级项。
-3. **查询计划**：`query_plan.py` 按省份配置、考试年份与目标路径产生确定性任务；每类年度数据独立按目标年到前三年依次回查，Agent 再按 [检索流程](references/retrieval-playbook.md) 分任务执行。
-4. **证据归一化**：网页、XLSX、PDF、OCR 或 QR 发现的公开材料进入对应适配器；数据与证据分别通过 `validate_data.py`、`validate_evidence.py`。
-5. **确定性计算**：只读取已验证的数据集、匿名画像、证据快照和省份策略；没有官方位次时先形成乐观、中性、保守位次情景，再生成参考冲稳保，只有完全没有校准依据时才不制造数字。
-6. **报告输出**：默认生成匿名 Markdown；安装文档依赖后可从同一报告模型生成 DOCX。结果必须同时给出普通批院校范围和多元路径的明确投入结论，并逐项展示字段级来源、证据状态、覆盖范围和降级原因。
+1. **画像确认**：Agent 从首条消息自动回填已知信息，一次展示完整 20 题的匿名规划问卷；每题可以明确回答不知道。不要求姓名、电话、身份证或住址，只有用户明确确认后才开始检索。
+2. **会话启动与恢复**：Agent 使用 `host_workflow.py start` 完成能力预检与查询计划初始化；`next` 从原检查点继续。问卷归一化、内部文件、命令和会话记录全部由 Agent 处理，家长不需要配置程序。
+3. **研究循环**：`query_plan.py` 从已确认画像与省份配置生成 canonical QueryPlan。当前查询年按会话日期动态确定，各数据族独立按 `Y → Y-1 → Y-2 → Y-3` 回查；宿主反复调用 `next`，打开候选正文、运行对应适配器，再以 `ingest` 记录完成结果或不可用原因。
+4. **真实资料入库**：`ingest` 接收保存的网页表格、XLSX、公开正文或宿主已核对的 OCR 行，自动提取、校验并保存证据。正文引用保留原文位置，缺字段不补造；进程重启后仍能重放。
+5. **计算与文件输出**：任务结束后，`finish` 自动完成证据最终化、计算和报告写入。相同位次下，专业、地域、预算与风险偏好参与判断；没有官方位次时，先利用可验证的学校或联考锚点形成位次区间。Markdown 与可选 DOCX 来自同一个报告模型。
+6. **结果与行动**：报告给出冲稳保典型学校，对多元路径明确作出主攻、重点准备、备选、观察或不建议判断，并把 3–7 项“当前最需要做的事”按时间与价值排序。每项都展示来源、证据状态、覆盖范围和不确定性；默认输出匿名 Markdown，可选 DOCX。v0.1.0 仍是公开预览，结果不是录取承诺，也不替代当年官方政策与正式升学建议。
+
+宿主接入的可执行命令和输入示例见 [Host workflow guide](references/host-workflow.md)。用户安装整个 Skill 后，直接说“请使用多元星途帮我做升学规划”即可开始问卷。
 
 ## 信源与交叉验证
 
@@ -130,24 +131,32 @@ python scripts/validate_evidence.py tests/fixtures/evidence/three-source-consens
 python scripts/generate_report.py --dataset tests/fixtures/provinces/demo-312 --profile tests/fixtures/profiles/demo.json --evidence tests/fixtures/evidence/three-source-consensus
 ```
 
-生成可选 DOCX 文件：
-
-```bash
-python scripts/docx_export.py --dataset tests/fixtures/provinces/demo-312 --profile tests/fixtures/profiles/demo.json --evidence tests/fixtures/evidence/three-source-consensus --output anonymous-admission-report.docx
-```
+DOCX 由宿主在完成问卷、检索和证据归一化后，从同一 immutable
+报告模型导出；用户不需要也不应手写画像 JSON、证据包路径或
+`canonical QueryPlan`。`docx_export.py` 的 v3 重放入口是宿主内部工具：
+它只接受当前画像、canonical QueryPlan 与新鲜认证证据包已绑定的上下文。
+在实际会话中直接要求 Agent 使用本 Skill 生成 DOCX；在没有该完整上下文时，
+工具会安全拒绝，而不是用演示 fixture 补造报告。
 
 这个最小证据样例只证明证据门禁和报告降级行为；它没有足够的投档行证据，因此报告会如实显示缺失覆盖，而不会制造院校推荐。`demo-33` 另行覆盖 `3+3` 科目组合。更多离线 QR、OCR、屏蔽值和转载去重场景位于 `tests/fixtures/replay/`。
 
 ### 当前公开 CLI
 
+文档能力就绪时，宿主可检查 v3 DOCX 导出入口；真实会话仍由统一状态机在内部绑定画像、查询计划与证据包：
+
+```text
+python scripts/docx_export.py --help
+```
+
 | 入口 | 作用 |
 | --- | --- |
+| [`scripts/planning_session.py`](scripts/planning_session.py) | 宿主内部管理 `status/init/confirm/next/ingest/finalize/compute` 状态转换 |
 | [`scripts/preflight.py`](scripts/preflight.py) | 输出能力档、可选模块和降级项 |
 | [`scripts/query_plan.py`](scripts/query_plan.py) | 从匿名画像、省份配置与年份生成查询计划 |
 | [`scripts/validate_data.py`](scripts/validate_data.py) | 校验标准化省份数据集 |
 | [`scripts/validate_evidence.py`](scripts/validate_evidence.py) | 校验已完成证据包与来源独立性 |
 | [`scripts/generate_report.py`](scripts/generate_report.py) | 从已验证输入生成 Markdown |
-| [`scripts/docx_export.py`](scripts/docx_export.py) | 从同一报告模型生成 DOCX |
+| [`scripts/docx_export.py`](scripts/docx_export.py) | 宿主内部：从 v3 已绑定报告模型生成 DOCX（不要求用户提供 JSON 或路径） |
 | [`scripts/compliance_scan.py`](scripts/compliance_scan.py) | 扫描报告文本的合规风险 |
 | [`scripts/live_smoke.py`](scripts/live_smoke.py) | 维护者可选的有界、只读官方入口健康检查；不更新事实，也不参与确定性正确性 |
 

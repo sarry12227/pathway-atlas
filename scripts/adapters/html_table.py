@@ -352,14 +352,16 @@ def extract_html_table(
     path: str | Path,
     *,
     table_index: int,
-    expected_caption: str,
+    expected_caption: str | None,
     mapping: ColumnMapping | Mapping[str, object],
 ) -> ExtractedTable:
     """Extract one caller-selected table without fetching or guessing."""
 
     if isinstance(table_index, bool) or not isinstance(table_index, int) or table_index < 1:
         raise StructuredValidationError("table_index must be a positive one-based integer")
-    if not isinstance(expected_caption, str) or not expected_caption or expected_caption != expected_caption.strip():
+    if expected_caption is not None and (
+        not isinstance(expected_caption, str) or not expected_caption or expected_caption != expected_caption.strip()
+    ):
         raise StructuredValidationError("expected_caption must be a nonempty exact string")
     column_mapping = coerce_column_mapping(mapping)
     source = read_stable_local_file(path, suffixes=(".html", ".htm"))

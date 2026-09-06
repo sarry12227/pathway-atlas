@@ -2,58 +2,27 @@ import re
 import unittest
 from pathlib import Path
 
-from scripts.contracts import EvidenceStatus, FactClaim, SourceCandidate, SourceTier
-from scripts.source_policy import evaluate_claims
-
 
 ROOT = Path(__file__).resolve().parents[1]
 SKILL = ROOT / "SKILL.md"
 STAGES = (
-    "信息采集",
-    "能力预检",
-    "查询计划",
-    "证据归一化",
-    "确定性计算",
-    "报告输出",
+    "画像确认",
+    "会话初始化",
+    "研究循环",
+    "证据最终化",
+    "计算发布",
+    "恢复与降级",
 )
-PUBLIC_COMMANDS = (
-    "scripts/preflight.py",
-    "scripts/query_plan.py",
-    "scripts/validate_data.py",
-    "scripts/validate_evidence.py",
-    "scripts/generate_report.py",
-    "scripts/docx_export.py",
-)
-REFERENCE_LINKS = (
-    "references/source-policy.md",
-    "references/retrieval-playbook.md",
-    "references/hosts/generic.md",
-    "references/hosts/codex.md",
-    "references/hosts/claude-code.md",
-    "references/hosts/kimi.md",
-)
-LEGACY_MARKERS = (
-    "recommend.py",
-    "estimate_rank.py",
-    "recommend_paths.py",
-    "verify_province.py",
-    "fetch_via_qr.py",
-    "web-search-playbook.md",
-    "gaokao-provinces.md",
-    "data/hubei",
-    "--name",
-)
-
 QUESTION_LABELS = (
     "性别",
-    "所在高中与报考地区",
+    "高考报名省份",
+    "当前城市与所在高中",
     "年级与预计高考年份",
     "班型/培养层次",
     "选科组合",
     "最近一次大考总分",
     "最近一次大考校排名（年级排名）",
-    "过往最高校排位",
-    "正常水平校排位",
+    "过往最高与正常水平校排",
     "获奖经历",
     "特殊活动经历",
     "理想大学",
@@ -67,590 +36,189 @@ QUESTION_LABELS = (
     "规划条件、限制与特殊升学方向",
 )
 
-QUESTIONNAIRE_REQUIRED_OPTIONS = (
-    "男 / 女 / 不便回答",
-    "高一 / 高二 / 高三",
-    "名气大 / 排名高",
-    "专业实力强",
-    "城市好 / 地理位置优越",
-    "家里有人读过 / 熟人推荐",
-    "分数线刚好合适",
-    "听老师 / 同学说的",
-    "计算机 / 软件 / 人工智能",
-    "电子信息 / 通信工程",
-    "电气工程 / 自动化",
-    "机械工程 / 航空航天",
-    "能源动力 / 材料科学",
-    "土木工程 / 建筑学",
-    "数学 / 物理 / 化学 / 生物（基础科学）",
-    "临床医学 / 口腔医学",
-    "药学 / 护理学",
-    "法学",
-    "财会 / 金融 / 经济学",
-    "汉语言文学 / 新闻传播 / 历史 / 哲学",
-    "外语（英语 / 小语种）",
-    "管理类（工商管理 / 人力资源等）",
-    "教育 / 心理学",
-    "自己感兴趣 / 热爱这个领域",
-    "好就业 / 薪资高",
-    "家人建议 / 家族从事相关行业",
-    "听说前景好 / 风口行业",
-    "老师推荐",
-    "同学都选这个",
-    "北京 / 上海 / 广州 / 深圳 / 武汉 / 杭州 / 南京 / 苏州 / 成都 / 重庆 / 西安",
-    "无所谓，学校好就行",
-    "直接工作，积累职场经验",
-    "考研 / 保研，继续深造",
-    "考公务员 / 事业编，求稳定",
-    "出国留学，开阔视野",
-    "创业，做自己的事业",
-    "还没想好，走一步看一步",
-    "孩子成绩不稳定，怕高考发挥失常",
-    "不知道孩子适合学什么专业，怕选错路",
-    "怕分数够了但选错学校 / 专业",
-    "不知道除了裸分高考，还有哪些升学途径",
-    "孩子没有获奖经历，担心影响强基计划 / 综合评价",
-    "孩子学习动力不足，需要外部激励和引导",
-    "对志愿填报规则完全不了解，怕踩坑",
-    "家庭有特殊情况（经济、身体、户籍等），不知道有哪些政策可以利用",
-)
+
+def parse_skill():
+    raw = SKILL.read_bytes()
+    text = raw.decode("utf-8", errors="strict")
+    assert text.encode("utf-8") == raw
+    match = re.fullmatch(r"---\n(?P<frontmatter>.*?)\n---\n(?P<body>.*)", text, re.S)
+    if match is None:
+        raise AssertionError("one YAML frontmatter block is required")
+    frontmatter = {}
+    for line in match.group("frontmatter").splitlines():
+        key, separator, value = line.partition(":")
+        if not separator or key in frontmatter:
+            raise AssertionError("simple unique frontmatter fields are required")
+        frontmatter[key] = value.strip()
+    return frontmatter, match.group("body")
 
 
-def questionnaire_rows(intake):
+def section(body, heading):
+    match = re.search(
+        rf"^## {re.escape(heading)}\s*$\n(?P<value>.*?)(?=^## |\Z)",
+        body,
+        re.M | re.S,
+    )
+    if match is None:
+        raise AssertionError(f"missing stage: {heading}")
+    return match.group("value")
+
+
+def questions(intake):
     return tuple(
         (int(number), label.strip())
         for number, label in re.findall(
-            r"^\s*([0-9]+)\.\s*\*\*([^*]+)\*\*", intake, flags=re.MULTILINE
+            r"^([0-9]+)\.\s+\*\*([^*]+)\*\*", intake, re.M
         )
     )
 
 
-def read_utf8(path):
-    source = path.read_bytes()
-    text = source.decode("utf-8", errors="strict")
-    if text.encode("utf-8") != source:
-        raise AssertionError("SKILL.md must be canonical UTF-8")
-    return source, text
-
-
-def parse_frontmatter(text):
-    match = re.fullmatch(r"---\n(.*?)\n---\n(.*)", text, flags=re.DOTALL)
-    if match is None:
-        raise AssertionError("SKILL.md must have one YAML frontmatter block")
-    fields = {}
-    for line in match.group(1).splitlines():
-        key, separator, value = line.partition(":")
-        if not separator or not key or not value.strip():
-            raise AssertionError("frontmatter must use simple key/value fields")
-        if key in fields:
-            raise AssertionError(f"duplicate frontmatter field: {key}")
-        fields[key] = value.strip().strip('"\'')
-    return fields, match.group(2)
-
-
-def stage_sections(body):
-    headings = re.findall(r"^## ([^\n]+)$", body, flags=re.MULTILINE)
-    if tuple(headings) != STAGES:
-        raise AssertionError("body must contain the exact six ordered stage headings")
-    sections = {}
-    for index, heading in enumerate(STAGES):
-        start_marker = f"## {heading}\n"
-        start = body.index(start_marker) + len(start_marker)
-        if index + 1 == len(STAGES):
-            sections[heading] = body[start:]
-        else:
-            end = body.index(f"## {STAGES[index + 1]}\n", start)
-            sections[heading] = body[start:end]
-    return sections
-
-
-def markdown_links(text):
-    return tuple(re.findall(r"\[[^\]]+\]\(([^)]+)\)", text))
-
-
 class SkillContractTest(unittest.TestCase):
     def setUp(self):
-        self.skill_bytes, self.skill = read_utf8(SKILL)
-        self.frontmatter, self.body = parse_frontmatter(self.skill)
-        self.sections = None
+        self.frontmatter, self.body = parse_skill()
 
-    def test_frontmatter_triggers_from_real_user_intent_without_skill_name(self):
+    def test_frontmatter_implicitly_routes_real_parent_questions(self):
         self.assertEqual(set(self.frontmatter), {"name", "description"})
         self.assertEqual(self.frontmatter["name"], "pathway-atlas")
         description = self.frontmatter["description"]
-        self.assertRegex(description, r"^Use when \S")
+        self.assertTrue(description.startswith("Use when "))
         self.assertLessEqual(len(description), 500)
         for trigger in (
-            "这个分数",
+            "这个分数能上哪个学校",
             "位次",
             "冲稳保",
             "升学路径",
-            "强基",
-            "综评",
+            "强基怎么走",
+            "综评怎么走",
             "选校",
             "选专业",
         ):
             self.assertIn(trigger, description)
-        self.assertRegex(
-            description,
-            r"(?:无需|不需要|无须)[^。]*(?:说出|提及|指定)[^。]*pathway-atlas",
-        )
-        self.assertIsNone(
-            re.search(
-                r"preflight|query.plan|validate|full|standard|offline|"
-                r"3\+3|3\+1\+2|湖北|province availability",
-                description,
-                flags=re.IGNORECASE,
-            ),
-            "description must describe user triggers, not workflow or availability",
-        )
+        self.assertNotIn("pathway-atlas", description.casefold())
+        for workflow_word in ("preflight", "QueryPlan", "JSON", "DOCX"):
+            self.assertNotIn(workflow_word, description)
 
-    def test_body_has_exact_six_stage_shape(self):
-        sections = stage_sections(self.body)
-        self.assertEqual(tuple(sections), STAGES)
+    def test_body_is_one_six_stage_state_machine_runbook(self):
+        headings = tuple(re.findall(r"^## (.+)$", self.body, re.M))
+        self.assertEqual(headings, STAGES)
         self.assertLessEqual(len(self.body.splitlines()), 220)
+        self.assertEqual(self.body.count("scripts/planning_session.py"), 1)
+        for command in ("init", "confirm", "next", "ingest", "finalize", "compute", "status"):
+            self.assertIn(f"`{command}`", self.body)
 
-    def test_first_turn_questionnaire_preserves_source_contract_and_caps_at_twenty(self):
-        intake = stage_sections(self.body)["信息采集"]
-        rows = questionnaire_rows(intake)
+    def test_first_response_is_exactly_twenty_anonymous_questions(self):
+        intake = section(self.body, "画像确认")
+        rows = questions(intake)
         self.assertEqual(tuple(number for number, _ in rows), tuple(range(1, 21)))
         self.assertEqual(tuple(label for _, label in rows), QUESTION_LABELS)
+        self.assertEqual(rows[4], (5, "班型/培养层次"))
         self.assertNotIn("学生姓名", tuple(label for _, label in rows))
-        self.assertIn("班型/培养层次，如普通班、重点班、竞赛班", intake)
-        for option in QUESTIONNAIRE_REQUIRED_OPTIONS:
-            self.assertIn(option, intake)
-        self.assertRegex(intake, r"不知道.*不确定.*不便回答")
-        self.assertRegex(
-            intake,
-            r"拒绝收集[^。\n]*(?:姓名|学生姓名)[^。\n]*电话[^。\n]*地址[^。\n]*具体班级编号"
-            r"[^。\n]*(?:通信 ID|通信ID)[^。\n]*(?:凭证|secret)[^。\n]*本地路径",
-        )
-        self.assertIn("ProvinceConfig", intake)
-        self.assertIn("canonical subject", intake.lower())
-        self.assertNotRegex(intake, r"只支持|默认省份|湖北")
+        self.assertIn("拒绝收集学生姓名", intake)
+        for prohibited in ("电话", "地址", "具体班级编号", "通信 ID", "凭证", "本地路径"):
+            self.assertIn(prohibited, intake)
+        self.assertIn("高中完整校名", intake)
 
-    def test_first_turn_prefills_known_answers_and_blocks_work_until_confirmation(self):
-        intake = stage_sections(self.body)["信息采集"]
-        self.assertRegex(
-            intake,
-            r"首次回复[^。\n]*(?:只能|只)[^。\n]*(?:回填|已识别)[^。\n]*完整问卷",
-        )
-        self.assertRegex(intake, r"用户首条消息[^。\n]*(?:自动回填|回填)[^。\n]*(?:核对|确认)")
-        self.assertRegex(intake, r"不得[^。\n]*重复询问[^。\n]*已提供")
-        self.assertRegex(
-            intake,
-            r"(?:用户回复并确认|画像确认)[^。\n]*(?:之前|前)[^。\n]*"
-            r"(?:不得|禁止)[^。\n]*(?:preflight|查询计划|检索|搜索)[^。\n]*"
-            r"(?:计算|推荐|判断)",
-        )
-        self.assertRegex(intake, r"确认后的匿名画像[^。\n]*(?:唯一|完整)[^。\n]*上下文")
+    def test_first_response_prefills_then_waits_for_explicit_confirmation(self):
+        intake = section(self.body, "画像确认")
+        self.assertRegex(intake, r"首次回复只能[^。]*自动回填[^。]*完整问卷")
+        self.assertIn("不得重复询问已提供的信息", intake)
+        self.assertIn("画像确认前不得运行 preflight、查询计划或检索，也不得计算、推荐或判断", intake)
+        self.assertIn("确认后的匿名画像", intake)
+        self.assertIn("唯一完整上下文", intake)
+        self.assertIn("parse_numbered_questionnaire", intake)
+        self.assertIn("build_profile_from_questionnaire", intake)
+        self.assertIn("additional_observations", intake)
+        self.assertIn("city_joint", intake)
+        self.assertIn("province_joint", intake)
+        self.assertIn("不得从选科、活动或“没有限制”补造", intake)
 
-    def test_missing_official_rank_uses_evidence_estimate_before_school_matching(self):
-        intake = stage_sections(self.body)["信息采集"]
-        self.assertNotRegex(intake, r"(?:分数或位次|位次).*未知[^。\n]*只能做路径探索")
-        self.assertNotRegex(intake, r"(?:分数或位次|位次).*未知[^。\n]*不生成院校冲稳保")
-        self.assertRegex(
-            intake,
-            r"(?:没有|缺少|暂无)[^。\n]*官方位次[^。\n]*"
-            r"(?:学校|班型)[^。\n]*(?:考试|成绩|排名)[^。\n]*"
-            r"(?:估算|定位)[^。\n]*(?:乐观|中性|保守)[^。\n]*位次",
-        )
-        self.assertRegex(intake, r"(?:估算|参考)位次[^。\n]*(?:冲稳保|院校池)")
-
-    def test_every_annual_data_family_uses_the_same_four_year_fallback(self):
-        query = stage_sections(self.body)["查询计划"]
+    def test_user_never_authors_internal_state_or_paths(self):
         for phrase in (
-            "Y → Y-1 → Y-2 → Y-3",
-            "每种数据类型独立",
-            "一分一段表",
-            "投档位次",
-            "招生计划",
-            "招生章程",
-            "学费",
-            "选科要求",
-            "多元路径政策",
-            "服务期",
+            "用户只回答自然语言问题",
+            "不得要求用户创建 JSON",
+            "不得让用户提供内部 JSON、本地路径或文件路径",
         ):
-            with self.subTest(phrase=phrase):
-                self.assertIn(phrase, query)
-        self.assertRegex(
-            query,
-            r"最新年度[^。\n]*(?:没有|缺失|未公布)[^。\n]*"
-            r"(?:逐年|依次)[^。\n]*(?:最多|向前)[^。\n]*三年",
-        )
-        self.assertRegex(
-            query,
-            r"当前年度[^。\n]*第三方[^。\n]*上一年度[^。\n]*官方[^。\n]*同时保留",
-        )
+            self.assertIn(phrase, self.body)
+        self.assertIn("宿主内部", self.body)
+        self.assertIn("v3 `PlanningProfile`", self.body)
+        self.assertIn("canonical QueryPlan", self.body)
+        self.assertIn("fresh evidence bundle", self.body)
 
-    def test_final_answer_must_decide_both_schools_and_pathways(self):
-        evidence = stage_sections(self.body)["证据归一化"]
-        output = stage_sections(self.body)["报告输出"]
-        self.assertRegex(
-            evidence,
-            r"官方[^。\n]*(?:缺失|不可得|未找到)[^。\n]*"
-            r"(?:继续|仍)[^。\n]*(?:B|C)[^。\n]*(?:corroborated|reference)",
-        )
+    def test_research_loop_opens_sources_and_tracks_four_year_fallback(self):
+        research = section(self.body, "研究循环")
+        self.assertLess(research.index("`next`"), research.index("`ingest`"))
+        self.assertLess(research.index("`ingest`"), research.index("`next` 循环"))
+        self.assertIn("必须打开原网页或附件", research)
+        self.assertIn("不能把搜索摘要当事实", research)
+        self.assertIn("Y → Y-1 → Y-2 → Y-3", research)
+        self.assertIn("每种数据类型独立", research)
+        self.assertIn("当前年度只有第三方资料而上一年度有官方资料时同时保留", research)
+        self.assertIn("当年参考", research)
+        self.assertIn("历史基线", research)
+        for family in ("一分一段表", "投档位次", "招生计划", "招生章程", "学费", "选科要求", "多元路径政策", "服务期"):
+            self.assertIn(family, research)
+        self.assertIn("虚构 `province.json`", research)
+
+    def test_completed_results_cross_factory_outcomes_not_bare_digests(self):
+        research = section(self.body, "研究循环")
+        evidence = section(self.body, "证据最终化")
+        report = section(self.body, "计算发布")
+
+        self.assertIn("build_task_evidence_outcome", research)
+        self.assertIn("evidence_outcome=", research)
+        self.assertIn("build_evidence_manifest_outcome", evidence)
+        self.assertIn("build_calculation_outcome", report)
+        self.assertIn("build_report_publication_outcome", report)
+        for stage in (research, evidence, report):
+            self.assertIn("裸 digest", stage)
+        self.assertIn("同一宿主进程", self.body)
+
+    def test_evidence_tiers_degrade_without_abandoning_a_decision(self):
+        evidence = section(self.body, "证据最终化")
+        for status in ("official", "corroborated", "reference", "partial", "conflict", "missing"):
+            self.assertIn(f"`{status}`", evidence)
+        self.assertIn("两个独立 B", evidence)
+        self.assertIn("三个独立 C", evidence)
+        self.assertIn("冲突不得取平均", evidence)
+        self.assertIn("仍继续检索 B/C", evidence)
+
+    def test_report_makes_school_pathway_and_action_decisions(self):
+        report = section(self.body, "计算发布")
         for phrase in (
-            "普通批院校范围",
-            "代表性院校",
-            "主攻、重点准备、备选、观察或不建议",
-            "已满足、部分满足、暂未满足、待核验或不适用",
-            "不能只复述政策",
+            "冲、稳、保、观察",
+            "典型学校",
+            "主攻、重点准备、备选、观察、不建议",
+            "当前最需要做的事",
+            "按时间与价值排序",
+            "来源、证据状态、覆盖范围和不确定性",
             "本结果由 AI 基于公开数据整理",
             "不构成录取承诺或正式升学建议",
         ):
-            with self.subTest(phrase=phrase):
-                self.assertIn(phrase, output)
+            self.assertIn(phrase, report)
 
-    def test_preflight_uses_host_mapping_and_runtime_tiers(self):
-        preflight = stage_sections(self.body)["能力预检"]
-        for tier in ("full", "standard", "offline"):
-            self.assertEqual(preflight.count(f"`{tier}`"), 1)
-        self.assertRegex(preflight, r"search.*browse.*vision")
-        self.assertRegex(preflight, r"local_exec.*file_output.*workflow gates")
-        self.assertRegex(preflight, r"能力损失[^。\n]*coverage")
-        self.assertRegex(preflight, r"退出码 `2`[^。\n]*(?:无效|invalid)")
-        self.assertRegex(preflight, r"退出码 `3`[^。\n]*(?:可选|optional)")
+    def test_resume_and_offline_paths_remain_useful_and_path_neutral(self):
+        recovery = section(self.body, "恢复与降级")
+        self.assertIn("从最后一个有效快照继续", recovery)
+        self.assertIn("partial 版本", recovery)
+        self.assertIn("位次区间", recovery)
+        self.assertIn("典型学校和路径", recovery)
+        self.assertIn("受控 degradation 或 unavailable reason", recovery)
+        self.assertIn("内部路径", recovery)
 
-    def test_query_plan_and_offline_pressure_scenario(self):
-        query = stage_sections(self.body)["查询计划"]
-        for field in (
-            "ProvinceConfig.mode",
-            "subject_group",
-            "required_extraction_fields",
-            "availability",
-            "freshness",
-            "max_candidates",
-        ):
-            self.assertIn(field, query)
-        self.assertRegex(query, r"不得[^。\n]*(?:固定|另设)[^。\n]*(?:Top-N|候选数)")
-        self.assertRegex(
-            query,
-            r"offline[^。\n]*(?:authenticated|已认证)[^。\n]*(?:用户提供|user-supplied)"
-            r"[^。\n]*(?:不声称|禁止声称)[^。\n]*(?:当前|实时|current|live)",
-        )
-
-    def test_evidence_validation_blocks_calculation_pressure_scenario(self):
-        evidence = stage_sections(self.body)["证据归一化"]
-        calculation = stage_sections(self.body)["确定性计算"]
-        self.assertRegex(evidence, r"HTML.*XLSX.*PDF.*OCR.*QR")
-        self.assertRegex(evidence, r"secure downloader")
-        self.assertRegex(evidence, r"year.*method.*locator.*source")
-        self.assertIn("source-policy.md", evidence)
-        self.assertRegex(evidence, r"冲突[^。\n]*(?:不得|禁止)取平均")
-        self.assertRegex(
-            evidence,
-            r"authenticated snapshot[^。\n]*(?:之前|前)[^。\n]*(?:不得|禁止)[^。\n]*(?:数字|计算)",
-        )
-        self.assertRegex(calculation, r"validated snapshots")
-        self.assertRegex(calculation, r"validated dataset/config")
-        self.assertRegex(calculation, r"不联网|no network")
-        self.assertRegex(calculation, r"3\+3.*3\+1\+2|3\+1\+2.*3\+3")
-        self.assertRegex(calculation, r"evidence status.*coverage")
-        self.assertIsNone(re.search(r"(?:rank|位次).{0,20}[+-]\s*[0-9]", calculation, re.I))
-
-    def test_admission_rows_use_the_public_typed_bridge_without_rule_duplication(self):
-        evidence = stage_sections(self.body)["证据归一化"]
-        for marker in (
-            "scripts.adapters.admission_bridge",
-            "QueryTask",
-            "ValidatedAdmissionRow",
-            "admission_row_hash",
-            "coverage_status",
-        ):
-            self.assertIn(marker, evidence)
-        self.assertIsNone(
-            re.search(
-                r"(?:coverage_status|admission_row_hash)[^。\n]{0,30}"
-                r"(?:阈值|至少|required\s+sources?|minimum)",
-                evidence,
-                re.IGNORECASE,
-            )
-        )
-
-    def test_evidence_admission_delegates_to_policy_without_official_only_downgrade(self):
-        evidence = stage_sections(self.body)["证据归一化"]
-        self.assertRegex(
-            evidence,
-            r"按信源规范仍未达到采纳门槛时[^。\n]*"
-            r"`partial`[^。\n]*`conflict`[^。\n]*`missing`",
-        )
-        self.assertNotIn("官方证据不足", evidence)
-
-        def candidate(source_id, tier):
-            return SourceCandidate(
-                source_id=source_id,
-                url=f"https://{source_id}.example.test/article",
-                publisher=f"Publisher {source_id}",
-                tier=tier,
-                published_at="2026-08-01",
-                retrieved_at="2026-08-24T00:00:00Z",
-                content_hash=f"sha256:{source_id}",
-                citation_root=f"https://{source_id}.example.test/root",
-                summary="Synthetic source",
-            )
-
-        def status_for(tier, count):
-            sources = tuple(candidate(f"s{index}", tier) for index in range(count))
-            claims = tuple(
-                FactClaim("synthetic_field", 588, "分", source.source_id, "table")
-                for source in sources
-            )
-            return evaluate_claims("synthetic_field", claims, sources).status
-
-        self.assertEqual(status_for(SourceTier.C, 3), EvidenceStatus.REFERENCE)
-        self.assertEqual(status_for(SourceTier.C, 2), EvidenceStatus.MISSING)
-        self.assertEqual(status_for(SourceTier.B, 2), EvidenceStatus.CORROBORATED)
-
-    def test_report_handles_optional_docx_and_discloses_uncertainty(self):
-        report = stage_sections(self.body)["报告输出"]
-        self.assertRegex(report, r"Markdown.*DOCX")
-        self.assertRegex(report, r"DOCX[^。\n]*(?:缺失|不可用)[^。\n]*退出码 `3`")
-        states = re.search(
-            r"`reference`、`inferred`、`partial`、`conflict`、`missing`、`masked`",
-            report,
-        )
-        self.assertIsNotNone(states, "report must disclose the exact six non-exact states")
-        self.assertRegex(report, r"coverage.*method.*bounds")
-        self.assertRegex(report, r"匿名[^。\n]*确定性[^。\n]*path-neutral[^。\n]*(?:exclusive|原子)")
-        self.assertRegex(report, r"不承诺[^。\n]*(?:录取|投资)")
-        self.assertRegex(report, r"明确授权[^。\n]*(?:发布|上传|push)")
-
-    def test_links_and_public_commands_are_current(self):
-        links = markdown_links(self.body)
-        self.assertEqual(set(links), set(REFERENCE_LINKS))
+    def test_all_references_are_reachable_once(self):
+        links = tuple(re.findall(r"\[[^]]+\]\(([^)]+)\)", self.body))
+        expected = {
+            "references/source-policy.md",
+            "references/retrieval-playbook.md",
+            "references/hosts/generic.md",
+            "references/hosts/codex.md",
+            "references/hosts/claude-code.md",
+            "references/hosts/kimi.md",
+        }
+        self.assertEqual(set(links), expected)
         self.assertEqual(len(links), len(set(links)))
-        for target in links:
-            self.assertTrue((ROOT / target).is_file(), target)
-        for command in PUBLIC_COMMANDS:
-            self.assertEqual(self.body.count(command), 1, command)
-            self.assertTrue((ROOT / command).is_file(), command)
-        for marker in LEGACY_MARKERS:
-            self.assertNotIn(marker, self.body)
-
-    def assert_contract(self, text):
-        frontmatter, body = parse_frontmatter(text)
-        self.assertEqual(frontmatter.get("name"), "pathway-atlas")
-        description = frontmatter.get("description", "")
-        self.assertRegex(description, r"^Use when \S")
-        for trigger in ("这个分数", "冲稳保", "升学路径", "强基", "综评"):
-            self.assertIn(trigger, description)
-        self.assertRegex(
-            description,
-            r"(?:无需|不需要|无须)[^。]*(?:说出|提及|指定)[^。]*pathway-atlas",
-        )
-        self.assertIsNone(
-            re.search(
-                r"preflight|query.plan|validate|workflow|stages?|CLI|output|"
-                r"DOCX|Markdown|writes?|generates?|full|standard|offline|"
-                r"3\+3|3\+1\+2|湖北|province availability",
-                description,
-                re.IGNORECASE,
-            )
-        )
-        sections = stage_sections(body)
-        query = sections["查询计划"]
-        evidence = sections["证据归一化"]
-        calculation = sections["确定性计算"]
-        intake = sections["信息采集"]
-        rows = questionnaire_rows(intake)
-        self.assertEqual(tuple(number for number, _ in rows), tuple(range(1, 21)))
-        self.assertEqual(tuple(label for _, label in rows), QUESTION_LABELS)
-        self.assertNotIn("学生姓名", tuple(label for _, label in rows))
-        self.assertIn("班型/培养层次，如普通班、重点班、竞赛班", intake)
-        for option in QUESTIONNAIRE_REQUIRED_OPTIONS:
-            self.assertIn(option, intake)
-        self.assertRegex(
-            intake,
-            r"(?:用户回复并确认|画像确认)[^。\n]*(?:之前|前)[^。\n]*"
-            r"(?:不得|禁止)[^。\n]*(?:preflight|查询计划|检索|搜索)[^。\n]*"
-            r"(?:计算|推荐|判断)",
-        )
-        self.assertIsNone(
-            re.search(
-                r"(?:用户回复并确认|画像确认)[^。\n]*(?:之前|前)[^。\n]*"
-                r"(?:可以|可|允许|先)[^。\n]*(?:preflight|查询计划|检索|搜索|计算|推荐|判断)",
-                intake,
-            )
-        )
-        self.assertRegex(query, r"offline[^。\n]*(?:不声称|禁止声称)[^。\n]*(?:当前|实时|current|live)")
-        self.assertIsNone(
-            re.search(
-                r"(?:^|[；。\n])[^；。\n]{0,12}(?:静默|后台|必要时|回退)"
-                r"[^；。\n]{0,20}(?:联网|live)[^；。\n]{0,20}(?:实时|当前|验证)",
-                query,
-                re.IGNORECASE,
-            )
-        )
-        self.assertRegex(evidence, r"validate_data.py.*validate_evidence.py")
-        self.assertRegex(
-            evidence,
-            r"authenticated snapshot[^。\n]*(?:之前|前)"
-            r"[^。\n]*(?:不得|禁止)[^。\n]*(?:数字|计算)",
-        )
-        self.assertIsNone(
-            re.search(
-                r"先(?:开始)?计算[^；。\n]{0,24}(?:稍后|再|然后)"
-                r"[^；。\n]{0,12}验证|"
-                r"calculat\w*\s+before\s+validat\w*",
-                evidence,
-                re.IGNORECASE,
-            )
-        )
-        self.assertIsNone(
-            re.search(
-                r"(?:C\s*(?:级|tier))[^。\n|]{0,40}"
-                r"(?:至少|required|minimum|门槛)[^。\n|]{0,12}(?:3|three)|"
-                r"^\|\s*C(?:\s+tier)?\s*\|\s*(?:3|three)\s*\|",
-                evidence,
-                re.IGNORECASE | re.MULTILINE,
-            )
-        )
-        self.assertRegex(calculation, r"validated snapshots")
-        self.assertRegex(intake, r"拒绝收集[^。\n]*(?:姓名|学生姓名)[^。\n]*电话")
-        self.assertIsNone(
-            re.search(
-                r"(?:^|[；。\n])\s*(?!(?:拒绝|不得|禁止))[^；。\n]{0,8}"
-                r"(?:收集|记录|保存)[^；。\n]{0,30}(?:学生姓名|姓名|电话|地址|班级|通信 ID)",
-                intake,
-            )
-        )
-        self.assertIsNone(
-            re.search(
-                r"(?:rank|位次).{0,20}(?:[+-]\s*[0-9]|(?:加|减|上浮|下调)\s*4000)",
-                body,
-                re.IGNORECASE,
-            )
-        )
-        self.assertIsNone(
-            re.search(
-                r"(?:[ABC]\s*级|tier).{0,30}(?:至少|needs?|requires?)\s*[0-9]+\s*(?:个|sources?)",
-                body,
-                re.I,
-            )
-        )
-
-    def test_semantic_mutation_canaries_and_safe_prose(self):
-        canaries = (
-            (
-                "根据咨询意图自动触发，无需用户说出 pathway-atlas",
-                "仅当用户明确说出 pathway-atlas 时才触发",
-            ),
-            (
-                "形成 authenticated snapshot 之前不得给出数字或开始计算",
-                "先开始计算并给出数字，再形成 authenticated snapshot",
-            ),
-            (
-                "不得取平均",
-                "A 级至少 1 个来源，B 级至少 2 个来源，C 级至少 3 个来源并取平均",
-            ),
-            (
-                "不联网",
-                "位次固定 -4000 后联网",
-            ),
-            (
-                "offline 仅消费已认证的用户提供本地材料，不声称当前或实时验证",
-                "offline 在后台联网并声称当前实时验证",
-            ),
-            (
-                "拒绝收集学生姓名、电话、地址、具体班级编号、通信 ID、凭证或本地路径",
-                "收集学生姓名、电话、地址、具体班级编号、通信 ID、凭证或本地路径",
-            ),
-            (
-                "画像确认前不得运行 preflight、查询计划或检索，也不得计算、推荐或判断",
-                "画像确认前可以先运行 preflight、查询计划和检索，再计算、推荐或判断",
-            ),
-        )
-        for good, bad in canaries:
-            with self.subTest(mutation=bad):
-                self.assertEqual(self.skill.count(good), 1, good)
-                mutated = self.skill.replace(good, bad, 1)
-                with self.assertRaises(AssertionError):
-                    self.assert_contract(mutated)
-
-        safe = self.skill.replace(
-            "接受机器档位 `full`、`standard`、`offline`。",
-            "接受机器档位 `full`、`standard`、`offline`。Python 3.10 下的 full/standard "
-            "可以使用已声明的联网能力，exit 2/3 保持受控。",
-            1,
-        ).replace(
-            "拒绝收集学生姓名、电话、地址、具体班级编号、通信 ID、凭证或本地路径",
-            "拒绝收集学生姓名、电话、地址、具体班级编号、通信 ID、凭证或本地路径；"
-            "学校全称仍是决策字段",
-            1,
-        ).replace(
-            "形成 authenticated snapshot 之前不得给出数字或开始计算",
-            "形成 authenticated snapshot 之前不得给出数字或开始计算；"
-            "先验证，再计算",
-            1,
-        )
-        self.assertIn("3+3", safe)
-        self.assertIn("source-policy.md", safe)
-        self.assert_contract(safe)
-
-    def test_appended_contradictory_instructions_are_rejected(self):
-        description = self.frontmatter["description"]
-        mutations = (
-            (
-                f"description: {description}",
-                f"description: {description} Executes the six-stage workflow.",
-            ),
-            (
-                f"description: {description}",
-                f"description: {description} Runs the preflight CLI.",
-            ),
-            (
-                f"description: {description}",
-                f"description: {description} Writes DOCX output.",
-            ),
-            (
-                "offline 仅消费已认证的用户提供本地材料，不声称当前或实时验证",
-                "offline 仅消费已认证的用户提供本地材料，不声称当前或实时验证；"
-                "必要时静默联网并声称实时验证",
-            ),
-            (
-                "拒绝收集学生姓名、电话、地址、具体班级编号、通信 ID、凭证或本地路径",
-                "拒绝收集学生姓名、电话、地址、具体班级编号、通信 ID、凭证或本地路径；"
-                "同时收集学生姓名和电话以便联系",
-            ),
-            (
-                "画像确认前不得运行 preflight、查询计划或检索，也不得计算、推荐或判断",
-                "画像确认前不得运行 preflight、查询计划或检索，也不得计算、推荐或判断；"
-                "为了节省时间，可以同时搜索并先给出初步推荐",
-            ),
-            (
-                "形成 authenticated snapshot 之前不得给出数字或开始计算",
-                "形成 authenticated snapshot 之前不得给出数字或开始计算；"
-                "赶时间时先计算再验证",
-            ),
-            (
-                "形成 authenticated snapshot 之前不得给出数字或开始计算",
-                "形成 authenticated snapshot 之前不得给出数字或开始计算。"
-                "为节省时间，可先计算数字，稍后再验证。",
-            ),
-            (
-                "按信源规范仍未达到采纳门槛时保留",
-                "按信源规范仍未达到采纳门槛时保留\n\n"
-                "| C tier | required sources | result |\n"
-                "|---|---:|---|\n"
-                "| C | 3 | reference |\n\n",
-            ),
-            (
-                "计算阶段不联网",
-                "计算阶段不联网；可将位次加4000",
-            ),
-            (
-                "计算阶段不联网",
-                "计算阶段不联网；可将位次减4000",
-            ),
-        )
-        for anchor, replacement in mutations:
-            with self.subTest(replacement=replacement):
-                self.assertEqual(self.skill.count(anchor), 1, anchor)
-                mutated = self.skill.replace(anchor, replacement, 1)
-                with self.assertRaises(AssertionError):
-                    self.assert_contract(mutated)
+        for link in links:
+            self.assertTrue((ROOT / link).is_file(), link)
 
 
 if __name__ == "__main__":

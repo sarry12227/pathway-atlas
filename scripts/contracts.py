@@ -254,6 +254,61 @@ class RecommendationProfile(_Serializable):
 
 
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+_PUBLIC_VERSION = re.compile(r"^[0-9]+\.[0-9]+(?:\.[0-9]+)?$")
+
+
+@dataclass(frozen=True, init=False)
+class DecisionRuleBasis(_Serializable):
+    """Auditable origin for project decision parameters."""
+
+    basis_id: str
+    source_id: str
+    source_version: str
+
+    def __init__(self) -> None:
+        raise TypeError("DecisionRuleBasis is factory-only")
+
+    @classmethod
+    def create(
+        cls, *, basis_id: str, source_id: str, source_version: str
+    ) -> "DecisionRuleBasis":
+        for name, value in (("basis_id", basis_id), ("source_id", source_id)):
+            if not isinstance(value, str) or _SAFE_ID.fullmatch(value) is None:
+                raise ValueError(f"{name} must use the public safe-ID syntax")
+        if not isinstance(source_version, str) or _PUBLIC_VERSION.fullmatch(source_version) is None:
+            raise ValueError("source_version must be a public numeric version")
+        instance = object.__new__(cls)
+        object.__setattr__(instance, "basis_id", basis_id)
+        object.__setattr__(instance, "source_id", source_id)
+        object.__setattr__(instance, "source_version", source_version)
+        return instance
+
+
+@dataclass(frozen=True, init=False)
+class SourcePolicyReference(_Serializable):
+    """Pointer to the one executable source-admission policy.
+
+    Thresholds deliberately do not live in this record.  Query consumers must
+    call ``scripts.source_policy`` so A/B/C admission and conflicts cannot
+    drift into a second implementation.
+    """
+
+    policy_id: str
+    version: str
+
+    def __init__(self) -> None:
+        raise TypeError("SourcePolicyReference is factory-only")
+
+    @classmethod
+    def create(cls, *, policy_id: str, version: str) -> "SourcePolicyReference":
+        if not isinstance(policy_id, str) or _SAFE_ID.fullmatch(policy_id) is None:
+            raise ValueError("policy_id must use the public safe-ID syntax")
+        if not isinstance(version, str) or _PUBLIC_VERSION.fullmatch(version) is None:
+            raise ValueError("version must be a public numeric version")
+        instance = object.__new__(cls)
+        object.__setattr__(instance, "policy_id", policy_id)
+        object.__setattr__(instance, "version", version)
+        return instance
 
 
 @dataclass(frozen=True)
@@ -350,6 +405,60 @@ class RecommendationItem(_Serializable):
     required_year_majority: int = 1
     scenario_reach_counts: tuple[int, int, int] = (0, 0, 0)
     scenario_confidence: str = "official"
+    fit_evidence_statuses: tuple[EvidenceStatus, ...] = ()
+
+
+@dataclass(frozen=True)
+class SchoolObservation(_Serializable):
+    """A source-bound school lead that is intentionally non-numeric.
+
+    Partial admission rows remain observations even when their declared range
+    includes the student's rank. The separate contract prevents partial-row
+    numbers from leaking into a 冲稳保 label.
+    """
+
+    school_name: str
+    school_level: str
+    city: str
+    data_year: int
+    source_ids: tuple[str, ...]
+    evidence_status: EvidenceStatus
+    reason_code: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.school_name, str) or not self.school_name.strip():
+            raise ValueError("school observations require a school name")
+        object.__setattr__(self, "school_name", self.school_name.strip())
+        for name in ("school_level", "city"):
+            value = getattr(self, name)
+            if not isinstance(value, str):
+                raise TypeError(f"{name} must be text")
+            object.__setattr__(self, name, value.strip())
+        if (
+            not isinstance(self.data_year, int)
+            or isinstance(self.data_year, bool)
+            or not 2000 <= self.data_year <= 2100
+        ):
+            raise ValueError("school observation data_year is invalid")
+        sources = tuple(self.source_ids)
+        if not sources or len(sources) != len(set(sources)) or any(
+            not isinstance(source, str) or _SAFE_ID.fullmatch(source) is None
+            for source in sources
+        ):
+            raise ValueError("school observations require unique public source IDs")
+        object.__setattr__(self, "source_ids", tuple(sorted(sources)))
+        try:
+            status = EvidenceStatus(self.evidence_status)
+        except (TypeError, ValueError) as error:
+            raise ValueError("school observation evidence status is invalid") from error
+        if status is not EvidenceStatus.PARTIAL:
+            raise ValueError("school observations must be explicitly partial")
+        object.__setattr__(self, "evidence_status", status)
+        if (
+            not isinstance(self.reason_code, str)
+            or _SAFE_ID.fullmatch(self.reason_code) is None
+        ):
+            raise ValueError("school observation reason_code must be a public safe ID")
 
 
 @dataclass(frozen=True)
@@ -358,6 +467,7 @@ class RecommendationResult(_Serializable):
 
     ordinary_batch_policy: OrdinaryBatchPolicy
     items: tuple[RecommendationItem, ...] = ()
+    observations: tuple[SchoolObservation, ...] = ()
     excluded_by_subject_count: int = 0
     zero_score_excluded_count: int = 0
     input_years: tuple[int, ...] = ()
@@ -409,7 +519,67 @@ class RecommendationResult(_Serializable):
             "ordinary_batch_policy",
             OrdinaryBatchPolicy(**self.ordinary_batch_policy.to_dict()),
         )
-        object.__setattr__(self, "items", tuple(self.items))
+        items = tuple(self.items)
+        if not all(isinstance(item, RecommendationItem) for item in items):
+            raise TypeError("items must contain RecommendationItem records")
+        allowed_numeric_statuses = {
+            EvidenceStatus.OFFICIAL,
+            EvidenceStatus.CORROBORATED,
+            EvidenceStatus.REFERENCE,
+        }
+        if any(item.evidence_status not in allowed_numeric_statuses for item in items):
+            raise ValueError("numeric recommendations require accepted exact evidence")
+        observations = tuple(self.observations)
+        if not all(isinstance(item, SchoolObservation) for item in observations):
+            raise TypeError("observations must contain SchoolObservation records")
+        observation_keys = tuple(
+            (item.school_name, item.data_year, item.source_ids)
+            for item in observations
+        )
+        if len(observation_keys) != len(set(observation_keys)):
+            raise ValueError("school observations must be unique")
+        try:
+            coverage_status = EvidenceStatus(self.coverage_status)
+        except (TypeError, ValueError) as error:
+            raise ValueError("coverage_status is invalid") from error
+        verified_coverage = self.verified_rank_coverage
+        if verified_coverage is not None:
+            if (
+                not isinstance(verified_coverage, (tuple, list))
+                or len(verified_coverage) != 2
+                or any(
+                    not isinstance(value, int)
+                    or isinstance(value, bool)
+                    or value < 1
+                    for value in verified_coverage
+                )
+                or verified_coverage[0] > verified_coverage[1]
+            ):
+                raise ValueError("verified_rank_coverage must be an ordered positive pair")
+            verified_coverage = tuple(verified_coverage)
+            object.__setattr__(self, "verified_rank_coverage", verified_coverage)
+        if observations and coverage_status in {
+            EvidenceStatus.OFFICIAL,
+            EvidenceStatus.CORROBORATED,
+            EvidenceStatus.REFERENCE,
+        }:
+            raise ValueError("partial observations require degraded aggregate coverage")
+        if observations and not items and self.empty_reason not in {
+            "partial_observations_only",
+            "rank_outside_verified_coverage",
+        }:
+            raise ValueError("observation-only results require a stable empty reason")
+        if self.empty_reason == "partial_observations_only" and not observations:
+            raise ValueError("partial observation reason requires observations")
+        if self.empty_reason == "rank_outside_verified_coverage":
+            if verified_coverage is None or self.rank_bounds is None:
+                raise ValueError("outside-coverage reason requires rank bounds and coverage")
+            lower, upper = verified_coverage
+            if lower <= self.rank_bounds[0] and self.rank_bounds[2] <= upper:
+                raise ValueError("outside-coverage reason contradicts rank bounds")
+        object.__setattr__(self, "items", items)
+        object.__setattr__(self, "observations", observations)
+        object.__setattr__(self, "coverage_status", coverage_status)
         object.__setattr__(self, "warnings", tuple(self.warnings))
         object.__setattr__(self, "rank_source_ids", tuple(sorted(sources)))
 
@@ -417,6 +587,7 @@ class RecommendationResult(_Serializable):
 __all__ = [
     "CapabilityReport",
     "CapabilityTier",
+    "DecisionRuleBasis",
     "EvidenceFact",
     "EvidenceManifest",
     "EvidenceStatus",
@@ -426,6 +597,8 @@ __all__ = [
     "RecommendationMajorGroup",
     "RecommendationProfile",
     "RecommendationResult",
+    "SchoolObservation",
     "SourceCandidate",
+    "SourcePolicyReference",
     "SourceTier",
 ]

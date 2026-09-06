@@ -23,18 +23,30 @@ SCRIPTS = ROOT / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
+import query_plan as query_plan_module  # noqa: E402
 from contracts import OrdinaryBatchPolicy, RecommendationProfile  # noqa: E402
-from province_registry import discover_provinces  # noqa: E402
+from decision_policy import DecisionPolicySnapshot  # noqa: E402
+from planning_profile import PlanningProfile  # noqa: E402
+from province_registry import (  # noqa: E402
+    SubjectSelectionError,
+    canonical_discovery_subject_key,
+    discover_provinces,
+)
 from query_plan import (  # noqa: E402
     MAX_PROVINCE_ALIASES,
     ProvinceCatalogError,
     ProvinceCatalogSnapshot,
     QueryPlan,
     QueryTask,
+    ResearchContext,
+    _catalog_from_payload,
+    _build_query_plan_legacy,
+    _load_profile,
     build_query_plan,
     load_province_catalog,
     validate_query_plan_payload,
 )
+from tests.test_planning_profile import reference_payload, v2_payload  # noqa: E402
 
 
 def rehash_task_payload(task: dict) -> None:
@@ -170,7 +182,346 @@ class QueryPlanTest(unittest.TestCase):
             "catalog": self.catalog,
         }
         values.update(changes)
-        return build_query_plan(**values)
+        return _build_query_plan_legacy(**values)
+
+    def planning_profile(self, **changes) -> PlanningProfile:
+        payload = reference_payload()
+        payload.update(
+            {
+                "province": "湖北",
+                "subject_mode": "3+1+2",
+                "subject_group": "物理",
+                "secondary_subjects": ["化学", "地理"],
+                "exam_year": 2028,
+            }
+        )
+        for key, value in changes.items():
+            if key == "service_commitment":
+                payload["constraints"][key] = value
+            elif key in payload["pathway_preferences"]:
+                payload["pathway_preferences"][key] = value
+            else:
+                payload[key] = value
+        return PlanningProfile.create(payload)
+
+    def build_public(self, **profile_changes) -> QueryPlan:
+        with mock.patch.object(query_plan_module, "_current_utc_year", return_value=2026):
+            return build_query_plan(
+                self.planning_profile(**profile_changes),
+                self.catalog,
+                DecisionPolicySnapshot.load_default(),
+            )
+
+    def test_planning_profile_builds_plan_without_province_json(self) -> None:
+        plan = self.build_public()
+
+        self.assertEqual(plan.province, "湖北")
+        self.assertEqual(plan.mode, "3+1+2")
+        self.assertEqual(plan.subject_group, "物理+化学+地理")
+        self.assertEqual(plan.exam_year, 2028)
+        self.assertEqual(plan.research_year, 2026)
+        self.assertEqual(tuple(sorted({task.year for task in plan.tasks})), (2023, 2024, 2025, 2026))
+
+    def test_research_window_is_frozen_independently_from_future_exam_year(self) -> None:
+        with mock.patch.object(
+            query_plan_module, "_current_utc_year", return_value=2026
+        ) as clock:
+            plan = build_query_plan(
+                self.planning_profile(exam_year=2028),
+                self.catalog,
+                DecisionPolicySnapshot.load_default(),
+            )
+
+        self.assertEqual(plan.exam_year, 2028)
+        self.assertEqual(plan.research_year, 2026)
+        self.assertEqual(
+            tuple(task.year for task in plan.tasks if task.kind == "score_table"),
+            (2026, 2025, 2024, 2023),
+        )
+        self.assertLessEqual(max(task.year for task in plan.tasks), plan.research_year)
+        clock.assert_called_once_with()
+
+    def test_validator_rejects_a_future_research_clock_snapshot(self) -> None:
+        with mock.patch.object(query_plan_module, "_current_utc_year", return_value=2027):
+            future = build_query_plan(
+                self.planning_profile(exam_year=2028),
+                self.catalog,
+                DecisionPolicySnapshot.load_default(),
+            ).to_dict()
+
+        with mock.patch.object(query_plan_module, "_current_utc_year", return_value=2026):
+            with self.assertRaisesRegex(ValueError, "cannot be in the future"):
+                validate_query_plan_payload(future, catalog=self.catalog)
+
+    def test_each_data_type_has_an_independent_strict_y_to_y_minus_three_sequence(self) -> None:
+        plan = self.build_public()
+        for identity in dict.fromkeys((task.kind, task.target_name) for task in plan.tasks):
+            with self.subTest(identity=identity):
+                self.assertEqual(
+                    tuple(
+                        task.year
+                        for task in plan.tasks
+                        if (task.kind, task.target_name) == identity
+                    ),
+                    (2026, 2025, 2024, 2023),
+                )
+
+    def test_profile_exclusions_omit_queries_and_leave_stable_trace(self) -> None:
+        plan = self.build_public(
+            service_commitment="reject",
+            strong_foundation="not_interested",
+            uniformed_service="interested",
+        )
+        targets = {(task.kind, task.target_name) for task in plan.tasks}
+
+        self.assertNotIn(("strong_foundation", "强基计划"), targets)
+        for target in (
+            "公费师范",
+            "优师计划",
+            "定向医学生",
+            "军校",
+            "公安司法消防",
+            "航海航空",
+        ):
+            self.assertNotIn(("special_pathway", target), targets)
+        trace = {item.pathway_id: item for item in plan.pathway_trace}
+        self.assertEqual(trace["strong_foundation"].decision, "exclude")
+        self.assertEqual(trace["strong_foundation"].reason_code, "profile_not_interested")
+        self.assertEqual(trace["service_oriented"].reason_code, "service_commitment_rejected")
+        self.assertEqual(trace["uniformed_service"].reason_code, "service_commitment_rejected")
+
+    def test_unknown_preference_creates_bounded_discovery_not_a_recommendation(self) -> None:
+        plan = self.build_public(comprehensive_evaluation="unknown")
+        tasks = [task for task in plan.tasks if task.kind == "comprehensive_evaluation"]
+        trace = {item.pathway_id: item for item in plan.pathway_trace}
+
+        self.assertEqual(tuple(task.year for task in tasks), (2026, 2025, 2024, 2023))
+        self.assertTrue(all(task.max_candidates == 10 for task in tasks))
+        self.assertTrue(all(task.max_network_retries == 1 for task in tasks))
+        self.assertEqual(trace["comprehensive_evaluation"].decision, "discover")
+        self.assertEqual(trace["comprehensive_evaluation"].reason_code, "preference_unknown_requires_discovery")
+
+    def test_mutation_canary_rejects_tasks_for_an_excluded_pathway(self) -> None:
+        safe = self.build_public().to_dict()
+        self.assertEqual(
+            validate_query_plan_payload(copy.deepcopy(safe), catalog=self.catalog).to_dict(),
+            safe,
+        )
+        mutated = copy.deepcopy(safe)
+        trace = next(
+            item for item in mutated["pathway_trace"]
+            if item["pathway_id"] == "strong_foundation"
+        )
+        trace.update(
+            preference="not_interested",
+            decision="exclude",
+            reason_code="profile_not_interested",
+        )
+
+        with self.assertRaises(ValueError):
+            validate_query_plan_payload(mutated, catalog=self.catalog)
+
+    def test_mutation_canary_rejects_missing_active_pathway_family(self) -> None:
+        safe = self.build_public().to_dict()
+        self.assertEqual(
+            validate_query_plan_payload(copy.deepcopy(safe), catalog=self.catalog).to_dict(),
+            safe,
+        )
+        mutated = copy.deepcopy(safe)
+        mutated["tasks"] = [
+            item for item in mutated["tasks"]
+            if item["kind"] != "comprehensive_evaluation"
+        ]
+
+        with self.assertRaises(ValueError):
+            validate_query_plan_payload(mutated, catalog=self.catalog)
+
+    def test_reviewer_rename_and_rehash_poc_cannot_escape_pathway_binding(self) -> None:
+        safe = self.build_public(
+            service_commitment="accept",
+            service_oriented="interested",
+            uniformed_service="interested",
+            arts_sports="interested",
+        ).to_dict()
+        legitimate_pathways = {
+            ("strong_foundation", "强基计划"),
+            ("comprehensive_evaluation", "综合评价"),
+            ("special_pathway", "国家专项"),
+            ("special_pathway", "地方专项"),
+            ("special_pathway", "高校专项"),
+            ("special_pathway", "公费师范"),
+            ("special_pathway", "优师计划"),
+            ("special_pathway", "定向医学生"),
+            ("special_pathway", "军校"),
+            ("special_pathway", "公安司法消防"),
+            ("special_pathway", "航海航空"),
+            ("hk_macao_admission", "港澳招生"),
+            ("special_pathway", "中外合作办学"),
+            ("special_pathway", "艺体类"),
+        }
+        actual_pathways = {
+            (task["kind"], task["target_name"])
+            for task in safe["tasks"]
+            if task["kind"] in {
+                "strong_foundation",
+                "comprehensive_evaluation",
+                "hk_macao_admission",
+                "special_pathway",
+            }
+        }
+        self.assertEqual(actual_pathways, legitimate_pathways)
+        self.assertEqual(
+            validate_query_plan_payload(copy.deepcopy(safe), catalog=self.catalog).to_dict(),
+            safe,
+        )
+        alias_control = self.build_312(
+            requested_pathways=("强基", "综评", "港澳", "国家专项")
+        )
+        self.assertEqual(
+            validate_query_plan_payload(
+                alias_control.to_dict(), catalog=self.catalog
+            ).to_dict(),
+            alias_control.to_dict(),
+        )
+
+        mutated = copy.deepcopy(safe)
+        for task in mutated["tasks"]:
+            if task["kind"] == "strong_foundation":
+                task["target_name"] = "强基计划改名"
+                task["query_variants"] = [
+                    query.replace("强基计划", "强基计划改名")
+                    for query in task["query_variants"]
+                ]
+                rehash_task_payload(task)
+        trace = next(
+            item for item in mutated["pathway_trace"]
+            if item["pathway_id"] == "strong_foundation"
+        )
+        trace.update(
+            preference="not_interested",
+            decision="exclude",
+            reason_code="profile_not_interested",
+        )
+
+        with self.assertRaises(ValueError):
+            validate_query_plan_payload(mutated, catalog=self.catalog)
+
+    def test_312_canonical_subject_and_task_ids_are_permutation_invariant(self) -> None:
+        forward = self.build_public(secondary_subjects=["化学", "地理"])
+        reverse = self.build_public(secondary_subjects=["地理", "化学"])
+
+        self.assertEqual(forward.subject_group, "物理+化学+地理")
+        self.assertEqual(reverse.subject_group, forward.subject_group)
+        self.assertEqual(
+            tuple(task.task_id for task in reverse.tasks),
+            tuple(task.task_id for task in forward.tasks),
+        )
+        for invalid in (["化学", "化学"], ["化学", "天文"]):
+            with self.subTest(invalid=invalid), self.assertRaises(SubjectSelectionError):
+                canonical_discovery_subject_key("3+1+2", "物理", invalid)
+
+    def test_research_context_and_plan_bind_catalog_identity(self) -> None:
+        profile = self.planning_profile()
+        context = ResearchContext.create(profile, self.catalog)
+        plan = build_query_plan(profile, self.catalog, DecisionPolicySnapshot.load_default())
+
+        self.assertEqual(context.catalog_digest, self.catalog.digest)
+        self.assertEqual(plan.catalog_digest, self.catalog.digest)
+        forged = plan.to_dict()
+        forged["catalog_digest"] = "sha256:" + "0" * 64
+        with self.assertRaises(ValueError):
+            validate_query_plan_payload(forged, catalog=self.catalog)
+
+    def test_catalog_snapshot_is_factory_only_after_identity_validation(self) -> None:
+        with self.assertRaises(TypeError):
+            ProvinceCatalogSnapshot(
+                schema_version=self.catalog.schema_version,
+                verified_at=self.catalog.verified_at,
+                coverage_note=self.catalog.coverage_note,
+                mode_authority_urls=self.catalog.mode_authority_urls,
+                provinces=self.catalog.provinces,
+                digest=self.catalog.digest,
+            )
+        with self.assertRaises(TypeError):
+            replace(self.catalog, verified_at="2026-08-28")
+
+    def test_no_payload_or_module_token_seam_can_forge_a_tracked_catalog(self) -> None:
+        payload = json.loads(
+            (ROOT / "references" / "provinces" / "index.json").read_text("utf-8")
+        )
+        self.assertFalse(
+            any("trust_token" in name.casefold() for name in vars(query_plan_module))
+        )
+        self.assertNotIn("_trusted_for_planning", vars(self.catalog))
+        with self.assertRaises(TypeError):
+            _catalog_from_payload(payload, _trust_token=object())
+        with self.assertRaises(TypeError):
+            _catalog_from_payload(payload, trusted_for_planning=True)
+
+        generic_canonical = _catalog_from_payload(copy.deepcopy(payload))
+        direct_factory_catalog = ProvinceCatalogSnapshot._create(
+            schema_version=generic_canonical.schema_version,
+            verified_at=generic_canonical.verified_at,
+            coverage_note=generic_canonical.coverage_note,
+            mode_authority_urls=generic_canonical.mode_authority_urls,
+            provinces=generic_canonical.provinces,
+            digest=generic_canonical.digest,
+        )
+
+        hubei = next(item for item in payload["provinces"] if item["province"] == "湖北")
+        hubei["authority_name"] = "伪造考试机构"
+        hubei["official_roots"] = ["https://www.baidu.com/"]
+        forged_payload_catalog = _catalog_from_payload(copy.deepcopy(payload))
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "caller-catalog.json"
+            path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            forged_file_catalog = load_province_catalog(path)
+
+        for forged in (
+            generic_canonical,
+            direct_factory_catalog,
+            forged_payload_catalog,
+            forged_file_catalog,
+        ):
+            with self.subTest(factory=type(forged).__name__), self.assertRaises(
+                ProvinceCatalogError
+            ):
+                build_query_plan(
+                    self.planning_profile(),
+                    forged,
+                    DecisionPolicySnapshot.load_default(),
+                )
+
+        tracked = load_province_catalog()
+        self.assertEqual(
+            build_query_plan(
+                self.planning_profile(),
+                tracked,
+                DecisionPolicySnapshot.load_default(),
+            ).catalog_digest,
+            tracked.digest,
+        )
+
+    def test_schema_valid_v3_profile_file_loads_without_private_migration(self) -> None:
+        payload = reference_payload()
+        payload.update(
+            {
+                "province": "湖北",
+                "subject_mode": "3+1+2",
+                "subject_group": "物理",
+                "secondary_subjects": ["化学", "地理"],
+                "exam_year": 2028,
+            }
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "profile-v3.json"
+            path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            loaded, mode, year = _load_profile(path)
+
+        self.assertIsInstance(loaded, PlanningProfile)
+        self.assertEqual(loaded.schema_version, "3.0")
+        self.assertEqual(mode, "3+1+2")
+        self.assertEqual(year, 2028)
 
     def test_plan_covers_all_required_query_kinds(self):
         kinds = {task.kind for task in self.build_312().tasks}
@@ -182,6 +533,8 @@ class QueryPlanTest(unittest.TestCase):
                 "batch_admission",
                 "joy_report",
                 "enrollment_plan",
+                "admission_charter",
+                "tuition_fee",
                 "subject_requirement",
                 "strong_foundation",
                 "comprehensive_evaluation",
@@ -222,12 +575,12 @@ class QueryPlanTest(unittest.TestCase):
         province = replace(base, province="黑龙江")
         profile = self.profile_312(target_province="黑龙江")
 
-        plan = build_query_plan(
+        plan = _build_query_plan_legacy(
             profile,
             province,
             2026,
             high_school_name="演示第一中学",
-            requested_pathways=("定向培养",),
+            requested_pathways=("定向医学生",),
             catalog=catalog,
         )
 
@@ -249,6 +602,8 @@ class QueryPlanTest(unittest.TestCase):
                 "batch_admission",
                 "joy_report",
                 "enrollment_plan",
+                "admission_charter",
+                "tuition_fee",
                 "subject_requirement",
                 "strong_foundation",
                 "comprehensive_evaluation",
@@ -333,7 +688,7 @@ class QueryPlanTest(unittest.TestCase):
                 else:
                     config = replace(base_312, province=discovery.province)
                     profile = self.profile_312(target_province=discovery.province)
-                plan = build_query_plan(profile, config, 2026, catalog=catalog)
+                plan = _build_query_plan_legacy(profile, config, 2026, catalog=catalog)
                 self.assertEqual(
                     validate_query_plan_payload(
                         plan.to_dict(), catalog=catalog
@@ -510,6 +865,8 @@ class QueryPlanTest(unittest.TestCase):
             "score_table",
             "joy_report",
             "enrollment_plan",
+            "admission_charter",
+            "tuition_fee",
             "subject_requirement",
             "strong_foundation",
             "comprehensive_evaluation",
@@ -536,13 +893,103 @@ class QueryPlanTest(unittest.TestCase):
             )
         self.assertNotIn("latest", json.dumps(self.build_312().to_dict()))
 
+    def test_charter_and_tuition_are_distinct_targetless_typed_families(self):
+        for label, plan in (
+            ("public", self.build_public()),
+            ("legacy", self.build_312()),
+        ):
+            with self.subTest(builder=label):
+                charter = tuple(
+                    task for task in plan.tasks
+                    if task.kind == "admission_charter"
+                )
+                tuition = tuple(
+                    task for task in plan.tasks if task.kind == "tuition_fee"
+                )
+                self.assertEqual(
+                    tuple(task.year for task in charter),
+                    (2026, 2025, 2024, 2023),
+                )
+                self.assertEqual(
+                    tuple(task.year for task in tuition),
+                    (2026, 2025, 2024, 2023),
+                )
+                self.assertTrue(
+                    all(task.target_name is None for task in (*charter, *tuition))
+                )
+                charter_fields = set(charter[0].required_extraction_fields)
+                tuition_fields = set(tuition[0].required_extraction_fields)
+                self.assertGreaterEqual(
+                    charter_fields,
+                    {
+                        "institution",
+                        "institution_code",
+                        "admission_rules",
+                        "adjustment_rules",
+                        "adjustment_required",
+                        "health_restrictions",
+                        "language_restrictions",
+                        "single_subject_restrictions",
+                        "special_conditions",
+                    },
+                )
+                self.assertGreaterEqual(
+                    tuition_fields,
+                    {
+                        "institution",
+                        "institution_code",
+                        "program_group",
+                        "majors",
+                        "annual_fee_amount",
+                        "fee_currency",
+                        "fee_period",
+                        "accommodation_fee",
+                        "other_required_fees",
+                        "financial_aid",
+                    },
+                )
+                self.assertNotEqual(charter_fields, tuition_fields)
+                enrollment_fields = set(
+                    next(
+                        task for task in plan.tasks
+                        if task.kind == "enrollment_plan"
+                    ).required_extraction_fields
+                )
+                self.assertTrue(
+                    {
+                        "adjustment_required",
+                        "annual_fee_amount",
+                        "fee_currency",
+                        "fee_period",
+                    }.isdisjoint(enrollment_fields)
+                )
+                self.assertTrue(
+                    all(
+                        "招生章程" in " ".join(task.query_variants)
+                        for task in charter
+                    )
+                )
+                self.assertTrue(
+                    all("学费" in " ".join(task.query_variants) for task in tuition)
+                )
+
+        forged = self.build_public().to_dict()
+        targetless = next(
+            task for task in forged["tasks"]
+            if task["kind"] == "admission_charter"
+        )
+        targetless["target_name"] = "伪造院校"
+        rehash_task_payload(targetless)
+        with self.assertRaises(ValueError):
+            validate_query_plan_payload(forged, catalog=self.catalog)
+
     def test_mode_aware_subject_keys_and_ids_are_deterministic_safe_ascii(self):
         first = self.build_312()
         second = self.build_312()
         self.assertEqual(first.subject_group, "物理")
         self.assertEqual(first.to_dict(), second.to_dict())
 
-        plan_33 = build_query_plan(
+        plan_33 = _build_query_plan_legacy(
             self.profile_33(),
             self.config_33,
             2026,
@@ -631,7 +1078,7 @@ class QueryPlanTest(unittest.TestCase):
             self.assertIn(task.subject_group, query_text)
 
     def test_default_api_emits_independent_pathway_families_without_generic_scope(self):
-        plan = build_query_plan(
+        plan = _build_query_plan_legacy(
             self.profile_312(), self.config_312, 2026, catalog=self.catalog
         )
         kinds = {task.kind for task in plan.tasks}
@@ -671,16 +1118,13 @@ class QueryPlanTest(unittest.TestCase):
             self.build_312(requested_pathways=("强基计划", "强基计划"))
 
     def test_public_text_is_nfkc_normalized_before_order_dedup_and_digest(self):
-        ascii_plan = self.build_312(
-            high_school_name="Café中学", requested_pathways=("A计划",)
-        )
+        ascii_plan = self.build_312(high_school_name="Café中学")
         compatibility_plan = self.build_312(
             high_school_name=unicodedata.normalize("NFD", "Café中学"),
-            requested_pathways=("Ａ计划",),
         )
         self.assertEqual(ascii_plan.to_dict(), compatibility_plan.to_dict())
 
-        ordered = self.build_312(requested_pathways=("Ｂ计划", "A计划"))
+        ordered = self.build_312(requested_pathways=("艺体类", "国家专项"))
         ordered_targets = list(
             dict.fromkeys(
                 task.target_name
@@ -688,9 +1132,9 @@ class QueryPlanTest(unittest.TestCase):
                 if task.kind == "special_pathway"
             )
         )
-        self.assertEqual(ordered_targets[:2], ["A计划", "B计划"])
+        self.assertEqual(ordered_targets[:2], ["国家专项", "艺体类"])
         with self.assertRaises(ValueError):
-            self.build_312(requested_pathways=("A计划", "Ａ计划"))
+            self.build_312(requested_pathways=("国家专项", "国家专项"))
 
         invalid = (
             "A\u200b计划",
@@ -761,11 +1205,11 @@ class QueryPlanTest(unittest.TestCase):
 
     def test_requires_real_profile_and_province_and_matching_context(self):
         with self.assertRaises(TypeError):
-            build_query_plan({}, self.config_312, 2026, catalog=self.catalog)
+            _build_query_plan_legacy({}, self.config_312, 2026, catalog=self.catalog)
         with self.assertRaises(TypeError):
-            build_query_plan(self.profile_312(), {}, 2026, catalog=self.catalog)
+            _build_query_plan_legacy(self.profile_312(), {}, 2026, catalog=self.catalog)
         with self.assertRaises(ValueError):
-            build_query_plan(self.profile_312(), self.config_33, 2026, catalog=self.catalog)
+            _build_query_plan_legacy(self.profile_312(), self.config_33, 2026, catalog=self.catalog)
 
     def test_build_revalidates_the_complete_province_config_without_io(self):
         config = self.config_312
@@ -785,12 +1229,12 @@ class QueryPlanTest(unittest.TestCase):
         for invalid in invalid_configs:
             with self.subTest(invalid=invalid):
                 with self.assertRaises((TypeError, ValueError)):
-                    build_query_plan(self.profile_312(), invalid, 2026, catalog=self.catalog)
+                    _build_query_plan_legacy(self.profile_312(), invalid, 2026, catalog=self.catalog)
 
         policy = OrdinaryBatchPolicy(**config.ordinary_batch_policy.to_dict())
         object.__setattr__(policy, "stable_delta_le", policy.challenge_delta_lt - 1)
         with self.assertRaises(ValueError):
-            build_query_plan(
+            _build_query_plan_legacy(
                 self.profile_312(),
                 replace(config, ordinary_batch_policy=policy),
                 2026,
@@ -824,11 +1268,11 @@ class QueryPlanTest(unittest.TestCase):
                 availability_expectation=task.availability_expectation,
             )
         with self.assertRaises(ValueError):
-            replace(self.build_312(), exam_year=2027)
+            replace(self.build_312(), research_year=2025)
 
     def test_semantic_validator_rechecks_every_task_contract_after_rehash(self):
         explicit = self.build_312().to_dict()
-        generic = build_query_plan(
+        generic = _build_query_plan_legacy(
             self.profile_312(), self.config_312, 2026, catalog=self.catalog
         ).to_dict()
         malformed_payloads = []
@@ -898,11 +1342,22 @@ class QueryPlanSchemaTest(unittest.TestCase):
             {
                 "schema_version",
                 "province",
+                "mode",
                 "exam_year",
+                "research_year",
                 "subject_group",
                 "authority_name",
                 "official_roots",
                 "catalog_verified_at",
+                "catalog_digest",
+                "decision_policy_id",
+                "decision_policy_digest",
+                "decision_basis_id",
+                "decision_source_id",
+                "decision_source_version",
+                "source_policy_id",
+                "source_policy_version",
+                "pathway_trace",
                 "tasks",
             },
         )
@@ -915,12 +1370,15 @@ class QueryPlanSchemaTest(unittest.TestCase):
             "batch_admission",
             "joy_report",
             "enrollment_plan",
+            "admission_charter",
+            "tuition_fee",
             "subject_requirement",
             "strong_foundation",
             "comprehensive_evaluation",
             "hk_macao_admission",
             "special_pathway",
         ])
+        self.assertEqual(self.schema["properties"]["tasks"]["minItems"], 32)
         self.assertEqual(
             task["properties"]["max_candidates"],
             {"type": "integer", "const": 10},
@@ -946,11 +1404,19 @@ class QueryPlanSchemaTest(unittest.TestCase):
                 "task_context",
                 "catalog_discovery_context",
                 "trusted_catalog_identity",
+                "catalog_digest_binding",
+                "decision_policy_binding",
+                "research_year_binding",
                 "structured_target",
                 "explicit_four_year_window",
+                "strict_year_order",
                 "availability_expectation",
                 "candidate_limit",
+                "retry_stop_bounds",
                 "source_tiers",
+                "source_policy_reference",
+                "pathway_trace",
+                "pathway_task_binding",
                 "extraction_fields",
             },
         )
@@ -967,7 +1433,7 @@ class QueryPlanSchemaTest(unittest.TestCase):
             subject_group="物理",
             secondary_subjects=frozenset({"化学", "地理"}),
         )
-        payload = build_query_plan(
+        payload = _build_query_plan_legacy(
             profile,
             config,
             2026,
@@ -983,83 +1449,63 @@ class QueryPlanSchemaTest(unittest.TestCase):
 class QueryPlanCliTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        cls.temporary = tempfile.TemporaryDirectory(dir=ROOT)
-        directory = Path(cls.temporary.name).resolve()
-        profile_payload = json.loads(
-            (ROOT / "tests" / "fixtures" / "profiles" / "demo.json").read_text("utf-8")
+        cls.profile_payload = reference_payload()
+        cls.profile_payload.update(
+            {
+                "province": "湖北",
+                "subject_mode": "3+1+2",
+                "subject_group": "物理",
+                "secondary_subjects": ["地理", "化学"],
+                "exam_year": 2028,
+            }
         )
-        province_payload = json.loads(
-            (
-                ROOT
-                / "tests"
-                / "fixtures"
-                / "provinces"
-                / "demo-312"
-                / "province.json"
-            ).read_text("utf-8")
-        )
-        profile_payload["province"] = "黑龙江"
-        province_payload["province"] = "黑龙江"
-        cls.profile_path = directory / "profile.json"
-        cls.province_path = directory / "province.json"
-        cls.profile_path.write_text(
-            json.dumps(profile_payload, ensure_ascii=False), encoding="utf-8"
-        )
-        cls.province_path.write_text(
-            json.dumps(province_payload, ensure_ascii=False), encoding="utf-8"
-        )
+        cls.profile_bytes = json.dumps(
+            cls.profile_payload,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
 
-    @classmethod
-    def tearDownClass(cls) -> None:
-        cls.temporary.cleanup()
-
-    def run_cli(self, *arguments: str) -> subprocess.CompletedProcess[bytes]:
+    def run_cli(
+        self, *arguments: str, stdin: bytes | None = None
+    ) -> subprocess.CompletedProcess[bytes]:
         return subprocess.run(
             [sys.executable, str(ROOT / "scripts" / "query_plan.py"), *arguments],
             cwd=ROOT,
+            input=self.profile_bytes if stdin is None else stdin,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             check=False,
         )
 
-    def base_arguments(self) -> list[str]:
-        return [
-            "--profile", str(self.profile_path),
-            "--province", str(self.province_path),
-            "--exam-year", "2026",
-            "--high-school", "演示第一中学",
-            "--pathway", "强基计划",
-            "--pathway", "综合评价",
-        ]
-
     def test_real_cli_success_is_twice_byte_identical_and_semantically_valid(self):
-        first = self.run_cli(*self.base_arguments())
-        second = self.run_cli(*self.base_arguments())
+        first = self.run_cli()
+        second = self.run_cli()
         self.assertEqual(first.returncode, 0, first.stderr.decode("utf-8", "replace"))
         self.assertEqual(second.returncode, 0, second.stderr.decode("utf-8", "replace"))
         self.assertEqual(first.stdout, second.stdout)
         payload = json.loads(first.stdout.decode("utf-8"))
         self.assertEqual(validate_query_plan_payload(payload).to_dict(), payload)
+        self.assertEqual(payload["province"], "湖北")
+        self.assertEqual(payload["exam_year"], 2028)
+        self.assertEqual(payload["research_year"], query_plan_module._current_utc_year())
+        self.assertLessEqual(max(task["year"] for task in payload["tasks"]), payload["research_year"])
+        self.assertEqual(payload["subject_group"], "物理+化学+地理")
         self.assertNotIn("张三", first.stdout.decode("utf-8"))
 
-    def test_brief_relative_cli_paths_are_twice_byte_identical_and_valid(self):
-        arguments = (
-            "--profile",
-            os.path.relpath(self.profile_path, ROOT),
-            "--province",
-            os.path.relpath(self.province_path, ROOT),
-            "--exam-year",
-            "2026",
+    def test_old_province_file_year_and_profile_path_arguments_are_rejected(self):
+        cases = (
+            ("--province", "C:\\private\\province.json"),
+            ("--exam-year", "2029"),
+            ("--profile", "C:\\private\\profile.json"),
+            ("C:\\private\\profile.json",),
         )
-        first = self.run_cli(*arguments)
-        second = self.run_cli(*arguments)
-        self.assertEqual(first.returncode, 0, first.stderr.decode("utf-8", "replace"))
-        self.assertEqual(second.returncode, 0, second.stderr.decode("utf-8", "replace"))
-        self.assertEqual(first.stderr, b"")
-        self.assertEqual(second.stderr, b"")
-        self.assertEqual(first.stdout, second.stdout)
-        payload = json.loads(first.stdout.decode("utf-8"))
-        self.assertEqual(validate_query_plan_payload(payload).to_dict(), payload)
+        for arguments in cases:
+            with self.subTest(arguments=arguments):
+                result = self.run_cli(*arguments)
+                error = result.stderr.decode("utf-8", "replace").replace("\r\n", "\n")
+                self.assertEqual(result.returncode, 2)
+                self.assertEqual(error, "query-plan: invalid input\n")
+                self.assertNotIn("private", error)
 
     def test_cli_invalid_inputs_exit_two_without_path_or_private_input_leakage(self):
         cases = (
@@ -1069,45 +1515,32 @@ class QueryPlanCliTest(unittest.TestCase):
         )
         for content in cases:
             with self.subTest(content=content):
-                with tempfile.TemporaryDirectory() as temp:
-                    path = Path(temp) / "private-profile-location.json"
-                    path.write_bytes(content)
-                    args = self.base_arguments()
-                    args[1] = str(path)
-                    result = self.run_cli(*args)
-                    error = result.stderr.decode("utf-8", "replace")
-                    self.assertEqual(result.returncode, 2)
-                    self.assertNotIn(str(path), error)
-                    self.assertNotIn("NaN", error)
-
-        for flag, value in (
-            ("--high-school", "姓名:张三"),
-            ("--high-school", "C:\\private\\school.txt"),
-            ("--pathway", "https://example.com/private"),
-            ("--pathway", "13800138000"),
-        ):
-            with self.subTest(flag=flag, value=value):
-                result = self.run_cli(*self.base_arguments(), flag, value)
+                result = self.run_cli(stdin=content)
                 error = result.stderr.decode("utf-8", "replace")
                 self.assertEqual(result.returncode, 2)
-                self.assertNotIn(value, error)
-                self.assertNotIn("张三", error)
+                self.assertEqual(error.replace("\r\n", "\n"), "query-plan: invalid input\n")
+                self.assertNotIn("NaN", error)
+
+        v2 = v2_payload()
+        result = self.run_cli(
+            stdin=json.dumps(v2, ensure_ascii=False).encode("utf-8")
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(
+            result.stderr.decode("utf-8", "replace").replace("\r\n", "\n"),
+            "query-plan: invalid input\n",
+        )
 
     def test_all_argument_parse_errors_are_fixed_and_path_neutral(self):
-        profile = str(self.profile_path)
-        province = str(self.province_path)
         cases = (
             ["--unknown-secret", "姓名:张三"],
             ["C:\\private\\extra.txt"],
             ["--high-school"],
-            ["--profile", profile],
-            ["--province", province],
-            ["--exam-year", "2026"],
-            ["--high-school", "演示第一中学"],
+            ["--pathway", "强基计划"],
         )
         for extra in cases:
             with self.subTest(extra=extra):
-                result = self.run_cli(*self.base_arguments(), *extra)
+                result = self.run_cli(*extra)
                 error = result.stderr.decode("utf-8", "replace").replace("\r\n", "\n")
                 self.assertEqual(result.returncode, 2)
                 self.assertEqual(error, "query-plan: invalid input\n")

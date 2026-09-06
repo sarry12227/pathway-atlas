@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import io
-from dataclasses import replace
+from dataclasses import fields, replace
 from pathlib import Path
 import subprocess
 import sys
@@ -25,8 +25,17 @@ from scripts.contracts import (
     SourceTier,
 )
 from scripts.evidence import EvidenceStore
-from scripts.path_recommend import PathwayItem, PathwayResult
+from scripts.path_recommend import (
+    PATHWAY_DISPLAY_EVIDENCE_FIELDS,
+    PathwayFieldEvidenceOrigin,
+    PathwayPolicy,
+    PathwayProfile,
+    PathwayResult,
+    RankAdjustmentModel,
+    evaluate_pathways,
+)
 from scripts.rank_calc import RankEstimate
+from scripts.rank_locator import RankScenario
 from scripts.report_model import ReportModel, StudentProfile, build_report_model, render_markdown
 from scripts.validate_evidence import validate_bundle_snapshot
 from scripts.validate_evidence import ValidatedEvidenceSnapshot
@@ -134,7 +143,7 @@ def recommendations(**overrides) -> RecommendationResult:
     return RecommendationResult(**values)
 
 
-def partial_task3_recommendations() -> RecommendationResult:
+def partial_task3_recommendations(rank: int = 4200) -> RecommendationResult:
     return recommend_schools(
         [
             {
@@ -157,7 +166,7 @@ def partial_task3_recommendations() -> RecommendationResult:
             }
         ],
         RecommendationProfile(
-            rank=4200,
+            rank=rank,
             target_province="演示甲省",
             subject_group="物理",
             secondary_subjects=frozenset(("化学", "地理")),
@@ -187,68 +196,102 @@ def rank_estimate() -> RankEstimate:
     )
 
 
-def pathway_result() -> PathwayResult:
-    pending = PathwayItem(
-        policy_id="policy-1",
+def _legacy_pathway_policy(*, formal: bool) -> PathwayPolicy:
+    """Controlled v1 compatibility input; the engine owns every field trail."""
+
+    return PathwayPolicy(
+        policy_id="policy-formal" if formal else "policy-1",
         pathway_type="special_program",
-        title="虚构专项",
+        title="虚构正式专项" if formal else "虚构专项",
         institution="虚构乙大学",
-        status="pending_verification",
-        eligibility="pending_verification",
-        missing_constraints=("服务期未核实",),
+        province="演示甲省",
+        subject_mode="3+1+2",
+        valid_year=2026,
+        eligibility_requirements=() if formal else ("服务期未核实",),
+        disqualifying_facts=(),
         professional_options=("虚构专业",),
         training_arrangements="合成培养安排",
         transition_rules="合成转段规则",
         outcomes="合成出口说明",
-        service_employment_obligations=None,
+        service_employment_obligations=(
+            "合成服务就业说明" if formal else None
+        ),
         penalty_exit_rules="合成退出规则",
         fees_and_subsidies="合成费用说明",
-        policy_source_ids=("s1",),
-        evidence_status=EvidenceStatus.CONFLICT,
-        calculation_basis="仅核验资格条件，未执行位次换算",
-        target_rank=None,
+        policy_source_ids=(("s5",) if formal else ("s1",)),
+        evidence_status=(
+            EvidenceStatus.OFFICIAL if formal else EvidenceStatus.CONFLICT
+        ),
+        calculation_basis=(
+            "已验证政策资格与版本化模型共同形成目标"
+            if formal
+            else "仅核验资格条件"
+        ),
+        timeline=("报名前复核当年简章",),
+        preparation_actions=("整理申请材料",),
     )
-    return PathwayResult(
-        items=(pending,),
-        formal_shortlist=(),
-        target_rank=None,
-        transformation=None,
-        model_source_ids=(),
-        warnings=("未提供有依据的位次模型",),
+
+
+def _legacy_pathway_profile() -> PathwayProfile:
+    return PathwayProfile(
+        rank=4200,
+        province="演示甲省",
+        subject_mode="3+1+2",
+        current_year=2026,
+        eligibility_facts=(),
+    )
+
+
+def pathway_rank_scenario() -> RankScenario:
+    return RankScenario._create(
+        status=EvidenceStatus.INFERRED,
+        basis="authenticated_interval_intersection",
+        optimistic_rank=3900,
+        central_rank=4200,
+        conservative_rank=4500,
+        confidence="medium",
+        source_ids=("s3", "s4"),
+        contributing_years=(2025, 2026),
+        backtest_error=None,
+        reasons=("synthetic_rank_scenario",),
+        channel_kinds=("school_anchor",),
+        channel_statuses=("reference",),
+        rejected_channel_count=0,
+    )
+
+
+def pathway_rank_model() -> RankAdjustmentModel:
+    return RankAdjustmentModel(
+        model_id="model-report",
+        province="演示甲省",
+        subject_mode="3+1+2",
+        cohort_years=(2025, 2026),
+        source_ids=("s6",),
+        evidence_status=EvidenceStatus.OFFICIAL,
+        method="documented_rank_delta",
+        pathway_types=("special_program",),
+        applicability_rank_min=1,
+        applicability_rank_max=10000,
+        score_table_rank_min=1,
+        score_table_rank_max=10000,
+        rank_delta=-700,
+    )
+
+
+def pathway_result() -> PathwayResult:
+    return evaluate_pathways(
+        _legacy_pathway_profile(),
+        (_legacy_pathway_policy(formal=False),),
+        rank_scenario=pathway_rank_scenario(),
     )
 
 
 def formal_pathway_result() -> PathwayResult:
-    formal = PathwayItem(
-        policy_id="policy-formal",
-        pathway_type="special_program",
-        title="虚构正式专项",
-        institution="虚构乙大学",
-        status="formal",
-        eligibility="eligible",
-        missing_constraints=(),
-        professional_options=("虚构专业",),
-        training_arrangements="合成培养安排",
-        transition_rules="合成转段规则",
-        outcomes="合成出口说明",
-        service_employment_obligations="合成服务就业说明",
-        penalty_exit_rules="合成退出规则",
-        fees_and_subsidies="合成费用说明",
-        policy_source_ids=("s5",),
-        evidence_status=EvidenceStatus.OFFICIAL,
-        calculation_basis="已验证政策资格与版本化模型共同形成目标",
-        target_rank=3500,
-    )
-    return PathwayResult(
-        items=(formal,),
-        formal_shortlist=("policy-formal",),
-        target_rank=3500,
-        transformation="以用户位次为输入的合成版本化转换",
-        model_source_ids=("s6",),
-        model_id="model-report",
-        model_method="documented_rank_delta",
-        model_evidence_status=EvidenceStatus.OFFICIAL,
-        warnings=(),
+    return evaluate_pathways(
+        _legacy_pathway_profile(),
+        (_legacy_pathway_policy(formal=True),),
+        pathway_rank_model(),
+        rank_scenario=pathway_rank_scenario(),
     )
 
 
@@ -273,7 +316,10 @@ class EvidenceReportModelTest(unittest.TestCase):
         self.assertIn("来源编号", text)
         self.assertIn("s1、s2、s3、s4", text)
         self.assertIn(evidence_snapshot().manifest_hash, text)
-        self.assertGreaterEqual(text.count("AI 生成，仅供参考"), 3)
+        self.assertGreaterEqual(
+            text.count("基于公开数据由 AI 整理，仅供参考"),
+            3,
+        )
         self.assertNotIn("http://", text)
         self.assertNotIn("https://", text)
 
@@ -303,16 +349,64 @@ class EvidenceReportModelTest(unittest.TestCase):
         ):
             self.assertIn(literal, text)
 
-    def test_direct_task3_partial_result_is_accepted_with_exact_item_status(self):
+    def test_direct_task3_partial_result_stays_directional_inside_declared_coverage(self):
         result = partial_task3_recommendations()
         self.assertEqual(result.coverage_status, EvidenceStatus.PARTIAL)
-        self.assertEqual(result.items[0].evidence_status, EvidenceStatus.REFERENCE)
+        self.assertIsNone(result.verified_rank_coverage)
+        self.assertEqual(result.items, ())
+        self.assertEqual(result.observations[0].school_name, "部分覆盖大学")
+        self.assertEqual(result.observations[0].evidence_status, EvidenceStatus.PARTIAL)
         report = self.build(recommendations=result)
         text = render_markdown(report)
         self.assertEqual(report.recommendation_coverage_status, EvidenceStatus.PARTIAL)
-        self.assertEqual(report.recommendations[0].evidence_status, EvidenceStatus.REFERENCE)
+        self.assertEqual(report.recommendations, ())
+        self.assertEqual(report.school_observations[0].school_name, "部分覆盖大学")
+        self.assertEqual(report.school_observations[0].evidence_status, EvidenceStatus.PARTIAL)
+        self.assertIn("s2", report.source_ids)
         self.assertIn("部分覆盖大学", text)
-        self.assertIn("当前已验证覆盖范围内", text)
+        self.assertIn("部分覆盖", text)
+        self.assertIn("仅作方向性观察", text)
+        self.assertNotIn("| 620 |", text)
+        self.assertNotIn("| 4300 |", text)
+
+    def test_partial_report_observations_do_not_gain_numbers_from_declared_bounds(self):
+        report = self.build(recommendations=partial_task3_recommendations())
+        self.assertEqual(report.recommendations, ())
+        item = report.school_observations[0]
+        self.assertEqual(item.evidence_status, EvidenceStatus.PARTIAL)
+        self.assertFalse(hasattr(item, "min_score"))
+        self.assertFalse(hasattr(item, "min_rank"))
+
+        def rebuild(**changes):
+            values = {field.name: getattr(report, field.name) for field in fields(report)}
+            values.update(changes)
+            return ReportModel._create(**values)
+
+        for bounds in (None, (1, 10000), (4301, 5000)):
+            with self.subTest(bounds=bounds):
+                changed = rebuild(verified_rank_coverage=bounds)
+                self.assertEqual(changed.recommendations, ())
+                self.assertEqual(changed.school_observations, report.school_observations)
+        with self.assertRaises(ValueError):
+            rebuild(recommendation_empty_reason=None)
+
+    def test_partial_report_outside_coverage_stays_directional(self):
+        result = partial_task3_recommendations(rank=6000)
+        self.assertEqual(result.items, ())
+        self.assertEqual(result.empty_reason, "partial_observations_only")
+        self.assertIsNone(result.verified_rank_coverage)
+
+        report = self.build(
+            profile=student(rank=6000),
+            recommendations=result,
+            rank=None,
+        )
+        text = render_markdown(report)
+        self.assertEqual(report.recommendations, ())
+        self.assertEqual(report.school_observations[0].school_name, "部分覆盖大学")
+        self.assertIn("仅作方向性观察", text)
+        self.assertNotIn("| 620 |", text)
+        self.assertNotIn("| 4300 |", text)
 
     def test_machine_ids_with_phone_shaped_digits_bypass_human_text_scanning(self):
         snapshot = evidence_snapshot()
@@ -522,19 +616,88 @@ class EvidenceReportModelTest(unittest.TestCase):
         self.assertIn("检索日期：2026-08-23", text)
         self.assertIn("输入年份：2026", text)
         self.assertIn("可用年份：2026", text)
-        self.assertIn("下一步行动建议", text)
+        self.assertIn("当前最需要做的事", text)
         self.assertIn("虚构专业", text)
         self.assertIn("合成培养安排", text)
         self.assertIn("合成转段规则", text)
         self.assertIn("合成出口说明", text)
-        self.assertIn("转换过程：以用户位次为输入的合成版本化转换", text)
+        self.assertIn("转换过程：模型 model-report", text)
+        self.assertIn("4200 + (-700) = 3500", text)
         self.assertIn("模型来源编号：s6", text)
         self.assertRegex(text, r"有依据的路径目标位次：3500.*位次模型证据状态：官方")
         self.assertIn("正式路径政策证据状态：官方", text)
+        self.assertIn("战略价值：high", text)
+        self.assertIn("依赖行动：补齐或复核关键证据缺口（evidence-gap-review）", text)
+        self.assertIn("关联院校：虚构甲大学", text)
+        self.assertIn("关联路径：虚构正式专项", text)
         model = self.build(pathways=formal_pathway_result())
         self.assertEqual(model.pathway_target_evidence_status, EvidenceStatus.OFFICIAL)
         with self.assertRaises((TypeError, ValueError)):
             replace(model, pathway_target_evidence_status=EvidenceStatus.OFFICIAL)
+
+    def test_pathway_field_trails_are_projected_and_render_direct_and_derived_evidence(self):
+        result = formal_pathway_result()
+        model = self.build(pathways=result)
+        projected = model.pathways[0]
+        text = render_markdown(model)
+
+        self.assertEqual(projected.field_evidence, result.items[0].field_evidence)
+        self.assertTrue(
+            all(
+                report_record is source_record
+                for report_record, source_record in zip(
+                    projected.field_evidence, result.items[0].field_evidence
+                )
+            )
+        )
+        self.assertEqual(
+            tuple(record.field for record in projected.field_evidence),
+            PATHWAY_DISPLAY_EVIDENCE_FIELDS,
+        )
+        self.assertEqual(len(projected.field_evidence), 22)
+        evidence_by_field = {
+            record.field: record for record in projected.field_evidence
+        }
+        direct = evidence_by_field["professional_options"]
+        derived = evidence_by_field["investment_decision"]
+        self.assertIs(direct.origin, PathwayFieldEvidenceOrigin.LEGACY)
+        self.assertEqual(direct.locators, ("policy-record:policy-formal:professional_options",))
+        self.assertEqual(direct.evidence_method, "legacy-policy-field-v1")
+        self.assertRegex(direct.origin_binding, r"^sha256:[0-9a-f]{64}$")
+        self.assertRegex(direct.digest, r"^sha256:[0-9a-f]{64}$")
+        self.assertIs(
+            derived.origin, PathwayFieldEvidenceOrigin.DERIVED_DECISION
+        )
+        self.assertIn("professional_options", derived.upstream_fields)
+        self.assertTrue(derived.upstream_evidence_digests)
+        self.assertRegex(derived.origin_binding, r"^sha256:[0-9a-f]{64}$")
+        self.assertRegex(derived.digest, r"^sha256:[0-9a-f]{64}$")
+        self.assertIn("逐字段证据审计", text)
+        self.assertIn(
+            "字段：professional_options（专业选项）；证据状态：官方；覆盖：完整；"
+            "来源编号：s5；证据定位：policy-record:policy-formal:professional_options；"
+            "抽取方式：legacy-policy-record；证据方法："
+            "legacy-policy-field-v1；上游字段：professional_options；"
+            "画像字段：无；提示：无",
+            text,
+        )
+        self.assertIn(
+            "字段：investment_decision（投入结论）；证据状态：推断；覆盖：完整；"
+            "来源编号：s5；证据定位：policy-record:policy-formal:",
+            text,
+        )
+
+    def test_report_pathway_and_markdown_reject_one_missing_field_trail(self):
+        model = self.build(pathways=formal_pathway_result())
+        pathway = model.pathways[0]
+        missing_one = pathway.field_evidence[:-1]
+
+        with self.assertRaisesRegex(ValueError, "field evidence is incomplete"):
+            replace(pathway, field_evidence=missing_one)
+
+        object.__setattr__(pathway, "field_evidence", missing_one)
+        with self.assertRaisesRegex(ValueError, "field evidence is incomplete"):
+            render_markdown(model)
 
     def test_retrieval_dates_and_action_items_are_strict_model_fields(self):
         model = self.build()
@@ -767,7 +930,7 @@ class EvidenceReportCliTest(unittest.TestCase):
         self.assertEqual(second.returncode, 0, second.stderr)
         self.assertEqual(first.stdout, second.stdout)
         self.assertIn("演示甲省", first.stdout)
-        self.assertIn("AI 生成，仅供参考", first.stdout)
+        self.assertIn("基于公开数据由 AI 整理，仅供参考", first.stdout)
         self.assertNotIn("张三", first.stdout)
         self.assertNotIn("13800138000", first.stdout)
         self.assertNotIn("legacy-local-dataset", first.stdout)
@@ -1013,7 +1176,7 @@ class EvidenceReportCliTest(unittest.TestCase):
                 "min_rank": 1100,
                 "coverage_min_rank": 1,
                 "coverage_max_rank": 10000,
-                "coverage_status": "partial",
+                "coverage_status": "reference",
                 "row_hash": admission_row_hash(original),
             },
             unit=None,
@@ -1040,6 +1203,12 @@ class EvidenceReportCliTest(unittest.TestCase):
             duplicate_result.items[0].source_ids,
             ("cli-s1", "cli-s2", "cli-s3"),
         )
+        self.assertEqual(
+            duplicate_result.items[0].evidence_status,
+            EvidenceStatus.REFERENCE,
+        )
+        self.assertEqual(duplicate_result.verified_rank_coverage, (1, 10000))
+        self.assertEqual(duplicate_result.observations, ())
 
         conflicting_fact = dict(fact)
         conflicting_fact["value"] = dict(fact["value"])
@@ -1095,7 +1264,7 @@ class EvidenceReportCliTest(unittest.TestCase):
             "school_level": "替换层次",
             "city_location": "替换城市",
             "province_location": "替换省份",
-            "majors_in_group": '["替换专业"]',
+            "majors_in_group": ("替换专业",),
         }
         for field, value in mutations.items():
             with self.subTest(field=field):

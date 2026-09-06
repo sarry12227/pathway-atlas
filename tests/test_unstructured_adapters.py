@@ -948,6 +948,8 @@ socket.getaddrinfo = blocked
 import scripts.adapters.pdf_text
 import scripts.adapters.ocr_rows
 import scripts.adapters.qr
+import scripts.adapters.pathway_extraction
+import scripts.adapters.pathway_bridge
 for name in tuple(sys.modules):
     if name == 'adapters' or name.startswith('adapters.'):
         sys.modules.pop(name)
@@ -955,6 +957,8 @@ sys.path.insert(0, {str(ROOT / 'scripts')!r})
 import adapters.pdf_text
 import adapters.ocr_rows
 import adapters.qr
+import adapters.pathway_extraction
+import adapters.pathway_bridge
 print('ok')
 """
         completed = subprocess.run(
@@ -966,6 +970,184 @@ print('ok')
         )
         self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
         self.assertEqual(completed.stdout.strip(), "ok")
+
+
+class PathwayUnstructuredProjectionTest(unittest.TestCase):
+    @staticmethod
+    def _pdf_projection(*, trailing_page):
+        from scripts.adapters.pathway_extraction import extract_pathway_policy
+        from scripts.adapters.pdf_text import PdfTextDocument, PdfTextPage
+        from tests.test_pathway_evidence_bridge import (
+            POLICY_FIELDS,
+            candidate,
+            plan,
+            policy_values,
+            profile,
+            task_for,
+        )
+
+        values = policy_values()
+        pages = (
+            PdfTextPage(
+                1,
+                "\n".join(str(values[field]) for field in POLICY_FIELDS),
+                "pdfplumber-text",
+            ),
+            trailing_page,
+        )
+        warnings = (
+            ("image-only-pages-present",)
+            if trailing_page.image_only
+            else ()
+        )
+        document = PdfTextDocument(
+            "sha256:" + "e" * 64,
+            len(pages),
+            pages,
+            warnings,
+        )
+        field_map = {
+            field: (1, str(values[field])) for field in POLICY_FIELDS
+        }
+        student = profile()
+        query_plan = plan(student)
+        return extract_pathway_policy(
+            profile=student,
+            plan=query_plan,
+            task=task_for(query_plan),
+            extraction=document,
+            field_map=field_map,
+            candidates=(candidate(),),
+        )
+
+    def test_unselected_image_only_pdf_page_forces_global_partial_coverage(self):
+        from scripts.adapters.pdf_text import PdfTextPage
+        from scripts.contracts import EvidenceStatus
+
+        projection = self._pdf_projection(
+            trailing_page=PdfTextPage(
+                2,
+                "",
+                "none",
+                ("image-only",),
+                True,
+            )
+        )
+
+        self.assertIs(projection.evidence_status, EvidenceStatus.PARTIAL)
+        self.assertEqual(projection.coverage_status, "partial")
+        self.assertIn("image-only-pages-present", projection.warnings)
+
+    def test_unselected_clean_text_pdf_page_keeps_complete_coverage(self):
+        from scripts.adapters.pdf_text import PdfTextPage
+        from scripts.contracts import EvidenceStatus
+
+        projection = self._pdf_projection(
+            trailing_page=PdfTextPage(2, "公开附录", "pdfplumber-text")
+        )
+
+        self.assertIs(projection.evidence_status, EvidenceStatus.OFFICIAL)
+        self.assertEqual(projection.coverage_status, "complete")
+
+    def test_pdf_pages_supply_exact_field_provenance_without_local_paths(self):
+        from scripts.adapters.pathway_extraction import extract_pathway_policy
+        from scripts.adapters.pdf_text import PdfTextDocument, PdfTextPage
+        from scripts.contracts import EvidenceStatus
+        from tests.test_pathway_evidence_bridge import (
+            POLICY_FIELDS,
+            candidate,
+            plan,
+            policy_values,
+            profile,
+            task_for,
+        )
+
+        values = policy_values()
+        pages = tuple(
+            PdfTextPage(index, str(values[field]), "pdfplumber-text")
+            for index, field in enumerate(POLICY_FIELDS, start=1)
+        )
+        document = PdfTextDocument(
+            "sha256:" + "d" * 64,
+            len(pages),
+            pages,
+        )
+        field_map = {
+            field: (index, str(values[field]))
+            for index, field in enumerate(POLICY_FIELDS, start=1)
+        }
+        student = profile()
+        query_plan = plan(student)
+        projection = extract_pathway_policy(
+            profile=student,
+            plan=query_plan,
+            task=task_for(query_plan),
+            extraction=document,
+            field_map=field_map,
+            candidates=(candidate(),),
+        )
+        self.assertIs(projection.evidence_status, EvidenceStatus.OFFICIAL)
+        self.assertTrue(
+            all(
+                locator.startswith("page[")
+                for item in projection.field_provenance
+                for locator in item.locators
+            )
+        )
+        self.assertNotIn(str(ROOT), json.dumps(projection.to_dict(), ensure_ascii=False))
+
+    def test_ocr_output_preserves_each_verified_cell_locator(self):
+        from scripts.adapters import CellStatus, ExtractedCoverage
+        from scripts.adapters.ocr_rows import OcrExtractedRow, OcrExtractedTable
+        from scripts.adapters.pathway_extraction import extract_pathway_policy
+        from scripts.contracts import EvidenceStatus
+        from tests.test_pathway_evidence_bridge import (
+            POLICY_FIELDS,
+            candidate,
+            plan,
+            policy_values,
+            profile,
+            task_for,
+        )
+
+        values = policy_values()
+        locations = {
+            field: f"page[1]/image[pathway-page]/bbox[{index},1,{index + 1},2]"
+            for index, field in enumerate(POLICY_FIELDS, start=1)
+        }
+        row = OcrExtractedRow(
+            values,
+            {field: CellStatus.EXACT for field in POLICY_FIELDS},
+            "page[1]/image[pathway-page]/bbox[1,1,30,3]",
+            1,
+            (),
+            locations,
+        )
+        table = OcrExtractedTable(
+            "pathway-ocr",
+            None,
+            None,
+            (row,),
+            ExtractedCoverage(),
+            (),
+            "host-ocr-rows",
+            {"columns": {field: [field] for field in POLICY_FIELDS}},
+        )
+        student = profile()
+        query_plan = plan(student)
+        projection = extract_pathway_policy(
+            profile=student,
+            plan=query_plan,
+            task=task_for(query_plan),
+            extraction=table,
+            field_map={field: field for field in POLICY_FIELDS},
+            candidates=(candidate(),),
+        )
+        self.assertIs(projection.evidence_status, EvidenceStatus.OFFICIAL)
+        self.assertEqual(
+            {item.field: item.locators[0] for item in projection.field_provenance},
+            locations,
+        )
 
 
 if __name__ == "__main__":

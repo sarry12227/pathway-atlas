@@ -964,7 +964,9 @@ def _check_full_tests(context: ReleaseContext) -> CheckResult:
             encoding="utf-8",
             errors="replace",
             env=_isolated_child_environment(),
-            timeout=600,
+            # The complete receipt/replay suite exceeds ten minutes on Windows.
+            # Keep a finite bound while allowing all tests to finish.
+            timeout=3600,
         )
     except (OSError, subprocess.TimeoutExpired):
         return CheckResult("full_tests", False, ("test-runner-failed",), 1)
@@ -974,6 +976,14 @@ def _check_full_tests(context: ReleaseContext) -> CheckResult:
     details: list[str] = []
     if completed.returncode != 0:
         details.append("test-suite-failed")
+        failed = re.findall(
+            r"^(?:FAIL|ERROR): ([A-Za-z0-9_]+) \(([A-Za-z0-9_.]+)\)",
+            output, re.MULTILINE,
+        )
+        details.extend(
+            f"failed-test:{owner}.{method}"
+            for method, owner in sorted(set(failed))[:100]
+        )
     if test_count == 0:
         details.append("test-count-unavailable")
     return CheckResult("full_tests", not details, tuple(details), test_count)

@@ -6,9 +6,9 @@ from pathlib import Path
 import unittest
 
 from scripts.contracts import EvidenceStatus
-from scripts.planning_profile import PlanningMode, PlanningProfile
+from scripts.planning_profile import PlanningMode, PlanningProfile, load_planning_profile
 from scripts.rank_calc import RankAnchor, RankScope
-from scripts.rank_locator import RankScenario, locate_rank
+from scripts.rank_locator import RankScenario, _locate_rank_legacy
 from scripts.validate_data import ValidatedScoreRow
 
 
@@ -176,37 +176,126 @@ def anchor_fact(profile: PlanningProfile, anchor: RankAnchor, **overrides) -> di
 
 
 class RankLocatorTest(unittest.TestCase):
-    def test_official_rank_bypasses_inference_and_returns_one_exact_scenario(self):
-        profile = PlanningProfile.create(profile_payload(official=True))
-        scenario = locate_rank(profile, evidence_facts=(), score_rows=score_rows())
-        self.assertEqual(scenario.status, EvidenceStatus.OFFICIAL)
-        self.assertEqual(scenario.basis, "official_province_rank")
-        self.assertEqual(
-            (scenario.optimistic_rank, scenario.central_rank, scenario.conservative_rank),
-            (18000, 18000, 18000),
-        )
-        self.assertEqual(scenario.confidence, "high")
+    def test_user_reported_province_rank_is_an_inferred_profile_interval(self):
+        profile = load_planning_profile(profile_payload(official=True))
+        scenario = _locate_rank_legacy(profile, evidence_facts=(), score_rows=score_rows())
+        self.assertEqual(scenario.status, EvidenceStatus.INFERRED)
+        self.assertEqual(scenario.basis, "profile_reported_province_rank")
+        self.assertEqual(scenario.source_ids, ("profile-reported-rank",))
+        self.assertLess(scenario.optimistic_rank, scenario.central_rank)
+        self.assertLess(scenario.central_rank, scenario.conservative_rank)
+        self.assertEqual(scenario.central_rank, 18000)
+        self.assertEqual(scenario.confidence, "low")
+        self.assertIn("profile_source_user_reported", scenario.reasons)
 
-    def test_official_score_uses_latest_available_score_table_not_target_year_guess(self):
+    def test_explicit_joint_exam_ranks_form_scope_weighted_numeric_scenarios(self):
+        official_payload = profile_payload(official=True)
+        official_payload["rank_observations"][0].update(
+            {
+                "rank": 18200,
+                "cohort_size": 210000,
+                "source": "official_score",
+            }
+        )
+        official = _locate_rank_legacy(
+            load_planning_profile(official_payload),
+            evidence_facts=(),
+            score_rows=(),
+        )
+
+        scenarios = {}
+        for scope in ("province_joint", "city_joint"):
+            payload = profile_payload()
+            joint_rank, joint_cohort = (
+                (18200, 210000)
+                if scope == "province_joint"
+                else (1820, 21000)
+            )
+            payload["rank_observations"].append(
+                {
+                    "exam_date": "2026-06-01",
+                    "scope": scope,
+                    "score": 610,
+                    "max_score": 750,
+                    "rank": joint_rank,
+                    "cohort_size": joint_cohort,
+                    "source": "joint_exam_report",
+                }
+            )
+            with self.subTest(scope=scope):
+                scenario = _locate_rank_legacy(
+                    load_planning_profile(payload),
+                    evidence_facts=(),
+                    score_rows=score_rows(),
+                )
+                self.assertEqual(scenario.status, EvidenceStatus.INFERRED)
+                self.assertEqual(scenario.basis, "profile_reported_province_rank")
+                self.assertEqual(scenario.central_rank, 17334)
+                self.assertEqual(scenario.source_ids, ("profile-reported-rank",))
+                self.assertIn("profile_source_joint_exam_report", scenario.reasons)
+                self.assertIn(f"profile_scope_{scope}", scenario.reasons)
+                scenarios[scope] = scenario
+
+        def width(item):
+            return item.conservative_rank - item.optimistic_rank
+
+        self.assertLess(width(official), width(scenarios["province_joint"]))
+        self.assertLess(
+            width(scenarios["province_joint"]),
+            width(scenarios["city_joint"]),
+        )
+        self.assertEqual(scenarios["province_joint"].confidence, "medium")
+        self.assertEqual(scenarios["city_joint"].confidence, "low")
+
+    def test_profile_reported_score_uses_latest_table_but_remains_inferred(self):
         payload = profile_payload(official=True)
         payload["rank_observations"][0]["rank"] = None
         payload["exam_year"] = 2028
         payload["grade"] = "高二"
-        profile = PlanningProfile.create(payload)
-        scenario = locate_rank(profile, evidence_facts=(), score_rows=score_rows())
-        self.assertEqual(scenario.status, EvidenceStatus.OFFICIAL)
-        self.assertEqual(scenario.basis, "official_score_table")
+        payload["score_basis"] = "赋分"
+        payload["rank_observations"][0]["source"] = "joint_exam_report"
+        profile = load_planning_profile(payload)
+        scenario = _locate_rank_legacy(profile, evidence_facts=(), score_rows=score_rows())
+        self.assertEqual(scenario.status, EvidenceStatus.INFERRED)
+        self.assertEqual(scenario.basis, "profile_reported_score_table")
         self.assertEqual(scenario.central_rank, 18000)
         self.assertEqual(scenario.contributing_years, (2026,))
-        self.assertIn("year_fallback:2", scenario.reasons)
+        self.assertIn("profile-reported-score", scenario.source_ids)
+        self.assertIn("year_fallback:0", scenario.reasons)
+
+    def test_score_basis_changes_profile_score_mapping_uncertainty(self):
+        assigned = profile_payload(official=True)
+        assigned["rank_observations"][0].update(
+            {"rank": None, "source": "joint_exam_report"}
+        )
+        assigned["score_basis"] = "赋分"
+        uncertain = json.loads(json.dumps(assigned, ensure_ascii=False))
+        uncertain["score_basis"] = "不确定"
+
+        assigned_scenario = _locate_rank_legacy(
+            load_planning_profile(assigned), evidence_facts=(), score_rows=score_rows()
+        )
+        uncertain_scenario = _locate_rank_legacy(
+            load_planning_profile(uncertain), evidence_facts=(), score_rows=score_rows()
+        )
+
+        assigned_width = (
+            assigned_scenario.conservative_rank - assigned_scenario.optimistic_rank
+        )
+        uncertain_width = (
+            uncertain_scenario.conservative_rank - uncertain_scenario.optimistic_rank
+        )
+        self.assertLess(assigned_width, uncertain_width)
+        self.assertIn("profile_score_basis_assigned", assigned_scenario.reasons)
+        self.assertIn("profile_score_basis_uncertain", uncertain_scenario.reasons)
 
     def test_school_anchor_ensemble_produces_ordered_inferred_scenario(self):
-        profile = PlanningProfile.create(profile_payload())
+        profile = load_planning_profile(profile_payload())
         anchors = (
             school_anchor("a", 2025, 110, 17000),
             school_anchor("b", 2026, 120, 18000),
         )
-        scenario = locate_rank(
+        scenario = _locate_rank_legacy(
             profile,
             evidence_facts=(),
             score_rows=score_rows(),
@@ -219,14 +308,76 @@ class RankLocatorTest(unittest.TestCase):
         self.assertEqual(scenario.contributing_years, (2025, 2026))
         self.assertIsNotNone(scenario.backtest_error)
 
+    def test_best_and_usual_school_ranks_constrain_anchor_scenarios(self):
+        baseline_payload = profile_payload()
+        baseline = load_planning_profile(baseline_payload)
+        stronger_best_payload = json.loads(
+            json.dumps(baseline_payload, ensure_ascii=False)
+        )
+        stronger_best_payload["best_rank"] = 40
+        weaker_usual_payload = json.loads(
+            json.dumps(baseline_payload, ensure_ascii=False)
+        )
+        weaker_usual_payload["usual_rank"] = 200
+        anchors = (
+            school_anchor("a", 2025, 110, 17000),
+            school_anchor("b", 2026, 120, 18000),
+        )
+
+        baseline_scenario = _locate_rank_legacy(
+            baseline, evidence_facts=(), score_rows=score_rows(), anchors=anchors
+        )
+        stronger_best = _locate_rank_legacy(
+            load_planning_profile(stronger_best_payload),
+            evidence_facts=(),
+            score_rows=score_rows(),
+            anchors=anchors,
+        )
+        weaker_usual = _locate_rank_legacy(
+            load_planning_profile(weaker_usual_payload),
+            evidence_facts=(),
+            score_rows=score_rows(),
+            anchors=anchors,
+        )
+
+        self.assertLess(
+            stronger_best.optimistic_rank, baseline_scenario.optimistic_rank
+        )
+        self.assertGreater(weaker_usual.central_rank, baseline_scenario.central_rank)
+        self.assertIn("profile_best_rank_bound", stronger_best.reasons)
+        self.assertIn("profile_usual_rank_anchor", weaker_usual.reasons)
+
+    def test_observation_source_changes_profile_rank_interval_reliability(self):
+        reported_payload = profile_payload(official=True)
+        reported_payload["rank_observations"][0]["source"] = "user_reported"
+        joint_payload = json.loads(json.dumps(reported_payload, ensure_ascii=False))
+        joint_payload["rank_observations"][0]["source"] = "joint_exam_report"
+
+        reported = _locate_rank_legacy(
+            load_planning_profile(reported_payload),
+            evidence_facts=(),
+            score_rows=score_rows(),
+        )
+        joint = _locate_rank_legacy(
+            load_planning_profile(joint_payload),
+            evidence_facts=(),
+            score_rows=score_rows(),
+        )
+
+        reported_width = reported.conservative_rank - reported.optimistic_rank
+        joint_width = joint.conservative_rank - joint.optimistic_rank
+        self.assertLess(joint_width, reported_width)
+        self.assertNotEqual(joint.confidence, reported.confidence)
+        self.assertIn("profile_source_joint_exam_report", joint.reasons)
+
     def test_authenticated_anchor_facts_bind_province_subject_class_and_profile(self):
-        profile = PlanningProfile.create(profile_payload())
+        profile = load_planning_profile(profile_payload())
         anchors = (
             school_anchor("a", 2025, 110, 17000),
             school_anchor("b", 2026, 120, 18000),
         )
         valid = tuple(anchor_fact(profile, anchor) for anchor in anchors)
-        scenario = locate_rank(profile, evidence_facts=valid, score_rows=score_rows())
+        scenario = _locate_rank_legacy(profile, evidence_facts=valid, score_rows=score_rows())
         self.assertEqual(scenario.status, EvidenceStatus.INFERRED)
         self.assertEqual(scenario.basis, "school_anchor_ensemble")
 
@@ -242,14 +393,14 @@ class RankLocatorTest(unittest.TestCase):
                 rejected = tuple(
                     anchor_fact(profile, anchor, **override) for anchor in anchors
                 )
-                missing = locate_rank(
+                missing = _locate_rank_legacy(
                     profile, evidence_facts=rejected, score_rows=score_rows()
                 )
                 self.assertEqual(missing.status, EvidenceStatus.MISSING)
                 self.assertEqual(missing.rejected_channel_count, 2)
 
     def test_joint_distribution_and_group_channels_use_backtest_weighted_median(self):
-        profile = PlanningProfile.create(profile_payload())
+        profile = load_planning_profile(profile_payload())
         facts = (
             channel_fact(
                 profile,
@@ -284,7 +435,7 @@ class RankLocatorTest(unittest.TestCase):
                 comparability=0.5,
             ),
         )
-        scenario = locate_rank(profile, evidence_facts=facts, score_rows=score_rows())
+        scenario = _locate_rank_legacy(profile, evidence_facts=facts, score_rows=score_rows())
         self.assertEqual(scenario.status, EvidenceStatus.INFERRED)
         self.assertLess(scenario.central_rank, 40000)
         self.assertEqual(
@@ -294,7 +445,7 @@ class RankLocatorTest(unittest.TestCase):
         self.assertEqual(scenario.channel_statuses, ("reference",))
 
     def test_untested_channels_are_capped_and_confidence_stays_low(self):
-        profile = PlanningProfile.create(profile_payload())
+        profile = load_planning_profile(profile_payload())
         facts = (
             channel_fact(
                 profile,
@@ -317,13 +468,13 @@ class RankLocatorTest(unittest.TestCase):
                 backtest_error=None,
             ),
         )
-        scenario = locate_rank(profile, evidence_facts=facts, score_rows=score_rows())
+        scenario = _locate_rank_legacy(profile, evidence_facts=facts, score_rows=score_rows())
         self.assertLess(scenario.central_rank, 50000)
         self.assertEqual(scenario.confidence, "low")
         self.assertIn("untested_weight_capped", scenario.reasons)
 
     def test_wrong_profile_context_is_rejected_before_combination(self):
-        profile = PlanningProfile.create(profile_payload())
+        profile = load_planning_profile(profile_payload())
         attacks = (
             {"province": "湖南"},
             {"subject_group": "物理"},
@@ -343,15 +494,15 @@ class RankLocatorTest(unittest.TestCase):
                     backtest_error=0.02,
                     **override,
                 )
-                scenario = locate_rank(
+                scenario = _locate_rank_legacy(
                     profile, evidence_facts=(fact,), score_rows=score_rows()
                 )
                 self.assertEqual(scenario.status, EvidenceStatus.MISSING)
                 self.assertEqual(scenario.rejected_channel_count, 1)
 
     def test_recent_exam_volatility_widens_but_never_reverses_bounds(self):
-        stable = PlanningProfile.create(profile_payload())
-        volatile = PlanningProfile.create(profile_payload(multiple=True))
+        stable = load_planning_profile(profile_payload())
+        volatile = load_planning_profile(profile_payload(multiple=True))
         stable_fact = channel_fact(
             stable,
             "stable",
@@ -372,10 +523,10 @@ class RankLocatorTest(unittest.TestCase):
             upper=0.14,
             backtest_error=0.02,
         )
-        stable_result = locate_rank(
+        stable_result = _locate_rank_legacy(
             stable, evidence_facts=(stable_fact,), score_rows=score_rows()
         )
-        volatile_result = locate_rank(
+        volatile_result = _locate_rank_legacy(
             volatile, evidence_facts=(volatile_fact,), score_rows=score_rows()
         )
         stable_width = stable_result.conservative_rank - stable_result.optimistic_rank
@@ -389,17 +540,17 @@ class RankLocatorTest(unittest.TestCase):
         payload["rank_observations"] = []
         payload["best_rank"] = None
         payload["usual_rank"] = None
-        profile = PlanningProfile.create(payload)
+        profile = load_planning_profile(payload)
         self.assertEqual(profile.mode, PlanningMode.LOW_INFORMATION)
-        scenario = locate_rank(profile, evidence_facts=(), score_rows=())
+        scenario = _locate_rank_legacy(profile, evidence_facts=(), score_rows=())
         self.assertEqual(scenario.status, EvidenceStatus.MISSING)
         self.assertIsNone(scenario.central_rank)
         self.assertEqual(scenario.confidence, "none")
 
     def test_result_is_factory_only_frozen_and_deterministic(self):
-        profile = PlanningProfile.create(profile_payload(official=True))
-        first = locate_rank(profile, evidence_facts=(), score_rows=score_rows())
-        second = locate_rank(profile, evidence_facts=(), score_rows=score_rows())
+        profile = load_planning_profile(profile_payload(official=True))
+        first = _locate_rank_legacy(profile, evidence_facts=(), score_rows=score_rows())
+        second = _locate_rank_legacy(profile, evidence_facts=(), score_rows=score_rows())
         self.assertEqual(first.to_dict(), second.to_dict())
         json.dumps(first.to_dict(), ensure_ascii=False, allow_nan=False)
         with self.assertRaises(TypeError):
@@ -415,12 +566,32 @@ class RankLocatorTest(unittest.TestCase):
         )
         self.assertEqual(schema["$schema"], "https://json-schema.org/draft/2020-12/schema")
         self.assertFalse(schema["additionalProperties"])
-        profile = PlanningProfile.create(profile_payload(official=True))
-        payload = locate_rank(
+        profile = load_planning_profile(profile_payload(official=True))
+        payload = _locate_rank_legacy(
             profile, evidence_facts=(), score_rows=score_rows()
         ).to_dict()
         self.assertEqual(set(schema["required"]), set(payload))
         self.assertEqual(set(schema["properties"]), set(payload))
+        self.assertLessEqual(
+            set(payload["channel_statuses"]),
+            set(schema["properties"]["channel_statuses"]["items"]["enum"]),
+        )
+        self.assertEqual(
+            set(schema["properties"]["basis"]["enum"]),
+            {
+                "authenticated_interval",
+                "authenticated_interval_intersection",
+                "conflicting_authenticated_channels",
+                "multi_channel_ensemble",
+                "official_province_rank",
+                "official_score_table",
+                "profile_reported_province_rank",
+                "profile_reported_score_table",
+                "school_anchor_ensemble",
+                "school_anchor_interval",
+                "unavailable",
+            },
+        )
 
 
 if __name__ == "__main__":

@@ -10,6 +10,8 @@ from __future__ import annotations
 from dataclasses import dataclass, fields, is_dataclass
 from datetime import date
 from enum import Enum
+import hashlib
+import json
 import re
 from typing import Any, Iterable
 
@@ -22,14 +24,22 @@ if __package__:
         OrdinaryBatchPolicy,
         RecommendationItem,
         RecommendationResult,
+        SchoolObservation,
     )
+    from .action_plan import ActionItem, build_action_plan
+    from .planning_profile import PlanningProfile
     from .path_recommend import (
+        PATHWAY_DISPLAY_EVIDENCE_FIELDS,
+        PathwayFieldEvidence,
         PathwayItem,
         PathwayResult,
+        validate_pathway_display_evidence,
+        validate_pathway_field_evidence,
         validate_public_output_text,
     )
     from .rank_calc import RankEstimate
     from .rank_locator import RankScenario
+    from .school_recommend import SchoolDecisionResult
     from .validate_evidence import ValidatedEvidenceSnapshot
 else:  # pragma: no cover - direct scripts-path compatibility
     from contracts import (
@@ -40,10 +50,22 @@ else:  # pragma: no cover - direct scripts-path compatibility
         OrdinaryBatchPolicy,
         RecommendationItem,
         RecommendationResult,
+        SchoolObservation,
     )
-    from path_recommend import PathwayItem, PathwayResult, validate_public_output_text
+    from action_plan import ActionItem, build_action_plan
+    from planning_profile import PlanningProfile
+    from path_recommend import (
+        PATHWAY_DISPLAY_EVIDENCE_FIELDS,
+        PathwayFieldEvidence,
+        PathwayItem,
+        PathwayResult,
+        validate_pathway_display_evidence,
+        validate_pathway_field_evidence,
+        validate_public_output_text,
+    )
     from rank_calc import RankEstimate
     from rank_locator import RankScenario
+    from school_recommend import SchoolDecisionResult
     from validate_evidence import ValidatedEvidenceSnapshot
 
 
@@ -51,6 +73,7 @@ _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _SESSION_ID = re.compile(r"^[0-9a-f]{32}$")
 _HASH = re.compile(r"^sha256:[0-9a-f]{64}$")
 _REASON = re.compile(r"^[a-z][a-z0-9_-]{0,127}$")
+_TRACE_FIELD = re.compile(r"^[a-z][a-z0-9_.]{0,127}$")
 _SUBJECT_MODES = frozenset({"3+1+2", "3+3"})
 _GRADES = frozenset({"高一", "高二", "高三"})
 _ACCEPTED_EXACT = frozenset(
@@ -99,6 +122,41 @@ _CONFIDENCE_LABEL = {
     EvidenceStatus.MISSING: "无",
     EvidenceStatus.MASKED: "无",
     EvidenceStatus.CONFLICT: "无",
+}
+_COVERAGE_LABEL = {
+    "complete": "完整",
+    "partial": "部分覆盖",
+    "missing": "缺失",
+    "conflict": "冲突",
+}
+_PATHWAY_FIELD_LABEL = {
+    "title": "路径",
+    "institution": "院校",
+    "status": "运行状态",
+    "eligibility": "资格代码",
+    "investment_decision": "投入结论",
+    "qualification_status": "资格状态",
+    "evidence_status": "政策证据状态",
+    "policy_source_ids": "政策来源编号",
+    "source_ids": "政策来源编号",
+    "professional_options": "专业选项",
+    "training_arrangements": "培养安排",
+    "transition_rules": "转段规则",
+    "outcomes": "毕业/升学出口",
+    "service_employment_obligations": "服务/就业义务",
+    "penalty_exit_rules": "退出/违约规则",
+    "fees_and_subsidies": "费用/补助",
+    "satisfied_conditions": "已满足条件",
+    "missing_constraints": "待核实约束",
+    "timeline": "时间线",
+    "preparation_actions": "当前行动",
+    "decision_reasons": "决策理由",
+    "calculation_basis": "计算依据",
+    "target_rank": "路径目标位次",
+    "target_year": "目标年份",
+    "data_year": "数据年份",
+    "fallback_distance": "回溯年距",
+    "year_basis": "年份依据",
 }
 _QUERY_COVERAGE = {
     CapabilityTier.FULL: "联网检索、网页读取与视觉识别能力可用",
@@ -222,9 +280,14 @@ def _year_tuple(value: Any, name: str) -> tuple[int, ...]:
     return tuple(sorted(years))
 
 
-def _date_tuple(value: Any, name: str) -> tuple[str, ...]:
+def _date_tuple(
+    value: Any,
+    name: str,
+    *,
+    allow_empty: bool = False,
+) -> tuple[str, ...]:
     values = _text_tuple(value, name, unique=True, sort=True)
-    if not values:
+    if not values and not allow_empty:
         raise ValueError(f"{name} must not be empty")
     for item in values:
         if re.fullmatch(r"\d{4}-\d{2}-\d{2}", item) is None:
@@ -271,37 +334,38 @@ def _recommendation_basis(data_year: int, min_rank: int, profile_rank: int) -> s
     return f"{data_year} 年已验证投档记录；最低位次与用户位次差 Δ={delta:+d}"
 
 
-def _canonical_action_items(
-    recommendation_status: EvidenceStatus,
-    recommendations: tuple["ReportRecommendation", ...],
-    rank: RankEstimate | RankScenario | None,
-    pathways_available: bool,
-    pathways: tuple["ReportPathway", ...],
-) -> tuple[str, ...]:
-    actions: list[str] = []
-    if recommendation_status in {
-        EvidenceStatus.CONFLICT,
-        EvidenceStatus.MASKED,
-        EvidenceStatus.PARTIAL,
-        EvidenceStatus.MISSING,
-        EvidenceStatus.INFERRED,
-    }:
-        actions.append("优先补齐或复核冲突、屏蔽、部分覆盖及缺失的普通批证据")
-    if rank is None or rank.status not in {
-        EvidenceStatus.OFFICIAL,
-        EvidenceStatus.INFERRED,
-    }:
-        actions.append("如需校排名折算，补充版本明确且来源可核验的喜报锚点")
-    elif isinstance(rank, RankScenario) and rank.status is EvidenceStatus.INFERRED:
-        actions.append("获得省级正式成绩后，用官方一分一段位次替换当前推断并重算院校池")
-    if recommendations:
-        actions.append("按冲稳保分层逐校核对当年招生章程、专业组与选科要求")
-    else:
-        actions.append("普通批未形成数值推荐前，不依据空结果排除院校")
-    if not pathways_available or any(item.status != "formal" for item in pathways):
-        actions.append("逐项核验多元路径资格、时间节点与待补约束后再决定是否申报")
-    actions.append("正式填报或申报前，以省教育考试院和高校当年正式信息作最终复核")
-    return tuple(actions)
+def _action_digest(actions: tuple[ActionItem, ...]) -> str:
+    payload = [item.to_dict() for item in actions]
+    encoded = json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False
+    ).encode("utf-8")
+    return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
+
+
+@dataclass(frozen=True)
+class ActionTimelinePhase(_Serializable):
+    """One phase of the non-priority remainder of an action plan."""
+
+    phase: str
+    actions: tuple[ActionItem, ...]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "phase", _text(self.phase, "timeline phase"))
+        actions = tuple(self.actions)
+        if not actions or not all(isinstance(item, ActionItem) for item in actions):
+            raise TypeError("timeline actions must contain ActionItem values")
+        if any(item.phase != self.phase for item in actions):
+            raise ValueError("timeline actions must match their phase")
+        object.__setattr__(self, "actions", actions)
+
+
+def _timeline(actions: tuple[ActionItem, ...]) -> tuple[ActionTimelinePhase, ...]:
+    phases: list[ActionTimelinePhase] = []
+    for phase in ("现在", "本学期", "下一阶段", "报名前", "出分后"):
+        grouped = tuple(item for item in actions if item.phase == phase)
+        if grouped:
+            phases.append(ActionTimelinePhase(phase=phase, actions=grouped))
+    return tuple(phases)
 
 
 @dataclass(frozen=True)
@@ -372,6 +436,7 @@ class ReportRecommendation(_Serializable):
     required_year_majority: int = 1
     scenario_reach_counts: tuple[int, int, int] = (0, 0, 0)
     scenario_confidence: str = "official"
+    fit_evidence_statuses: tuple[EvidenceStatus, ...] = ()
 
     def __post_init__(self) -> None:
         if self.strategy not in {"冲", "稳", "保", "观察"}:
@@ -429,6 +494,63 @@ class ReportRecommendation(_Serializable):
         object.__setattr__(self, "scenario_reach_counts", counts)
         if self.scenario_confidence not in {"official", "high", "medium", "low"}:
             raise ValueError("unsupported scenario confidence")
+        try:
+            fit_statuses = tuple(
+                EvidenceStatus(value) for value in self.fit_evidence_statuses
+            )
+        except (TypeError, ValueError):
+            raise ValueError("fit_evidence_statuses contains an invalid status") from None
+        if len(fit_statuses) != len(set(fit_statuses)):
+            raise ValueError("fit_evidence_statuses must be unique")
+        object.__setattr__(self, "fit_evidence_statuses", fit_statuses)
+
+
+@dataclass(frozen=True)
+class ReportSchoolObservation(_Serializable):
+    """Non-numeric report projection of a partial-coverage school row."""
+
+    school_name: str
+    school_level: str
+    city: str
+    data_year: int
+    source_ids: tuple[str, ...]
+    evidence_status: EvidenceStatus
+    reason_code: str
+
+    def __post_init__(self) -> None:
+        for name in ("school_name", "school_level", "city"):
+            value = getattr(self, name)
+            if value == "" and name in {"school_level", "city"}:
+                continue
+            object.__setattr__(self, name, _text(value, name))
+        object.__setattr__(
+            self,
+            "data_year",
+            _positive_int(self.data_year, "data_year", minimum=2000),
+        )
+        if self.data_year > 2100:
+            raise ValueError("data_year must not exceed 2100")
+        object.__setattr__(
+            self,
+            "source_ids",
+            _text_tuple(
+                self.source_ids,
+                "source_ids",
+                safe_ids=True,
+                unique=True,
+                sort=True,
+            ),
+        )
+        if not self.source_ids:
+            raise ValueError("school observations require source IDs")
+        if _status(self.evidence_status) is not EvidenceStatus.PARTIAL:
+            raise ValueError("school observations must remain partial")
+        object.__setattr__(self, "evidence_status", EvidenceStatus.PARTIAL)
+        reason = _text(self.reason_code, "reason_code")
+        assert reason is not None
+        if _REASON.fullmatch(reason) is None:
+            raise ValueError("school observation reason_code is invalid")
+        object.__setattr__(self, "reason_code", reason)
 
 
 @dataclass(frozen=True)
@@ -450,6 +572,8 @@ class ReportPathway(_Serializable):
     source_ids: tuple[str, ...]
     evidence_status: EvidenceStatus
     calculation_basis: str
+    field_evidence: tuple[PathwayFieldEvidence, ...]
+    field_evidence_context: str
     target_rank: int | None
     investment_decision: str = "观察"
     qualification_status: str = "待核验"
@@ -460,6 +584,7 @@ class ReportPathway(_Serializable):
     data_year: int | None = None
     fallback_distance: int = 0
     year_basis: str = "unverified"
+    decision_reasons: tuple["ReportDecisionReason", ...] = ()
 
     def __post_init__(self) -> None:
         for name in ("policy_id", "pathway_type", "title", "institution", "status", "eligibility", "calculation_basis"):
@@ -520,9 +645,13 @@ class ReportPathway(_Serializable):
             "source_ids",
             _text_tuple(self.source_ids, "source_ids", safe_ids=True, unique=True, sort=True),
         )
-        if not self.source_ids:
-            raise ValueError("pathways require policy source IDs")
         object.__setattr__(self, "evidence_status", _status(self.evidence_status))
+        if not self.source_ids and not (
+            self.status == "pending_verification"
+            and self.evidence_status
+            in {EvidenceStatus.MISSING, EvidenceStatus.MASKED}
+        ):
+            raise ValueError("pathways require policy source IDs")
         minimum_sources = {
             EvidenceStatus.OFFICIAL: 1,
             EvidenceStatus.CORROBORATED: 2,
@@ -560,6 +689,121 @@ class ReportPathway(_Serializable):
             expected_basis = "current_year" if distance == 0 else "historical_fallback"
             if self.year_basis != expected_basis:
                 raise ValueError("pathway year basis is inconsistent")
+        reasons = tuple(self.decision_reasons)
+        if reasons and (
+            len(reasons) != 8
+            or not all(isinstance(item, ReportDecisionReason) for item in reasons)
+        ):
+            raise ValueError("pathway decision trace must contain all eight reasons")
+        object.__setattr__(self, "decision_reasons", reasons)
+        object.__setattr__(
+            self,
+            "field_evidence",
+            validate_pathway_display_evidence(self, owner="report pathway"),
+        )
+
+
+def pathway_field_evidence_lines(item: ReportPathway) -> tuple[str, ...]:
+    """Return a renderer-neutral, exact-order audit for every displayed field."""
+
+    if not isinstance(item, ReportPathway):
+        raise TypeError("pathway evidence audit requires a ReportPathway")
+    records = validate_pathway_display_evidence(
+        item, owner="report pathway renderer"
+    )
+    return tuple(
+        "；".join(
+            (
+                f"字段：{record.field}（{_PATHWAY_FIELD_LABEL.get(record.field, record.field)}）",
+                f"证据状态：{_STATUS_LABEL[record.status]}",
+                f"覆盖：{_COVERAGE_LABEL[record.coverage]}",
+                f"来源编号：{'、'.join(record.source_ids) or '无'}",
+                f"证据定位：{'、'.join(record.locators) or '无'}",
+                f"抽取方式：{'、'.join(record.extraction_methods) or '无'}",
+                f"证据方法：{record.evidence_method}",
+                f"上游字段：{'、'.join(record.upstream_fields) or '无'}",
+                f"画像字段：{'、'.join(record.profile_fields) or '无'}",
+                f"提示：{'；'.join(record.warnings) or '无'}",
+                f"来源类型：{record.origin.value}",
+                f"值绑定：{record.value_digest}",
+                f"上下文绑定：{record.context_binding}",
+                f"记录摘要：{record.digest}",
+            )
+        )
+        for record in records
+    )
+
+
+@dataclass(frozen=True)
+class ReportDecisionReason(_Serializable):
+    dimension: str
+    code: str
+    effect: str
+    explanation: str
+    input_fields: tuple[str, ...]
+    source_ids: tuple[str, ...]
+    evidence_status: EvidenceStatus | None = None
+
+    def __post_init__(self) -> None:
+        for name in ("dimension", "code", "effect", "explanation"):
+            object.__setattr__(self, name, _text(getattr(self, name), name))
+        if self.effect not in {"supports", "blocks", "uncertain"}:
+            raise ValueError("school reason effect is unsupported")
+        if _SAFE_ID.fullmatch(self.code) is None:
+            raise ValueError("school reason code must use the safe-ID syntax")
+        input_fields = tuple(self.input_fields)
+        if (
+            len(input_fields) != len(set(input_fields))
+            or any(
+                not isinstance(item, str) or _TRACE_FIELD.fullmatch(item) is None
+                for item in input_fields
+            )
+        ):
+            raise ValueError(
+                "input_fields must contain only unique decision-trace fields"
+            )
+        object.__setattr__(self, "input_fields", input_fields)
+        object.__setattr__(
+            self,
+            "source_ids",
+            _text_tuple(self.source_ids, "source_ids", safe_ids=True, unique=True, sort=True),
+        )
+        if self.evidence_status is not None:
+            object.__setattr__(
+                self, "evidence_status", _status(self.evidence_status)
+            )
+            if self.evidence_status in {
+                EvidenceStatus.OFFICIAL,
+                EvidenceStatus.CORROBORATED,
+                EvidenceStatus.REFERENCE,
+                EvidenceStatus.CONFLICT,
+                EvidenceStatus.PARTIAL,
+                EvidenceStatus.INFERRED,
+            } and not self.source_ids:
+                raise ValueError(
+                    "decision reason evidence status requires source IDs"
+                )
+
+
+@dataclass(frozen=True)
+class ReportSchoolDecision(_Serializable):
+    school_name: str
+    outcome: str
+    order: int | None
+    reasons: tuple[ReportDecisionReason, ...]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "school_name", _text(self.school_name, "school_name"))
+        if self.outcome not in {"included", "excluded"}:
+            raise ValueError("school decision outcome is unsupported")
+        if self.outcome == "included":
+            object.__setattr__(self, "order", _positive_int(self.order, "order"))
+        elif self.order is not None:
+            raise ValueError("excluded school decisions cannot have an order")
+        reasons = tuple(self.reasons)
+        if not reasons or not all(isinstance(item, ReportDecisionReason) for item in reasons):
+            raise TypeError("school decisions require projected reason records")
+        object.__setattr__(self, "reasons", reasons)
 
 
 @dataclass(frozen=True, init=False)
@@ -574,7 +818,10 @@ class ReportModel(_Serializable):
     python_version: str
     optional_modules: tuple[str, ...]
     recommendations: tuple[ReportRecommendation, ...]
-    ordinary_batch_policy: OrdinaryBatchPolicy
+    school_observations: tuple[ReportSchoolObservation, ...]
+    ordinary_batch_policy: OrdinaryBatchPolicy | None
+    recommendation_policy_status: str
+    school_decisions: tuple[ReportSchoolDecision, ...]
     recommendation_coverage_status: EvidenceStatus
     verified_rank_coverage: tuple[int, int] | None
     recommendation_empty_reason: str | None
@@ -600,7 +847,10 @@ class ReportModel(_Serializable):
     source_ids: tuple[str, ...]
     evidence_status: EvidenceStatus
     warnings: tuple[str, ...]
-    action_items: tuple[str, ...]
+    action_items: tuple[ActionItem, ...]
+    action_plan_digest: str
+    priority_actions: tuple[ActionItem, ...]
+    action_timeline: tuple[ActionTimelinePhase, ...]
 
     def __init__(self) -> None:
         raise TypeError("ReportModel is factory-only")
@@ -651,12 +901,28 @@ class ReportModel(_Serializable):
             self.optional_modules,
         )
 
-        if not isinstance(self.ordinary_batch_policy, OrdinaryBatchPolicy):
-            raise TypeError("ordinary_batch_policy must be an OrdinaryBatchPolicy")
-        ordinary_batch_policy = OrdinaryBatchPolicy(
-            **self.ordinary_batch_policy.to_dict()
-        )
+        if self.recommendation_policy_status not in {
+            "ordinary_batch_policy_available",
+            "rank_delta_policy_unavailable",
+        }:
+            raise ValueError("recommendation policy status is unsupported")
+        ordinary_batch_policy = self.ordinary_batch_policy
+        if self.recommendation_policy_status == "ordinary_batch_policy_available":
+            if not isinstance(ordinary_batch_policy, OrdinaryBatchPolicy):
+                raise TypeError("available ordinary-batch policy must be explicit")
+            ordinary_batch_policy = OrdinaryBatchPolicy(
+                **ordinary_batch_policy.to_dict()
+            )
+        elif ordinary_batch_policy is not None:
+            raise ValueError("unavailable rank-delta policy cannot carry placeholder values")
         object.__setattr__(self, "ordinary_batch_policy", ordinary_batch_policy)
+
+        school_decisions = tuple(self.school_decisions)
+        if not all(isinstance(item, ReportSchoolDecision) for item in school_decisions):
+            raise TypeError("school_decisions must contain report decision records")
+        if len({item.school_name for item in school_decisions}) != len(school_decisions):
+            raise ValueError("school decisions must be unique by school")
+        object.__setattr__(self, "school_decisions", school_decisions)
 
         if isinstance(self.recommendations, (str, bytes, bytearray)):
             raise TypeError("recommendations must be a collection")
@@ -669,6 +935,21 @@ class ReportModel(_Serializable):
         if len({(item.school_name, item.strategy) for item in recommendations}) != len(recommendations):
             raise ValueError("recommendations must be unique by school and strategy")
         object.__setattr__(self, "recommendations", recommendations)
+        school_observations = tuple(self.school_observations)
+        if not all(
+            isinstance(item, ReportSchoolObservation)
+            for item in school_observations
+        ):
+            raise TypeError(
+                "school_observations must contain report observation records"
+            )
+        observation_keys = tuple(
+            (item.school_name, item.data_year, item.source_ids)
+            for item in school_observations
+        )
+        if len(observation_keys) != len(set(observation_keys)):
+            raise ValueError("school observations must be unique")
+        object.__setattr__(self, "school_observations", school_observations)
         coverage_status = _status(self.recommendation_coverage_status)
         object.__setattr__(self, "recommendation_coverage_status", coverage_status)
         if self.verified_rank_coverage is not None:
@@ -697,6 +978,11 @@ class ReportModel(_Serializable):
         if set(self.usable_years).difference(self.input_years):
             raise ValueError("usable years must be a subset of input years")
         scenario_rank = self.rank if isinstance(self.rank, RankScenario) else None
+        if (
+            self.recommendation_policy_status == "rank_delta_policy_unavailable"
+            and scenario_rank is None
+        ):
+            raise ValueError("rank-delta-free recommendations require a rank scenario")
         if recommendations:
             if self.profile.rank is None:
                 raise ValueError("numeric recommendations require a profile rank")
@@ -709,6 +995,13 @@ class ReportModel(_Serializable):
                 raise ValueError("non-empty recommendations cannot carry an empty reason")
             if coverage_status not in _ACCEPTED_EXACT | {EvidenceStatus.PARTIAL}:
                 raise ValueError("numeric recommendations require usable aggregate evidence")
+            if any(
+                item.evidence_status not in _ACCEPTED_EXACT
+                for item in recommendations
+            ):
+                raise ValueError(
+                    "numeric recommendations require accepted exact evidence"
+                )
             aggregate_strength = _ACCEPTED_STRENGTH.get(coverage_status)
             if aggregate_strength is not None and any(
                 _ACCEPTED_STRENGTH[item.evidence_status] < aggregate_strength
@@ -718,8 +1011,8 @@ class ReportModel(_Serializable):
             if scenario_rank is not None:
                 if (
                     scenario_rank.central_rank != self.profile.rank
-                    or scenario_rank.optimistic_rank != lower
-                    or scenario_rank.conservative_rank != upper
+                    or not lower <= scenario_rank.optimistic_rank
+                    or not scenario_rank.conservative_rank <= upper
                 ):
                     raise ValueError("rank scenario does not match report profile or coverage")
                 for item in recommendations:
@@ -773,11 +1066,36 @@ class ReportModel(_Serializable):
                         raise ValueError("recommendation calculation basis is not canonical")
                     if item.data_year not in self.usable_years:
                         raise ValueError("recommendation year must be usable")
-            for strategy, cap in ordinary_batch_policy.tier_caps.items():
-                if sum(item.strategy == strategy for item in recommendations) > cap:
-                    raise ValueError("recommendation tier exceeds ordinary batch policy cap")
+            if ordinary_batch_policy is not None:
+                for strategy, cap in ordinary_batch_policy.tier_caps.items():
+                    if sum(item.strategy == strategy for item in recommendations) > cap:
+                        raise ValueError("recommendation tier exceeds ordinary batch policy cap")
         elif self.recommendation_empty_reason is None:
             raise ValueError("empty recommendations require an explicit stable reason")
+        if school_observations and not recommendations:
+            if self.recommendation_empty_reason not in {
+                "partial_observations_only",
+                "rank_outside_verified_coverage",
+            }:
+                raise ValueError(
+                    "observation-only school output requires its stable empty reason"
+                )
+        elif self.recommendation_empty_reason == "partial_observations_only":
+            raise ValueError(
+                "partial observation empty reason requires school observations"
+            )
+
+        included_decisions = tuple(
+            item.school_name
+            for item in sorted(
+                (item for item in school_decisions if item.outcome == "included"),
+                key=lambda item: item.order,
+            )
+        )
+        if school_decisions and included_decisions != tuple(
+            item.school_name for item in recommendations
+        ):
+            raise ValueError("school decision trace does not match recommendations")
         if coverage_status not in _ACCEPTED_EXACT and not self.recommendation_warnings:
             raise ValueError("degraded recommendation coverage requires a warning")
         if self.recommendation_empty_reason == "missing_verified_coverage" and self.verified_rank_coverage is not None:
@@ -786,7 +1104,13 @@ class ReportModel(_Serializable):
             if self.verified_rank_coverage is None:
                 raise ValueError("outside-coverage reason requires a known interval")
             lower, upper = self.verified_rank_coverage
-            if self.profile.rank is not None and lower <= self.profile.rank <= upper:
+            if scenario_rank is not None:
+                if (
+                    lower <= scenario_rank.optimistic_rank
+                    and scenario_rank.conservative_rank <= upper
+                ):
+                    raise ValueError("outside-coverage reason contradicts rank scenario")
+            elif self.profile.rank is not None and lower <= self.profile.rank <= upper:
                 raise ValueError("outside-coverage reason contradicts profile rank")
         if self.recommendation_empty_reason == "no_match_within_verified_coverage":
             if self.verified_rank_coverage is None:
@@ -901,7 +1225,26 @@ class ReportModel(_Serializable):
         if not isinstance(manifest_hash, str) or _HASH.fullmatch(manifest_hash) is None:
             raise ValueError("manifest hash is invalid")
         object.__setattr__(self, "manifest_hash", manifest_hash)
-        retrieval_dates = _date_tuple(self.retrieval_dates, "retrieval_dates")
+        pathways_with_retrieved_evidence = tuple(
+            item
+            for item in pathways
+            if item.source_ids or item.data_year is not None
+        )
+        allow_empty_dates = (
+            not recommendations
+            and not school_observations
+            and not pathways_with_retrieved_evidence
+            and not self.source_ids
+            and (
+                self.rank is None
+                or self.rank.status in {EvidenceStatus.MISSING, EvidenceStatus.CONFLICT}
+            )
+        )
+        retrieval_dates = _date_tuple(
+            self.retrieval_dates,
+            "retrieval_dates",
+            allow_empty=allow_empty_dates,
+        )
         if any(int(item[:4]) != self.profile.current_year for item in retrieval_dates):
             raise ValueError("retrieval dates must match the profile current year")
         object.__setattr__(self, "retrieval_dates", retrieval_dates)
@@ -912,6 +1255,17 @@ class ReportModel(_Serializable):
             for item in recommendations
             for source_id in item.source_ids
         }
+        expected_sources.update(
+            source_id
+            for item in school_observations
+            for source_id in item.source_ids
+        )
+        expected_sources.update(
+            source_id
+            for decision in school_decisions
+            for reason in decision.reasons
+            for source_id in reason.source_ids
+        )
         if self.rank is not None:
             expected_sources.update(
                 self.rank.source_ids
@@ -926,6 +1280,17 @@ class ReportModel(_Serializable):
         object.__setattr__(self, "source_ids", source_ids)
 
         statuses = [coverage_status]
+        statuses.extend(
+            status
+            for item in recommendations
+            for status in item.fit_evidence_statuses
+        )
+        statuses.extend(
+            reason.evidence_status
+            for decision in school_decisions
+            for reason in decision.reasons
+            if reason.evidence_status is not None
+        )
         statuses.append(self.rank.status if self.rank is not None else EvidenceStatus.MISSING)
         if pathways:
             statuses.extend(item.evidence_status for item in pathways)
@@ -960,17 +1325,27 @@ class ReportModel(_Serializable):
         if warnings != required_warnings:
             raise ValueError("warnings must be the exact required degradation union")
         object.__setattr__(self, "warnings", warnings)
-        expected_actions = _canonical_action_items(
-            coverage_status,
-            recommendations,
-            self.rank,
-            self.pathways_available,
-            pathways,
-        )
-        actions = _text_tuple(self.action_items, "action_items")
-        if actions != expected_actions:
-            raise ValueError("action_items must be the canonical deterministic actions")
+        actions = tuple(self.action_items)
+        if not actions or not all(isinstance(item, ActionItem) for item in actions):
+            raise TypeError("action_items must contain factory-built ActionItem values")
+        if len({item.action_id for item in actions}) != len(actions):
+            raise ValueError("action_items must have unique action IDs")
+        if self.action_plan_digest != _action_digest(actions):
+            raise ValueError("action_plan_digest must bind the complete deterministic action plan")
+        priority = tuple(self.priority_actions)
+        if not 3 <= len(priority) <= 7 or priority != actions[: len(priority)]:
+            raise ValueError("priority_actions must be the first three to seven actions")
+        if not all(isinstance(item, ActionItem) for item in priority):
+            raise TypeError("priority_actions must contain ActionItem values")
+        timeline = tuple(self.action_timeline)
+        if not all(isinstance(item, ActionTimelinePhase) for item in timeline):
+            raise TypeError("action_timeline must contain phase groups")
+        expected_timeline = _timeline(actions[len(priority) :])
+        if timeline != expected_timeline:
+            raise ValueError("action_timeline must group the action-plan remainder by phase")
         object.__setattr__(self, "action_items", actions)
+        object.__setattr__(self, "priority_actions", priority)
+        object.__setattr__(self, "action_timeline", timeline)
 
 
 def _validate_capability_snapshot(
@@ -1118,12 +1493,28 @@ def _project_recommendation(
         required_year_majority=item.required_year_majority,
         scenario_reach_counts=item.scenario_reach_counts,
         scenario_confidence=item.scenario_confidence,
+        fit_evidence_statuses=item.fit_evidence_statuses,
+    )
+
+
+def _project_school_observation(item: SchoolObservation) -> ReportSchoolObservation:
+    if not isinstance(item, SchoolObservation):
+        raise TypeError("school observations must use the typed contract")
+    return ReportSchoolObservation(
+        school_name=item.school_name,
+        school_level=item.school_level,
+        city=item.city,
+        data_year=item.data_year,
+        source_ids=item.source_ids,
+        evidence_status=item.evidence_status,
+        reason_code=item.reason_code,
     )
 
 
 def _project_pathway(item: PathwayItem) -> ReportPathway:
     if not isinstance(item, PathwayItem):
         raise TypeError("pathway items must be PathwayItem records")
+    validate_pathway_display_evidence(item, owner="pathway report projection")
     return ReportPathway(
         policy_id=item.policy_id,
         pathway_type=item.pathway_type,
@@ -1142,6 +1533,8 @@ def _project_pathway(item: PathwayItem) -> ReportPathway:
         source_ids=item.policy_source_ids,
         evidence_status=item.evidence_status,
         calculation_basis=item.calculation_basis,
+        field_evidence=item.field_evidence,
+        field_evidence_context=item.field_evidence_context,
         target_rank=item.target_rank,
         investment_decision=item.investment_decision,
         qualification_status=item.qualification_status,
@@ -1152,15 +1545,50 @@ def _project_pathway(item: PathwayItem) -> ReportPathway:
         data_year=item.data_year,
         fallback_distance=item.fallback_distance,
         year_basis=item.year_basis,
+        decision_reasons=tuple(
+            ReportDecisionReason(
+                dimension=reason.dimension,
+                code=reason.code,
+                effect=reason.effect,
+                explanation=reason.explanation,
+                input_fields=reason.input_fields,
+                source_ids=reason.source_ids,
+                evidence_status=reason.evidence_status,
+            )
+            for reason in item.decision_reasons
+        ),
+    )
+
+
+def _project_school_decision(item: Any) -> ReportSchoolDecision:
+    reasons = tuple(
+        ReportDecisionReason(
+            dimension=reason.dimension,
+            code=reason.code,
+            effect=reason.effect,
+            explanation=reason.explanation,
+            input_fields=reason.input_fields,
+            source_ids=reason.source_ids,
+            evidence_status=reason.evidence_status,
+        )
+        for reason in item.reasons
+    )
+    return ReportSchoolDecision(
+        school_name=item.school_name,
+        outcome=item.outcome,
+        order=item.order,
+        reasons=reasons,
     )
 
 
 def build_report_model(
     profile: StudentProfile,
-    recommendations: RecommendationResult,
+    recommendations: RecommendationResult | SchoolDecisionResult,
     rank: RankEstimate | RankScenario | None,
     pathways: PathwayResult | None,
     evidence: ValidatedEvidenceSnapshot,
+    *,
+    planning_profile: PlanningProfile | None = None,
 ) -> ReportModel:
     """Snapshot validated engine decisions into one renderer-neutral model."""
 
@@ -1169,28 +1597,150 @@ def build_report_model(
     if not isinstance(evidence, ValidatedEvidenceSnapshot):
         raise TypeError("evidence must be a ValidatedEvidenceSnapshot")
     profile_snapshot = StudentProfile(**profile.to_dict())
+    if planning_profile is not None:
+        if not isinstance(planning_profile, PlanningProfile):
+            raise TypeError("planning_profile must be a PlanningProfile or None")
+        if (
+            planning_profile.province != profile_snapshot.province
+            or planning_profile.subject_mode != profile_snapshot.subject_mode
+            or planning_profile.subject_group != profile_snapshot.subject_group
+            or frozenset(planning_profile.secondary_subjects) != frozenset(profile_snapshot.secondary_subjects)
+            or planning_profile.grade != profile_snapshot.grade
+        ):
+            raise ValueError("planning_profile and report profile must describe one student context")
     capability = evidence.capability
     manifest = evidence.manifest
     tier, host, available, missing, degradations, python_version, optional = (
         _snapshot_capability(capability)
     )
     session_id, manifest_hash = _snapshot_manifest(manifest, tier)
-    retrieval_date_snapshot = _date_tuple(evidence.retrieval_dates, "retrieval_dates")
-    if not isinstance(recommendations, RecommendationResult):
-        raise TypeError("recommendations must be a RecommendationResult")
+    retrieval_date_snapshot = _date_tuple(
+        evidence.retrieval_dates,
+        "retrieval_dates",
+        allow_empty=not evidence.candidates and not evidence.facts,
+    )
+    if not isinstance(recommendations, (RecommendationResult, SchoolDecisionResult)):
+        raise TypeError(
+            "recommendations must be a RecommendationResult or SchoolDecisionResult"
+        )
     if rank is not None and not isinstance(rank, (RankEstimate, RankScenario)):
         raise TypeError("rank must be a RankEstimate, RankScenario, or None")
+    if isinstance(recommendations, SchoolDecisionResult):
+        if not isinstance(rank, RankScenario) or (
+            rank.to_dict() != recommendations.rank_scenario.to_dict()
+        ):
+            raise ValueError("school decision result must share the report rank scenario")
+        recommendation_items = recommendations.items
+        recommendation_observations = recommendations.observations
+        ordinary_batch_policy = (
+            OrdinaryBatchPolicy(**recommendations.ordinary_batch_policy.to_dict())
+            if recommendations.ordinary_batch_policy is not None
+            else None
+        )
+        recommendation_policy_status = recommendations.policy_status
+        school_decisions = tuple(
+            _project_school_decision(item) for item in recommendations.decisions
+        )
+        recommendation_status = _aggregate_status(
+            (
+                *(item.evidence_status for item in recommendation_items),
+                *(item.evidence_status for item in recommendation_observations),
+            )
+        )
+        recommendation_warnings = _text_tuple(
+            recommendations.warnings, "recommendation warnings"
+        )
+        compatibility = recommendations.compatibility_result
+        if compatibility is not None:
+            recommendation_status = _status(
+                compatibility.coverage_status,
+                "recommendation coverage status",
+            )
+            input_years = _year_tuple(
+                compatibility.input_years,
+                "recommendation input years",
+            )
+            usable_years = _year_tuple(
+                compatibility.usable_years,
+                "recommendation usable years",
+            )
+            verified_rank_coverage = compatibility.verified_rank_coverage
+            recommendation_empty_reason = compatibility.empty_reason
+        else:
+            input_years = _year_tuple(
+                sorted(
+                    {
+                        year
+                        for item in recommendation_items
+                        for year in item.supporting_years
+                    }
+                    | {item.data_year for item in recommendation_observations}
+                ),
+                "recommendation input years",
+            )
+            usable_years = _year_tuple(
+                sorted(
+                    {
+                        year
+                        for item in recommendation_items
+                        for year in item.supporting_years
+                    }
+                ),
+                "recommendation usable years",
+            )
+            verified_rank_coverage = (
+                (
+                    recommendations.rank_scenario.optimistic_rank,
+                    recommendations.rank_scenario.conservative_rank,
+                )
+                if recommendation_items
+                else None
+            )
+            recommendation_empty_reason = (
+                None
+                if recommendation_items
+                else "partial_observations_only"
+                if recommendation_observations
+                else "profile_constraints"
+            )
+        excluded_by_subject_count = sum(
+            decision.outcome == "excluded"
+            and any(reason.code == "SCHOOL_SUBJECT_MISMATCH" for reason in decision.reasons)
+            for decision in recommendations.decisions
+        )
+        zero_score_excluded_count = 0
+    else:
+        recommendation_items = recommendations.items
+        recommendation_observations = recommendations.observations
+        ordinary_batch_policy = OrdinaryBatchPolicy(
+            **recommendations.ordinary_batch_policy.to_dict()
+        )
+        recommendation_policy_status = "ordinary_batch_policy_available"
+        school_decisions = ()
+        recommendation_status = _status(
+            recommendations.coverage_status, "recommendation coverage status"
+        )
+        recommendation_warnings = _text_tuple(
+            recommendations.warnings, "recommendation warnings"
+        )
+        input_years = _year_tuple(
+            recommendations.input_years, "recommendation input years"
+        )
+        usable_years = _year_tuple(
+            recommendations.usable_years, "recommendation usable years"
+        )
+        verified_rank_coverage = recommendations.verified_rank_coverage
+        recommendation_empty_reason = recommendations.empty_reason
+        excluded_by_subject_count = recommendations.excluded_by_subject_count
+        zero_score_excluded_count = recommendations.zero_score_excluded_count
     projected_recommendations = tuple(
         _project_recommendation(item, profile_snapshot.rank, rank)
-        for item in tuple(recommendations.items)
+        for item in tuple(recommendation_items)
     )
-    ordinary_batch_policy = OrdinaryBatchPolicy(
-        **recommendations.ordinary_batch_policy.to_dict()
+    projected_school_observations = tuple(
+        _project_school_observation(item)
+        for item in tuple(recommendation_observations)
     )
-    recommendation_status = _status(recommendations.coverage_status, "recommendation coverage status")
-    recommendation_warnings = _text_tuple(recommendations.warnings, "recommendation warnings")
-    input_years = _year_tuple(recommendations.input_years, "recommendation input years")
-    usable_years = _year_tuple(recommendations.usable_years, "recommendation usable years")
     if isinstance(rank, RankEstimate):
         rank_snapshot = RankEstimate(**rank.to_dict())
     elif isinstance(rank, RankScenario):
@@ -1237,6 +1787,17 @@ def build_report_model(
         for item in projected_recommendations
         for source_id in item.source_ids
     }
+    source_ids.update(
+        source_id
+        for item in projected_school_observations
+        for source_id in item.source_ids
+    )
+    source_ids.update(
+        source_id
+        for decision in school_decisions
+        for reason in decision.reasons
+        for source_id in reason.source_ids
+    )
     if rank_snapshot is not None:
         source_ids.update(
             rank_snapshot.source_ids
@@ -1247,6 +1808,17 @@ def build_report_model(
         source_ids.update(item.source_ids)
     source_ids.update(model_source_ids)
     statuses = [recommendation_status]
+    statuses.extend(
+        status
+        for item in projected_recommendations
+        for status in item.fit_evidence_statuses
+    )
+    statuses.extend(
+        reason.evidence_status
+        for decision in school_decisions
+        for reason in decision.reasons
+        if reason.evidence_status is not None
+    )
     statuses.append(rank_snapshot.status if rank_snapshot is not None else EvidenceStatus.MISSING)
     if projected_pathways:
         statuses.extend(item.evidence_status for item in projected_pathways)
@@ -1265,13 +1837,18 @@ def build_report_model(
             )
         )
     )
-    action_items = _canonical_action_items(
-        recommendation_status,
-        projected_recommendations,
+    action_items = build_action_plan(
+        planning_profile,
         rank_snapshot,
-        pathways_available,
+        projected_recommendations,
         projected_pathways,
+        recommendation_status,
     )
+    if len(action_items) < 3:
+        raise ValueError("action plan must provide at least three priority actions")
+    priority_count = 3
+    priority_actions = action_items[:priority_count]
+    action_timeline = _timeline(action_items[priority_count:])
     return ReportModel._create(
         profile=profile_snapshot,
         capability_tier=tier,
@@ -1283,13 +1860,16 @@ def build_report_model(
         python_version=python_version,
         optional_modules=optional,
         recommendations=projected_recommendations,
+        school_observations=projected_school_observations,
         ordinary_batch_policy=ordinary_batch_policy,
+        recommendation_policy_status=recommendation_policy_status,
+        school_decisions=school_decisions,
         recommendation_coverage_status=recommendation_status,
-        verified_rank_coverage=recommendations.verified_rank_coverage,
-        recommendation_empty_reason=recommendations.empty_reason,
+        verified_rank_coverage=verified_rank_coverage,
+        recommendation_empty_reason=recommendation_empty_reason,
         recommendation_warnings=recommendation_warnings,
-        excluded_by_subject_count=recommendations.excluded_by_subject_count,
-        zero_score_excluded_count=recommendations.zero_score_excluded_count,
+        excluded_by_subject_count=excluded_by_subject_count,
+        zero_score_excluded_count=zero_score_excluded_count,
         input_years=input_years,
         usable_years=usable_years,
         rank=rank_snapshot,
@@ -1310,6 +1890,9 @@ def build_report_model(
         evidence_status=_aggregate_status(statuses),
         warnings=warnings,
         action_items=action_items,
+        action_plan_digest=_action_digest(action_items),
+        priority_actions=priority_actions,
+        action_timeline=action_timeline,
     )
 
 
@@ -1347,6 +1930,8 @@ def _table(headers: tuple[str, ...], rows: Iterable[tuple[Any, ...]]) -> list[st
 def _empty_recommendation_text(model: ReportModel) -> str:
     reason = model.recommendation_empty_reason
     status = model.recommendation_coverage_status
+    if reason == "partial_observations_only":
+        return "仅发现部分覆盖的院校线索；这些学校仅作方向性观察，不进入冲稳保。"
     if reason == "no_match_within_verified_coverage" and status in _ACCEPTED_EXACT:
         return "经验证覆盖范围内未找到匹配院校；未硬凑冲稳保数量。"
     if reason == "no_match_within_verified_coverage":
@@ -1360,57 +1945,83 @@ def _empty_recommendation_text(model: ReportModel) -> str:
     return "当前证据未形成可展示的普通批推荐。"
 
 
+def action_linkage_lines(
+    model: ReportModel,
+    item: ActionItem,
+) -> tuple[str, str, str]:
+    """Project action dependencies and machine targets into human labels."""
+
+    if not isinstance(model, ReportModel) or not isinstance(item, ActionItem):
+        raise TypeError("action linkage requires a ReportModel ActionItem pair")
+    if item not in model.action_items:
+        raise ValueError("action linkage item is outside the report action plan")
+    action_titles = {
+        action.action_id: action.title for action in model.action_items
+    }
+    school_titles = {
+        f"school:{index}": recommendation.school_name
+        for index, recommendation in enumerate(model.recommendations, 1)
+    }
+    pathway_titles = {
+        pathway.policy_id: pathway.title for pathway in model.pathways
+    }
+
+    dependencies = "、".join(
+        f"{action_titles.get(action_id, action_id)}（{action_id}）"
+        for action_id in item.depends_on
+    ) or "无"
+    schools = "、".join(
+        school_titles.get(school_id, school_id) for school_id in item.school_ids
+    ) or "无"
+    pathways = "、".join(
+        pathway_titles.get(pathway_id, pathway_id)
+        for pathway_id in item.pathway_ids
+    ) or "无"
+    return (
+        f"依赖行动：{dependencies}",
+        f"关联院校：{schools}",
+        f"关联路径：{pathways}",
+    )
+
+
 def render_markdown(model: ReportModel) -> str:
     """Pure projection of a :class:`ReportModel`; no decision is recomputed."""
 
     if not isinstance(model, ReportModel):
         raise TypeError("model must be a ReportModel")
     profile = model.profile
-    reminder = "> ⚠️ AI 生成，仅供参考；不构成录取承诺，最终以当年官方发布为准。"
-    lines = [
-        f"# 匿名升学规划报告（{_md(profile.province)}）",
-        "",
-        reminder,
-        "",
-        "## 一、输入与证据边界",
-        "",
-        f"- 年级：{_md(profile.grade)}",
-        f"- 选科模式：{_md(profile.subject_mode)}；科目组：{_md(profile.subject_selection_key)}；再选科目：{_ids(profile.secondary_subjects)}",
-        f"- 当前定位位次：{profile.rank if profile.rank is not None else '暂无可靠位次'}",
-        f"- 能力档位：{_TIER_LABEL[model.capability_tier]}",
-        f"- 查询覆盖：{_md(model.query_coverage)}",
-        f"- 证据状态：{_STATUS_LABEL[model.evidence_status]}",
-        f"- 证据置信度：{_CONFIDENCE_LABEL[model.evidence_status]}",
-        f"- 数据覆盖：{_STATUS_LABEL[model.recommendation_coverage_status]}",
-        f"- 检索日期：{'、'.join(model.retrieval_dates)}",
-        f"- 普通批输入年份：{'、'.join(str(year) for year in model.input_years) or '无'}",
-        f"- 普通批可用年份：{'、'.join(str(year) for year in model.usable_years) or '无'}",
-        f"- 普通批策略：{_md(model.ordinary_batch_policy.policy_id)}",
-        f"- 普通批策略依据：{_md(model.ordinary_batch_policy.basis_id)}",
-        (
-            "- 普通批检索/分档参数："
-            f"检索Δ[{model.ordinary_batch_policy.search_delta_min},"
-            f"{model.ordinary_batch_policy.search_delta_max}]；"
-            f"冲< {model.ordinary_batch_policy.challenge_delta_lt}；"
-            f"稳≤ {model.ordinary_batch_policy.stable_delta_le}；"
-            "上限"
-            f"冲={model.ordinary_batch_policy.tier_caps['冲']}、"
-            f"稳={model.ordinary_batch_policy.tier_caps['稳']}、"
-            f"保={model.ordinary_batch_policy.tier_caps['保']}"
-        ),
-        f"- 证据包标识：{_md(model.manifest_session_id)}",
-        f"- 清单哈希：{_md(model.manifest_hash)}",
-        f"- 来源编号：{_ids(model.source_ids)}",
-    ]
-    if model.verified_rank_coverage is not None:
-        lines.append(
-            f"- 普通批已验证位次覆盖：{model.verified_rank_coverage[0]}–{model.verified_rank_coverage[1]}"
-        )
-    if model.warnings:
-        lines.extend(["", "### 风险与缺失", ""])
-        lines.extend(f"- {_md(item)}" for item in model.warnings)
+    reminder = (
+        "> ⚠️ 基于公开数据由 AI 整理，仅供参考；不构成升学建议或录取承诺，"
+        "最终以当年官方发布为准。"
+    )
+    def action_lines(item: ActionItem) -> list[str]:
+        linkage = action_linkage_lines(model, item)
+        return [
+            f"- **{_md(item.title)}**（{_md(item.phase)}；{_md(item.urgency)}）",
+            f"  - 战略价值：{_md(item.strategic_value)}；投入：{_md(item.effort)}",
+            f"  - 完成标准：{'；'.join(_md(value) for value in item.completion_criteria)}",
+            f"  - 原因：{_md(item.reason)}；未完成后果：{_md(item.consequence)}",
+            f"  - 截止：{_md(item.deadline) if item.deadline else '未提供具体日期'}；证据：{_STATUS_LABEL[item.evidence_status]}；来源：{_ids(item.source_ids)}",
+            *(f"  - {_md(value)}" for value in linkage),
+        ]
 
-    lines.extend(["", "## 二、成绩定位", ""])
+    lines = [
+        f"# 匿名升学规划报告（{_md(profile.province)}）", "", reminder, "",
+        "## 一、结论摘要与免责声明", "",
+        f"- 年级：{_md(profile.grade)}；选科：{_md(profile.subject_mode)} / {_md(profile.subject_selection_key)}",
+        f"- 当前定位位次：{profile.rank if profile.rank is not None else '暂无可靠位次'}；整份报告最低证据状态：{_STATUS_LABEL[model.evidence_status]}",
+        f"- 能力档位：{_TIER_LABEL[model.capability_tier]}；证据置信度：{_CONFIDENCE_LABEL[model.evidence_status]}；查询覆盖：{_md(model.query_coverage)}",
+        f"- 来源编号：{_ids(model.source_ids)}",
+        "- 本报告是已认证材料的行动投影，不构成录取或资格承诺。", "",
+    ]
+    lines.extend(f"- 风险与缺失：{_md(item)}" for item in model.warnings)
+    lines.extend([
+        "", "## 二、当前最需要做的事", "",
+        "- 以下行动按时间与价值排序。",
+    ])
+    for item in model.priority_actions:
+        lines.extend(action_lines(item))
+    lines.extend(["", "## 三、位次情景与置信度", ""])
     if isinstance(model.rank, RankScenario):
         rank = model.rank
         if rank.status in {EvidenceStatus.OFFICIAL, EvidenceStatus.INFERRED}:
@@ -1449,11 +2060,14 @@ def render_markdown(model: ReportModel) -> str:
             f"喜报位次证据{_STATUS_LABEL[model.rank.status]}：{_md(model.rank.reason_code or '未形成可用区间')}；未输出代理数值。"
         )
 
-    lines.extend(["", "## 三、普通批冲稳保", ""])
+    lines.extend(["", "## 四、普通批代表院校", ""])
     if model.recommendations:
         lines.extend(
             _table(
-                ("档位", "院校", "最低分", "最低位次", "证据状态", "来源编号", "计算依据"),
+                (
+                    "档位", "院校", "最低分", "最低位次", "证据状态",
+                    "来源编号", "决策理由", "计算依据",
+                ),
                 (
                     (
                         item.strategy,
@@ -1462,6 +2076,7 @@ def render_markdown(model: ReportModel) -> str:
                         item.min_rank,
                         _STATUS_LABEL[item.evidence_status],
                         "、".join(item.source_ids),
+                        item.match_reason,
                         item.calculation_basis,
                     )
                     for item in model.recommendations
@@ -1470,9 +2085,67 @@ def render_markdown(model: ReportModel) -> str:
         )
     else:
         lines.append(_empty_recommendation_text(model))
+    if model.school_observations:
+        lines.extend(["", "### 观察学校（部分覆盖，不进入冲稳保）", ""])
+        lines.append(
+            "以下院校仅作方向性观察；部分覆盖证据不能支持最低分、最低位次或冲稳保判断。"
+        )
+        lines.extend(
+            _table(
+                (
+                    "院校",
+                    "层次",
+                    "城市",
+                    "数据年份",
+                    "证据状态",
+                    "来源编号",
+                    "处理结论",
+                ),
+                (
+                    (
+                        item.school_name,
+                        item.school_level or "当前证据未提供",
+                        item.city or "当前证据未提供",
+                        item.data_year,
+                        _STATUS_LABEL[item.evidence_status],
+                        "、".join(item.source_ids),
+                        "仅作方向性观察，不进入冲稳保",
+                    )
+                    for item in model.school_observations
+                ),
+            )
+        )
     for warning in model.recommendation_warnings:
         lines.append(f"- 风险提示：{_md(warning)}")
-    lines.extend(["", reminder, "", "## 四、多元升学路径", ""])
+    if model.school_decisions:
+        lines.extend(["", "### 普通批逐维判断证据", ""])
+        for decision in model.school_decisions:
+            outcome_label = "纳入" if decision.outcome == "included" else "排除"
+            for reason in decision.reasons:
+                status_label = (
+                    _STATUS_LABEL[reason.evidence_status]
+                    if reason.evidence_status is not None
+                    else "未单列"
+                )
+                lines.append(
+                    f"- {_md(decision.school_name)}（{outcome_label}） · "
+                    f"{_md(reason.dimension)}/[{reason.code}]："
+                    f"{_md(reason.explanation)}；证据等级：{status_label}；"
+                    f"来源编号：{_ids(reason.source_ids)}"
+                )
+    excluded_school_decisions = tuple(
+        item for item in model.school_decisions if item.outcome == "excluded"
+    )
+    if excluded_school_decisions:
+        lines.extend(["", "### 普通批排除审计", ""])
+        for decision in excluded_school_decisions:
+            reasons = "；".join(
+                f"[{reason.code}] {reason.explanation}"
+                for reason in decision.reasons
+            )
+            lines.append(f"- {_md(decision.school_name)}：{_md(reasons)}")
+    lines.extend(["", reminder])
+    lines.extend(["", "## 五、多元升学路径矩阵", ""])
     if not model.pathways_available:
         lines.append("多元升学数据不足：未提供经验证的政策结果，本章节不作正式推荐。")
     elif not model.pathways:
@@ -1484,7 +2157,7 @@ def render_markdown(model: ReportModel) -> str:
                     "路径", "院校", "投入结论", "资格状态", "政策证据状态", "政策来源编号",
                     "专业选项", "培养安排", "转段规则", "毕业/升学出口",
                     "服务/就业义务", "退出/违约规则", "费用/补助",
-                    "已满足条件", "待核实约束", "时间线", "当前行动", "计算依据",
+                    "已满足条件", "待核实约束", "时间线", "当前行动", "决策理由", "计算依据",
                 ),
                 (
                     (
@@ -1505,12 +2178,28 @@ def render_markdown(model: ReportModel) -> str:
                         "；".join(item.missing_constraints) or "无",
                         "；".join(item.timeline) or "待当年政策确认",
                         "；".join(item.preparation_actions) or "待补充可执行动作",
+                        (
+                            "；".join(
+                                f"[{reason.code}] {reason.explanation}"
+                                for reason in item.decision_reasons
+                            )
+                            or "未提供画像决策审计"
+                        ),
                         item.calculation_basis,
                     )
                     for item in model.pathways
                 ),
             )
         )
+        for item in model.pathways:
+            lines.extend(
+                [
+                    "",
+                    f"### 逐字段证据审计：{_md(item.title)} · {_md(item.institution)}",
+                    "",
+                    *(f"- {line}" for line in pathway_field_evidence_lines(item)),
+                ]
+            )
     if model.pathway_target_rank is not None:
         assert model.pathway_policy_evidence_status is not None
         assert model.pathway_target_evidence_status is not None
@@ -1526,15 +2215,47 @@ def render_markdown(model: ReportModel) -> str:
     for warning in model.pathway_warnings:
         lines.append(f"- 风险提示：{_md(warning)}")
 
+    lines.extend(["", "## 六、详细路径缺口", ""])
+    if model.pathways:
+        for item in model.pathways:
+            lines.append(f"- {_md(item.title)}：{'；'.join(_md(value) for value in item.missing_constraints) or '当前无已知缺口'}")
+    else:
+        lines.append("- 当前没有可展开的路径缺口。")
+
+    lines.extend(["", "## 七、分阶段时间表", ""])
+    if model.action_timeline:
+        for group in model.action_timeline:
+            lines.extend([f"### {_md(group.phase)}", ""])
+            for item in group.actions:
+                lines.extend(action_lines(item))
+    else:
+        lines.append("- 当前优先行动已覆盖完整行动计划。")
+
     lines.extend(
         [
             "",
-            "## 五、下一步行动建议",
+            "## 八、证据披露",
             "",
-            *(f"{index}. {_md(item)}" for index, item in enumerate(model.action_items, 1)),
-            "",
-            "## 六、证据清单与免责声明",
-            "",
+            f"- 查询覆盖：{_md(model.query_coverage)}；检索日期："
+            + (
+                "、".join(model.retrieval_dates)
+                if model.retrieval_dates
+                else "无可验证检索日期"
+            ),
+            f"- 数据覆盖：{_STATUS_LABEL[model.recommendation_coverage_status]}；普通批输入年份：{'、'.join(str(year) for year in model.input_years) or '无'}",
+            f"- 普通批可用年份：{'、'.join(str(year) for year in model.usable_years) or '无'}",
+            *(
+                (f"- 普通批已验证位次覆盖：{model.verified_rank_coverage[0]}–{model.verified_rank_coverage[1]}",)
+                if model.verified_rank_coverage is not None else ()
+            ),
+            *(
+                (
+                    f"- 普通批策略：{_md(model.ordinary_batch_policy.policy_id)}；依据：{_md(model.ordinary_batch_policy.basis_id)}",
+                    f"- 普通批位次差策略：检索Δ[{model.ordinary_batch_policy.search_delta_min},{model.ordinary_batch_policy.search_delta_max}]；冲< {model.ordinary_batch_policy.challenge_delta_lt}；稳≤ {model.ordinary_batch_policy.stable_delta_le}；上限冲={model.ordinary_batch_policy.tier_caps['冲']}、稳={model.ordinary_batch_policy.tier_caps['稳']}、保={model.ordinary_batch_policy.tier_caps['保']}",
+                )
+                if model.ordinary_batch_policy is not None
+                else ("- 普通批位次差策略：不可用；未使用位次差阈值。",)
+            ),
             f"- 来源编号：{_ids(model.source_ids)}",
             f"- 证据包清单哈希：{_md(model.manifest_hash)}",
             "- 报告只展示安全来源编号，不展示原始 URL 或本机路径。",
@@ -1547,11 +2268,15 @@ def render_markdown(model: ReportModel) -> str:
 
 
 __all__ = [
+    "ActionTimelinePhase",
     "ReportModel",
     "ReportPathway",
     "ReportRecommendation",
+    "ReportSchoolObservation",
     "StudentProfile",
+    "action_linkage_lines",
     "build_report_model",
+    "pathway_field_evidence_lines",
     "render_markdown",
     "validate_profile_text",
 ]

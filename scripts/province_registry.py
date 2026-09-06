@@ -48,6 +48,9 @@ class SubjectSelectionError(ProvinceRegistryError):
 _REPARSE_POINT = 0x0400
 _SCHEMA_VERSION = "1.0"
 _MODES = frozenset(("3+1+2", "3+3"))
+_PRIMARY_312_SUBJECTS = ("物理", "历史")
+_SECONDARY_312_SUBJECTS = ("化学", "生物", "政治", "地理")
+_SUBJECTS_33 = ("物理", "化学", "生物", "政治", "历史", "地理")
 _REQUIRED_FIELDS = frozenset(
     (
         "province",
@@ -568,3 +571,39 @@ def canonical_subject_selection_key(
     if len(ordered) != 3:
         raise SubjectSelectionError("3+3 模式必须形成三个不同的已配置科目")
     return "+".join(ordered)
+
+
+def canonical_discovery_subject_key(
+    mode: str,
+    primary: str,
+    secondary: tuple[str, ...] | list[str],
+) -> str:
+    """Validate profile subjects using only the stable examination mode.
+
+    Public research planning must not load a caller-authored ``province.json``.
+    This stable discovery projection intentionally knows no score, admission,
+    or recommendation thresholds.
+    """
+
+    if mode not in _MODES:
+        raise SubjectSelectionError("考试模式仅支持 3+1+2 或 3+3")
+    primary_value = _normalize_selection(primary, "首选科目")
+    if isinstance(secondary, (str, bytes)) or not isinstance(secondary, (tuple, list)):
+        raise SubjectSelectionError("再选科目必须是科目列表")
+    secondary_values = tuple(_normalize_selection(item, "再选科目") for item in secondary)
+    if len(secondary_values) != 2 or len({primary_value, *secondary_values}) != 3:
+        raise SubjectSelectionError("必须形成三个互不重复的选科")
+    if mode == "3+1+2":
+        if primary_value not in _PRIMARY_312_SUBJECTS:
+            raise SubjectSelectionError("3+1+2 首选科目必须是物理或历史")
+        if any(item not in _SECONDARY_312_SUBJECTS for item in secondary_values):
+            raise SubjectSelectionError("3+1+2 再选科目不在稳定科目词表中")
+        selected_secondary = set(secondary_values)
+        ordered_secondary = tuple(
+            item for item in _SECONDARY_312_SUBJECTS if item in selected_secondary
+        )
+        return "+".join((primary_value, *ordered_secondary))
+    selected = {primary_value, *secondary_values}
+    if any(item not in _SUBJECTS_33 for item in selected):
+        raise SubjectSelectionError("3+3 选科不在稳定科目词表中")
+    return "+".join(item for item in _SUBJECTS_33 if item in selected)

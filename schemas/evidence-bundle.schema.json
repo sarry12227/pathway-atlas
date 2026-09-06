@@ -157,6 +157,7 @@
             "xlsx-worksheet",
             "pdfplumber-text",
             "host-ocr-rows",
+            "host-public-text",
             "qr",
             "manual-structured"
           ]

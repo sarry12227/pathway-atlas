@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime, timezone
 import hashlib
 import ipaddress
 import json
@@ -19,6 +19,7 @@ from pathlib import Path
 import re
 import stat
 import sys
+from types import MappingProxyType
 from typing import Any
 import unicodedata
 from urllib.parse import urlsplit
@@ -32,6 +33,13 @@ if __package__:
         if error.name != f"{__package__}.contracts":
             raise
         _MISSING_LOCAL_CAPABILITY = "contracts"
+    if _MISSING_LOCAL_CAPABILITY is None:
+        try:
+            from .decision_policy import DecisionPolicySnapshot
+        except ModuleNotFoundError as error:
+            if error.name != f"{__package__}.decision_policy":
+                raise
+            _MISSING_LOCAL_CAPABILITY = "decision_policy"
     if _MISSING_LOCAL_CAPABILITY is None:
         try:
             from .planning_profile import PlanningProfile, load_planning_profile
@@ -58,6 +66,7 @@ if __package__:
             from .province_registry import (
                 ProvinceConfig,
                 _parse_config,
+                canonical_discovery_subject_key,
                 canonical_subject_selection_key,
             )
         except ModuleNotFoundError as error:
@@ -71,6 +80,13 @@ else:  # pragma: no cover - exercised by the real CLI and flat-import tests
         if error.name != "contracts":
             raise
         _MISSING_LOCAL_CAPABILITY = "contracts"
+    if _MISSING_LOCAL_CAPABILITY is None:
+        try:
+            from decision_policy import DecisionPolicySnapshot
+        except ModuleNotFoundError as error:
+            if error.name != "decision_policy":
+                raise
+            _MISSING_LOCAL_CAPABILITY = "decision_policy"
     if _MISSING_LOCAL_CAPABILITY is None:
         try:
             from planning_profile import PlanningProfile, load_planning_profile
@@ -97,6 +113,7 @@ else:  # pragma: no cover - exercised by the real CLI and flat-import tests
             from province_registry import (
                 ProvinceConfig,
                 _parse_config,
+                canonical_discovery_subject_key,
                 canonical_subject_selection_key,
             )
         except ModuleNotFoundError as error:
@@ -106,8 +123,10 @@ else:  # pragma: no cover - exercised by the real CLI and flat-import tests
 
 if _MISSING_LOCAL_CAPABILITY is not None:
     OrdinaryBatchPolicy = RecommendationProfile = PlanningProfile = ProvinceConfig = None
+    DecisionPolicySnapshot = None
     load_planning_profile = None
     validate_public_output_text = _parse_config = canonical_subject_selection_key = None
+    canonical_discovery_subject_key = None
     year_window = None
 
 
@@ -119,6 +138,8 @@ _KINDS = frozenset(
         "batch_admission",
         "joy_report",
         "enrollment_plan",
+        "admission_charter",
+        "tuition_fee",
         "subject_requirement",
         "strong_foundation",
         "comprehensive_evaluation",
@@ -139,10 +160,18 @@ _FRESHNESS_BY_EXPECTATION = {
     "current_year_availability_must_be_checked": "verify_exact_current_year_availability",
     "expected_available": "query_exact_expected_available_year",
 }
+_STOP_CONDITIONS = ("accepted", "candidate-cap", "variants-exhausted", "unavailable")
+_UNAVAILABLE_REASONS = (
+    "current_year_not_published",
+    "source_threshold_not_met",
+    "source_conflict",
+    "network_unavailable",
+    "capability_unavailable",
+    "newer_comparable_year_accepted",
+)
 _GENERIC_KIND_SYNONYMS = {
     "joy_report": ("高中喜报", "高考光荣榜", "高中升学成果"),
 }
-_CATALOG_PATH = Path(__file__).parent.parent / "references" / "provinces" / "index.json"
 MAX_PROVINCE_ALIASES = 3
 _CATALOG_FIELDS = frozenset(
     {"schema_version", "verified_at", "coverage_note", "mode_authority_urls", "provinces"}
@@ -188,6 +217,11 @@ _TASK_FIELDS = frozenset(
         "freshness_rule",
         "required_extraction_fields",
         "availability_expectation",
+        "max_network_retries",
+        "stop_conditions",
+        "unavailable_reasons",
+        "source_policy_id",
+        "source_policy_version",
     }
 )
 _PLAN_FIELDS = frozenset(
@@ -195,12 +229,26 @@ _PLAN_FIELDS = frozenset(
         "schema_version",
         "province",
         "exam_year",
+        "research_year",
         "subject_group",
         "authority_name",
         "official_roots",
         "catalog_verified_at",
+        "catalog_digest",
+        "mode",
+        "decision_policy_id",
+        "decision_policy_digest",
+        "decision_basis_id",
+        "decision_source_id",
+        "decision_source_version",
+        "source_policy_id",
+        "source_policy_version",
+        "pathway_trace",
         "tasks",
     }
+)
+_PATHWAY_TRACE_FIELDS = frozenset(
+    {"pathway_id", "preference", "decision", "reason_code"}
 )
 _PROFILE_FIELDS = frozenset(
     {
@@ -368,7 +416,31 @@ class ProvinceDiscovery:
         }
 
 
-@dataclass(frozen=True)
+def _catalog_digest(
+    schema_version: str,
+    verified_at: str,
+    coverage_note: str,
+    mode_authority_urls: tuple[str, ...],
+    provinces: tuple[ProvinceDiscovery, ...],
+) -> str:
+    payload = {
+        "schema_version": schema_version,
+        "verified_at": verified_at,
+        "coverage_note": coverage_note,
+        "mode_authority_urls": list(mode_authority_urls),
+        "provinces": [item.to_dict() for item in provinces],
+    }
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
+
+
+@dataclass(frozen=True, init=False)
 class ProvinceCatalogSnapshot:
     """Strict immutable snapshot of ``references/provinces/index.json``."""
 
@@ -377,6 +449,28 @@ class ProvinceCatalogSnapshot:
     coverage_note: str
     mode_authority_urls: tuple[str, ...]
     provinces: tuple[ProvinceDiscovery, ...]
+    digest: str
+
+    def __init__(self) -> None:
+        raise TypeError("ProvinceCatalogSnapshot is factory-only")
+
+    @classmethod
+    def _create(cls, **values: Any) -> "ProvinceCatalogSnapshot":
+        expected = {
+            "schema_version",
+            "verified_at",
+            "coverage_note",
+            "mode_authority_urls",
+            "provinces",
+            "digest",
+        }
+        if set(values) != expected:
+            raise TypeError("catalog factory fields do not match the contract")
+        instance = object.__new__(cls)
+        for name, value in values.items():
+            object.__setattr__(instance, name, value)
+        instance.__post_init__()
+        return instance
 
     def __post_init__(self) -> None:
         if self.schema_version != "1.0":
@@ -407,10 +501,20 @@ class ProvinceCatalogSnapshot:
             raise ProvinceCatalogError("catalog aliases must be globally unique")
         if any(item.verified_at != verified_at for item in provinces):
             raise ProvinceCatalogError("catalog record verification dates must match the snapshot")
+        expected_digest = _catalog_digest(
+            self.schema_version,
+            verified_at,
+            coverage_note,
+            authority_urls,
+            provinces,
+        )
+        if self.digest != expected_digest:
+            raise ProvinceCatalogError("catalog digest does not bind the validated snapshot")
         object.__setattr__(self, "verified_at", verified_at)
         object.__setattr__(self, "coverage_note", coverage_note)
         object.__setattr__(self, "mode_authority_urls", authority_urls)
         object.__setattr__(self, "provinces", provinces)
+        object.__setattr__(self, "digest", expected_digest)
 
     def resolve(self, province_or_alias: Any) -> ProvinceDiscovery:
         normalized = unicodedata.normalize(
@@ -455,20 +559,243 @@ def _catalog_from_payload(payload: Any) -> ProvinceCatalogSnapshot:
     raw_authorities = payload["mode_authority_urls"]
     if not isinstance(raw_authorities, list):
         raise ProvinceCatalogError("catalog mode authority URLs must be an array")
-    return ProvinceCatalogSnapshot(
+    records_tuple = tuple(records)
+    authority_tuple = tuple(raw_authorities)
+    return ProvinceCatalogSnapshot._create(
         schema_version=payload["schema_version"],
         verified_at=payload["verified_at"],
         coverage_note=payload["coverage_note"],
-        mode_authority_urls=tuple(raw_authorities),
-        provinces=tuple(records),
+        mode_authority_urls=authority_tuple,
+        provinces=records_tuple,
+        digest=_catalog_digest(
+            payload["schema_version"],
+            payload["verified_at"],
+            _public_text(payload["coverage_note"], "catalog coverage_note", maximum=2048),
+            tuple(_public_https_url(item, "catalog mode authority URL") for item in authority_tuple),
+            records_tuple,
+        ),
     )
+
+
+def _catalog_provenance_seam():
+    tracked: dict[int, tuple[ProvinceCatalogSnapshot, str]] = {}
+
+    def load_tracked() -> ProvinceCatalogSnapshot:
+        canonical_path = (
+            Path(__file__).parent.parent
+            / "references"
+            / "provinces"
+            / "index.json"
+        )
+        validated = _catalog_from_payload(_strict_json_file(canonical_path))
+        snapshot = object.__new__(ProvinceCatalogSnapshot)
+        for name in (
+            "schema_version",
+            "verified_at",
+            "coverage_note",
+            "mode_authority_urls",
+            "provinces",
+            "digest",
+        ):
+            object.__setattr__(snapshot, name, getattr(validated, name))
+        snapshot.__post_init__()
+        tracked[id(snapshot)] = (snapshot, snapshot.digest)
+        return snapshot
+
+    def recognizes(snapshot: Any) -> bool:
+        registered = tracked.get(id(snapshot))
+        return (
+            registered is not None
+            and registered[0] is snapshot
+            and registered[1] == snapshot.digest
+        )
+
+    return load_tracked, recognizes
+
+
+_load_tracked_catalog, _is_tracked_catalog = _catalog_provenance_seam()
+del _catalog_provenance_seam
 
 
 def load_province_catalog(path: Any = None) -> ProvinceCatalogSnapshot:
     """Read one strict tracked catalog snapshot; import itself performs no I/O."""
 
-    selected = _CATALOG_PATH if path is None else path
-    return _catalog_from_payload(_strict_json_file(selected))
+    if path is None:
+        return _load_tracked_catalog()
+    return _catalog_from_payload(_strict_json_file(path))
+
+
+_PATHWAY_IDS = (
+    "strong_foundation",
+    "comprehensive_evaluation",
+    "special_program",
+    "service_oriented",
+    "uniformed_service",
+    "cross_border",
+    "arts_sports",
+)
+_PATHWAY_TASK_FAMILIES = MappingProxyType({
+    "strong_foundation": (("strong_foundation", "强基计划"),),
+    "comprehensive_evaluation": (("comprehensive_evaluation", "综合评价"),),
+    "special_program": (
+        ("special_pathway", "国家专项"),
+        ("special_pathway", "地方专项"),
+        ("special_pathway", "高校专项"),
+    ),
+    "service_oriented": (
+        ("special_pathway", "公费师范"),
+        ("special_pathway", "优师计划"),
+        ("special_pathway", "定向医学生"),
+    ),
+    "uniformed_service": (
+        ("special_pathway", "军校"),
+        ("special_pathway", "公安司法消防"),
+        ("special_pathway", "航海航空"),
+    ),
+    "cross_border": (
+        ("hk_macao_admission", "港澳招生"),
+        ("special_pathway", "中外合作办学"),
+    ),
+    "arts_sports": (("special_pathway", "艺体类"),),
+})
+_PATHWAY_TASK_UNIVERSE = frozenset(
+    identity
+    for family in _PATHWAY_TASK_FAMILIES.values()
+    for identity in family
+)
+_PATHWAY_KINDS = frozenset(kind for kind, _target in _PATHWAY_TASK_UNIVERSE)
+_PATHWAY_QUERY_TERMS = {
+    ("strong_foundation", "强基计划"): (
+        "强基计划 招生专业 入围 录取",
+        "强基计划 培养方案 转段方向 出口",
+    ),
+    ("comprehensive_evaluation", "综合评价"): (
+        "综合评价 报考条件 成绩比例",
+        "综合评价 校测 录取 出口",
+    ),
+    ("hk_macao_admission", "港澳招生"): (
+        "港澳招生 招生方式 英语要求",
+        "港澳院校 费用 奖学金 出口",
+    ),
+}
+
+
+@dataclass(frozen=True)
+class PathwayResearchTrace:
+    pathway_id: str
+    preference: str
+    decision: str
+    reason_code: str
+
+    def __post_init__(self) -> None:
+        if self.pathway_id not in _PATHWAY_IDS:
+            raise ValueError("unsupported pathway trace ID")
+        if self.preference not in {"unknown", "interested", "not_interested", "not_applicable"}:
+            raise ValueError("unsupported pathway preference")
+        if self.decision not in {"include", "discover", "exclude"}:
+            raise ValueError("unsupported pathway research decision")
+        expected = {
+            "profile_interested": "include",
+            "preference_unknown_requires_discovery": "discover",
+            "profile_not_interested": "exclude",
+            "profile_not_applicable": "exclude",
+            "service_commitment_rejected": "exclude",
+            "legacy_private_compatibility": "discover",
+        }
+        if expected.get(self.reason_code) != self.decision:
+            raise ValueError("pathway trace reason does not match its decision")
+
+    def to_dict(self) -> dict[str, str]:
+        return {
+            "pathway_id": self.pathway_id,
+            "preference": self.preference,
+            "decision": self.decision,
+            "reason_code": self.reason_code,
+        }
+
+
+def _pathway_trace(profile: PlanningProfile) -> tuple[PathwayResearchTrace, ...]:
+    records: list[PathwayResearchTrace] = []
+    for pathway_id in _PATHWAY_IDS:
+        preference = profile.pathway_preferences[pathway_id]
+        if (
+            pathway_id in {"service_oriented", "uniformed_service"}
+            and profile.constraints.service_commitment == "reject"
+        ):
+            decision, reason = "exclude", "service_commitment_rejected"
+        elif preference == "interested":
+            decision, reason = "include", "profile_interested"
+        elif preference == "unknown":
+            decision, reason = "discover", "preference_unknown_requires_discovery"
+        elif preference == "not_interested":
+            decision, reason = "exclude", "profile_not_interested"
+        else:
+            decision, reason = "exclude", "profile_not_applicable"
+        records.append(PathwayResearchTrace(pathway_id, preference, decision, reason))
+    return tuple(records)
+
+
+@dataclass(frozen=True, init=False)
+class ResearchContext:
+    province: str
+    mode: str
+    subject_group: str
+    exam_year: int
+    authority_name: str
+    official_roots: tuple[str, ...]
+    requested_pathways: tuple[str, ...]
+    catalog_verified_at: str
+    catalog_digest: str
+
+    def __init__(self) -> None:
+        raise TypeError("ResearchContext is factory-only")
+
+    @classmethod
+    def create(
+        cls,
+        profile: PlanningProfile,
+        catalog: ProvinceCatalogSnapshot,
+    ) -> "ResearchContext":
+        if type(profile) is not PlanningProfile:
+            raise TypeError("profile must be a strict PlanningProfile")
+        if type(catalog) is not ProvinceCatalogSnapshot:
+            raise TypeError("catalog must be a strict ProvinceCatalogSnapshot")
+        if not _is_tracked_catalog(catalog):
+            raise ProvinceCatalogError("public research requires the tracked trusted catalog")
+        # Recompute the catalog binding before trusting authority/root/date.
+        expected_digest = _catalog_digest(
+            catalog.schema_version,
+            catalog.verified_at,
+            catalog.coverage_note,
+            catalog.mode_authority_urls,
+            catalog.provinces,
+        )
+        if catalog.digest != expected_digest:
+            raise ProvinceCatalogError("catalog digest does not bind the validated snapshot")
+        discovery = catalog.resolve(profile.province)
+        if profile.subject_mode != discovery.mode:
+            raise ValueError("profile subject mode conflicts with the trusted catalog")
+        subject_group = canonical_discovery_subject_key(
+            discovery.mode,
+            profile.subject_group,
+            profile.secondary_subjects,
+        )
+        trace = _pathway_trace(profile)
+        requested = tuple(item.pathway_id for item in trace if item.decision != "exclude")
+        instance = object.__new__(cls)
+        for name, value in (
+            ("province", discovery.province),
+            ("mode", discovery.mode),
+            ("subject_group", subject_group),
+            ("exam_year", _normalize_exam_year(profile.exam_year)),
+            ("authority_name", discovery.authority_name),
+            ("official_roots", discovery.official_roots),
+            ("requested_pathways", requested),
+            ("catalog_verified_at", catalog.verified_at),
+            ("catalog_digest", catalog.digest),
+        ):
+            object.__setattr__(instance, name, value)
+        return instance
 
 
 class _SafeArgumentParser(argparse.ArgumentParser):
@@ -479,19 +806,6 @@ class _SafeArgumentParser(argparse.ArgumentParser):
         if status:
             raise QueryPlanInputError("invalid command-line arguments")
         super().exit(status, message)
-
-
-class _SingleUseAction(argparse.Action):
-    def __call__(
-        self,
-        parser: argparse.ArgumentParser,
-        namespace: argparse.Namespace,
-        values: Any,
-        option_string: str | None = None,
-    ) -> None:
-        if getattr(namespace, self.dest, None) is not None:
-            parser.error("duplicate non-repeatable option")
-        setattr(namespace, self.dest, values)
 
 
 def _normalize_mathematical_integer(
@@ -514,6 +828,18 @@ def _normalize_mathematical_integer(
 def _normalize_exam_year(value: Any) -> int:
     return _normalize_mathematical_integer(
         value, "exam_year", minimum=2000, maximum=2100
+    )
+
+
+def _current_utc_year() -> int:
+    """Capture the trusted research clock once at a query-plan boundary."""
+
+    return datetime.now(timezone.utc).year
+
+
+def _normalize_research_year(value: Any) -> int:
+    return _normalize_mathematical_integer(
+        value, "research_year", minimum=2000, maximum=2100
     )
 
 
@@ -651,6 +977,11 @@ def _task_identity_payload(task: "QueryTask") -> dict[str, Any]:
         "freshness_rule": task.freshness_rule,
         "required_extraction_fields": list(task.required_extraction_fields),
         "availability_expectation": task.availability_expectation,
+        "max_network_retries": task.max_network_retries,
+        "stop_conditions": list(task.stop_conditions),
+        "unavailable_reasons": list(task.unavailable_reasons),
+        "source_policy_id": task.source_policy_id,
+        "source_policy_version": task.source_policy_version,
     }
 
 
@@ -681,6 +1012,11 @@ class QueryTask:
     freshness_rule: str
     required_extraction_fields: tuple[str, ...]
     availability_expectation: str
+    max_network_retries: int
+    stop_conditions: tuple[str, ...]
+    unavailable_reasons: tuple[str, ...]
+    source_policy_id: str
+    source_policy_version: str
 
     def __post_init__(self) -> None:
         if not isinstance(self.kind, str) or self.kind not in _KINDS:
@@ -714,6 +1050,8 @@ class QueryTask:
             "province_policy",
             "score_table",
             "enrollment_plan",
+            "admission_charter",
+            "tuition_fee",
             "subject_requirement",
         } and self.target_name is not None:
             raise ValueError("this query kind cannot carry a structured target")
@@ -762,6 +1100,24 @@ class QueryTask:
         )
         if self.required_extraction_fields != _EXTRACTION_FIELDS[self.kind]:
             raise ValueError("required extraction fields do not match query kind")
+        object.__setattr__(
+            self,
+            "max_network_retries",
+            _normalize_mathematical_integer(
+                self.max_network_retries,
+                "max_network_retries",
+                minimum=1,
+                maximum=1,
+            ),
+        )
+        if tuple(self.stop_conditions) != _STOP_CONDITIONS:
+            raise ValueError("stop_conditions must use the bounded retrieval contract")
+        object.__setattr__(self, "stop_conditions", _STOP_CONDITIONS)
+        if tuple(self.unavailable_reasons) != _UNAVAILABLE_REASONS:
+            raise ValueError("unavailable_reasons must use the bounded vocabulary")
+        object.__setattr__(self, "unavailable_reasons", _UNAVAILABLE_REASONS)
+        if self.source_policy_id != "pathway-atlas-source-policy" or self.source_policy_version != "1.0":
+            raise ValueError("query task must reference the unique source policy")
         query_text = " ".join(self.query_variants)
         for context in (
             self.province,
@@ -800,6 +1156,11 @@ class QueryTask:
             "freshness_rule": self.freshness_rule,
             "required_extraction_fields": list(self.required_extraction_fields),
             "availability_expectation": self.availability_expectation,
+            "max_network_retries": self.max_network_retries,
+            "stop_conditions": list(self.stop_conditions),
+            "unavailable_reasons": list(self.unavailable_reasons),
+            "source_policy_id": self.source_policy_id,
+            "source_policy_version": self.source_policy_version,
         }
 
 
@@ -807,18 +1168,34 @@ class QueryTask:
 class QueryPlan:
     schema_version: str
     province: str
+    mode: str
     exam_year: int
+    research_year: int
     subject_group: str
     authority_name: str
     official_roots: tuple[str, ...]
     catalog_verified_at: str
+    catalog_digest: str
+    decision_policy_id: str
+    decision_policy_digest: str
+    decision_basis_id: str
+    decision_source_id: str
+    decision_source_version: str
+    source_policy_id: str
+    source_policy_version: str
+    pathway_trace: tuple[PathwayResearchTrace, ...]
     tasks: tuple[QueryTask, ...]
 
     def __post_init__(self) -> None:
         if self.schema_version != _SCHEMA_VERSION:
             raise ValueError("unsupported query-plan schema version")
         object.__setattr__(self, "province", _public_text(self.province, "province"))
+        if self.mode not in {"3+1+2", "3+3"}:
+            raise ValueError("query-plan mode is unsupported")
         object.__setattr__(self, "exam_year", _normalize_exam_year(self.exam_year))
+        object.__setattr__(
+            self, "research_year", _normalize_research_year(self.research_year)
+        )
         object.__setattr__(
             self, "subject_group", _public_text(self.subject_group, "subject_group")
         )
@@ -837,6 +1214,26 @@ class QueryPlan:
             "catalog_verified_at",
             _calendar_date(self.catalog_verified_at, "catalog_verified_at"),
         )
+        if not isinstance(self.catalog_digest, str) or re.fullmatch(r"sha256:[0-9a-f]{64}", self.catalog_digest) is None:
+            raise ValueError("catalog_digest must be a SHA-256 identity")
+        for name in ("decision_policy_id", "decision_basis_id", "decision_source_id"):
+            if not isinstance(getattr(self, name), str) or _SAFE_ID.fullmatch(getattr(self, name)) is None:
+                raise ValueError(f"{name} must use the public safe-ID syntax")
+        if not isinstance(self.decision_policy_digest, str) or re.fullmatch(r"sha256:[0-9a-f]{64}", self.decision_policy_digest) is None:
+            raise ValueError("decision_policy_digest must be a SHA-256 identity")
+        if not isinstance(self.decision_source_version, str) or re.fullmatch(r"[0-9]+\.[0-9]+(?:\.[0-9]+)?", self.decision_source_version) is None:
+            raise ValueError("decision_source_version must be public and versioned")
+        if self.source_policy_id != "pathway-atlas-source-policy" or self.source_policy_version != "1.0":
+            raise ValueError("query plan must reference the unique source policy")
+        try:
+            pathway_trace = tuple(self.pathway_trace)
+        except TypeError as error:
+            raise TypeError("pathway_trace must be a collection") from error
+        if tuple(item.pathway_id for item in pathway_trace) != _PATHWAY_IDS or any(
+            not isinstance(item, PathwayResearchTrace) for item in pathway_trace
+        ):
+            raise ValueError("pathway_trace must cover each pathway exactly once")
+        object.__setattr__(self, "pathway_trace", pathway_trace)
         if isinstance(self.tasks, (str, bytes, bytearray)):
             raise TypeError("tasks must be a collection of QueryTask records")
         try:
@@ -848,20 +1245,22 @@ class QueryPlan:
         object.__setattr__(self, "tasks", tasks)
         if len({task.task_id for task in tasks}) != len(tasks):
             raise ValueError("query plan contains duplicate task IDs")
-        window = set(year_window(self.exam_year))
+        window = set(year_window(self.research_year))
         for task in tasks:
             if (
                 task.province != self.province
                 or task.subject_group != self.subject_group
                 or task.authority_name != self.authority_name
                 or task.official_roots != self.official_roots
+                or task.source_policy_id != self.source_policy_id
+                or task.source_policy_version != self.source_policy_version
             ):
                 raise ValueError("task context does not match query plan")
             if task.year not in window:
                 raise ValueError("task year is outside the explicit four-year window")
             expectation = (
                 "current_year_availability_must_be_checked"
-                if task.year == self.exam_year
+                if task.year == self.research_year
                 else "expected_available"
             )
             if task.availability_expectation != expectation:
@@ -871,9 +1270,9 @@ class QueryPlan:
         }
         if {task.year for task in by_kind["score_table"]} != window:
             raise ValueError("score_table tasks must cover the exact four-year window")
-        batch_targets = {"普通批", "提前批", "综合评价批"}
-        if {task.target_name for task in by_kind["batch_admission"]} != batch_targets:
-            raise ValueError("batch admission tasks must cover every declared batch")
+        batch_targets = {task.target_name for task in by_kind["batch_admission"]}
+        if batch_targets not in ({"普通批"}, {"普通批", "提前批", "综合评价批"}):
+            raise ValueError("batch admission tasks must cover the public or private compatibility scope")
         for target in batch_targets:
             target_years = tuple(
                 task.year
@@ -884,19 +1283,22 @@ class QueryPlan:
                 raise ValueError(
                     "each batch admission target must cover the exact four-year window"
                 )
-        annual_single_target_kinds = (
+        required_annual_single_target_kinds = (
             "province_policy",
             "score_table",
             "joy_report",
             "enrollment_plan",
+            "admission_charter",
+            "tuition_fee",
             "subject_requirement",
-            "strong_foundation",
-            "comprehensive_evaluation",
-            "hk_macao_admission",
         )
-        for kind in annual_single_target_kinds:
+        for kind in required_annual_single_target_kinds:
             kind_years = tuple(task.year for task in by_kind[kind])
-            if len(kind_years) != 4 or set(kind_years) != window:
+            if kind_years != year_window(self.research_year):
+                raise ValueError(f"{kind} tasks must cover the exact four-year window")
+        for kind in ("strong_foundation", "comprehensive_evaluation", "hk_macao_admission"):
+            kind_years = tuple(task.year for task in by_kind[kind])
+            if kind_years and kind_years != year_window(self.research_year):
                 raise ValueError(f"{kind} tasks must cover the exact four-year window")
         special_targets = {
             task.target_name for task in by_kind["special_pathway"]
@@ -911,16 +1313,49 @@ class QueryPlan:
                 raise ValueError(
                     "each special pathway must cover the exact four-year window"
                 )
+        task_identities = {(task.kind, task.target_name) for task in tasks}
+        pathway_task_identities = {
+            identity for identity in task_identities if identity[0] in _PATHWAY_KINDS
+        }
+        if not pathway_task_identities <= _PATHWAY_TASK_UNIVERSE:
+            raise ValueError("pathway task identity is outside the finite universe")
+        trace_by_pathway = {item.pathway_id: item for item in pathway_trace}
+        for pathway_id, expected_family in _PATHWAY_TASK_FAMILIES.items():
+            expected = set(expected_family)
+            present = expected & pathway_task_identities
+            if trace_by_pathway[pathway_id].decision == "exclude":
+                if present:
+                    raise ValueError("excluded pathway must not emit query tasks")
+            elif present != expected:
+                raise ValueError("active pathway must emit its complete query family")
+        identities = tuple(dict.fromkeys((task.kind, task.target_name) for task in tasks))
+        for identity in identities:
+            years = tuple(
+                task.year for task in tasks if (task.kind, task.target_name) == identity
+            )
+            if years != year_window(self.research_year):
+                raise ValueError("each data type must use strict Y through Y-3 order")
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "schema_version": self.schema_version,
             "province": self.province,
+            "mode": self.mode,
             "exam_year": self.exam_year,
+            "research_year": self.research_year,
             "subject_group": self.subject_group,
             "authority_name": self.authority_name,
             "official_roots": list(self.official_roots),
             "catalog_verified_at": self.catalog_verified_at,
+            "catalog_digest": self.catalog_digest,
+            "decision_policy_id": self.decision_policy_id,
+            "decision_policy_digest": self.decision_policy_digest,
+            "decision_basis_id": self.decision_basis_id,
+            "decision_source_id": self.decision_source_id,
+            "decision_source_version": self.decision_source_version,
+            "source_policy_id": self.source_policy_id,
+            "source_policy_version": self.source_policy_version,
+            "pathway_trace": [item.to_dict() for item in self.pathway_trace],
             "tasks": [task.to_dict() for task in self.tasks],
         }
 
@@ -976,10 +1411,46 @@ _EXTRACTION_FIELDS = {
         "subject_group",
         "institution",
         "institution_code",
-        "program",
-        "program_code",
+        "program_group",
+        "majors",
         "plan_count",
         "batch",
+        "school_province",
+        "school_city",
+        "institution_type",
+        "source_url",
+        "publisher",
+        "publication_date",
+    ),
+    "admission_charter": (
+        "province",
+        "year",
+        "institution",
+        "institution_code",
+        "admission_rules",
+        "adjustment_rules",
+        "adjustment_required",
+        "health_restrictions",
+        "language_restrictions",
+        "single_subject_restrictions",
+        "special_conditions",
+        "source_url",
+        "publisher",
+        "publication_date",
+    ),
+    "tuition_fee": (
+        "province",
+        "year",
+        "institution",
+        "institution_code",
+        "program_group",
+        "majors",
+        "annual_fee_amount",
+        "fee_currency",
+        "fee_period",
+        "accommodation_fee",
+        "other_required_fees",
+        "financial_aid",
         "source_url",
         "publisher",
         "publication_date",
@@ -987,10 +1458,12 @@ _EXTRACTION_FIELDS = {
     "subject_requirement": (
         "province",
         "year",
+        "subject_group",
         "institution",
-        "program",
-        "required_subjects",
-        "allowed_combinations",
+        "institution_code",
+        "program_group",
+        "required_secondary_subjects",
+        "secondary_subject_rule",
         "special_conditions",
         "source_url",
         "publisher",
@@ -1064,11 +1537,13 @@ def _make_task(
     official_roots: tuple[str, ...],
     target_name: str | None,
     query_variants: tuple[str, ...],
-    exam_year: int,
+    research_year: int,
+    source_policy_id: str = "pathway-atlas-source-policy",
+    source_policy_version: str = "1.0",
 ) -> QueryTask:
     expectation = (
         "current_year_availability_must_be_checked"
-        if year == exam_year
+        if year == research_year
         else "expected_available"
     )
     values = {
@@ -1086,6 +1561,11 @@ def _make_task(
         "freshness_rule": _FRESHNESS_BY_EXPECTATION[expectation],
         "required_extraction_fields": _EXTRACTION_FIELDS[kind],
         "availability_expectation": expectation,
+        "max_network_retries": 1,
+        "stop_conditions": _STOP_CONDITIONS,
+        "unavailable_reasons": _UNAVAILABLE_REASONS,
+        "source_policy_id": source_policy_id,
+        "source_policy_version": source_policy_version,
     }
     prototype = object.__new__(QueryTask)
     for name, value in values.items():
@@ -1094,7 +1574,30 @@ def _make_task(
     return QueryTask(**values)
 
 
-def build_query_plan(
+def _policy_digest(policy: DecisionPolicySnapshot) -> str:
+    encoded = json.dumps(
+        policy.to_dict(),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
+
+
+def _legacy_pathway_trace() -> tuple[PathwayResearchTrace, ...]:
+    return tuple(
+        PathwayResearchTrace(
+            pathway_id=pathway_id,
+            preference="unknown",
+            decision="discover",
+            reason_code="legacy_private_compatibility",
+        )
+        for pathway_id in _PATHWAY_IDS
+    )
+
+
+def _build_query_plan_legacy(
     profile: RecommendationProfile | PlanningProfile,
     province: ProvinceConfig,
     exam_year: Any,
@@ -1103,7 +1606,7 @@ def build_query_plan(
     requested_pathways: Any = (),
     catalog: ProvinceCatalogSnapshot | None = None,
 ) -> QueryPlan:
-    """Return an immutable plan for one anonymous recommendation profile."""
+    """Private ProvinceConfig compatibility adapter pending Task 9 migration."""
 
     if not isinstance(profile, (RecommendationProfile, PlanningProfile)):
         raise TypeError("profile must be a recommendation or planning profile")
@@ -1114,6 +1617,7 @@ def build_query_plan(
     if type(catalog) is not ProvinceCatalogSnapshot:
         raise TypeError("catalog must be a strict ProvinceCatalogSnapshot")
     discovery = catalog.resolve(province.province)
+    policy = DecisionPolicySnapshot.load_default()
     province_name = discovery.province
     if province.mode != discovery.mode:
         raise ValueError("province policy mode conflicts with discovery catalog mode")
@@ -1167,7 +1671,7 @@ def build_query_plan(
                 authority_name=authority,
                 official_roots=roots,
                 target_name=target,
-                exam_year=year,
+                research_year=year,
                 query_variants=queries,
             )
         )
@@ -1226,6 +1730,24 @@ def build_query_plan(
             (
                 f"{authority} {province_name} {task_year} {subject_group} 高校 招生计划 专业 计划数",
                 f"{authority} {province_name} {task_year} {subject_group} 院校代码 专业代码 招生批次",
+            ),
+        )
+        add_task(
+            "admission_charter",
+            task_year,
+            None,
+            (
+                f"{authority} {province_name} {task_year} {subject_group} 高校 招生章程 录取规则 调剂规则",
+                f"{authority} {province_name} {task_year} {subject_group} 招生章程 体检 外语语种 单科 特殊条件",
+            ),
+        )
+        add_task(
+            "tuition_fee",
+            task_year,
+            None,
+            (
+                f"{authority} {province_name} {task_year} {subject_group} 高校 学费 收费标准 专业",
+                f"{authority} {province_name} {task_year} {subject_group} 学费 住宿费 其他费用 奖助信息",
             ),
         )
         add_task(
@@ -1303,13 +1825,210 @@ def build_query_plan(
     return QueryPlan(
         schema_version=_SCHEMA_VERSION,
         province=province_name,
+        mode=discovery.mode,
         exam_year=year,
+        research_year=year,
         subject_group=subject_group,
         authority_name=authority,
         official_roots=roots,
         catalog_verified_at=catalog.verified_at,
+        catalog_digest=catalog.digest,
+        decision_policy_id=policy.policy_id,
+        decision_policy_digest=_policy_digest(policy),
+        decision_basis_id=policy.basis.basis_id,
+        decision_source_id=policy.basis.source_id,
+        decision_source_version=policy.basis.source_version,
+        source_policy_id=policy.source_policy.policy_id,
+        source_policy_version=policy.source_policy.version,
+        pathway_trace=_legacy_pathway_trace(),
         tasks=tuple(tasks),
     )
+
+
+def _build_query_plan_for_year(
+    profile: PlanningProfile,
+    catalog: ProvinceCatalogSnapshot,
+    policy: DecisionPolicySnapshot,
+    *,
+    research_year: int,
+) -> QueryPlan:
+    """Build the exact task universe for one already-selected research clock."""
+
+    if type(policy) is not DecisionPolicySnapshot:
+        raise TypeError("policy must be a strict DecisionPolicySnapshot")
+    research_year = _normalize_research_year(research_year)
+    context = ResearchContext.create(profile, catalog)
+    trace = _pathway_trace(profile)
+    included = {item.pathway_id for item in trace if item.decision != "exclude"}
+    tasks: list[QueryTask] = []
+    years = year_window(research_year)
+
+    def add_family(
+        kind: str,
+        target: str | None,
+        query_terms: tuple[str, ...],
+    ) -> None:
+        for task_year in years:
+            queries = tuple(
+                f"{context.authority_name} {context.province} {task_year} "
+                f"{context.subject_group} {term}"
+                for term in query_terms
+            )
+            tasks.append(
+                _make_task(
+                    kind=kind,
+                    province=context.province,
+                    year=task_year,
+                    subject_group=context.subject_group,
+                    authority_name=context.authority_name,
+                    official_roots=context.official_roots,
+                    target_name=target,
+                    query_variants=queries,
+                    research_year=research_year,
+                    source_policy_id=policy.source_policy.policy_id,
+                    source_policy_version=policy.source_policy.version,
+                )
+            )
+
+    add_family(
+        "province_policy",
+        None,
+        ("高考政策 考试模式", "批次设置 选科模式"),
+    )
+    add_family("score_table", None, ("一分一段表", "一分一段 位次"))
+    add_family(
+        "batch_admission",
+        "普通批",
+        ("普通批 投档录取", "普通批 院校专业组"),
+    )
+    if profile.high_school is None:
+        add_family(
+            "joy_report",
+            None,
+            ("高中喜报 高考光荣榜 高中升学成果",),
+        )
+    else:
+        add_family(
+            "joy_report",
+            profile.high_school,
+            (
+                f"{profile.high_school} 高考喜报 高考光荣榜 高中升学成果",
+            ),
+        )
+    add_family(
+        "enrollment_plan",
+        None,
+        ("高校 招生计划 专业 计划数", "院校代码 专业代码 招生批次"),
+    )
+    add_family(
+        "admission_charter",
+        None,
+        (
+            "高校 招生章程 录取规则 调剂规则",
+            "招生章程 体检 外语语种 单科 特殊条件",
+        ),
+    )
+    add_family(
+        "tuition_fee",
+        None,
+        (
+            "高校 学费 收费标准 专业",
+            "学费 住宿费 其他费用 奖助信息",
+        ),
+    )
+    add_family(
+        "subject_requirement",
+        None,
+        ("招生专业 选科要求", "院校专业 选考科目要求"),
+    )
+
+    for pathway_id in _PATHWAY_IDS:
+        if pathway_id not in included:
+            continue
+        for identity in _PATHWAY_TASK_FAMILIES[pathway_id]:
+            kind, target = identity
+            terms = _PATHWAY_QUERY_TERMS.get(
+                identity,
+                (
+                    f"{target} 报考条件 普通路径区别",
+                    f"{target} 就业 地域限制 服务期 违约后果",
+                    f"{target} 费用 补助 特殊限制",
+                ),
+            )
+            add_family(kind, target, terms)
+
+    return QueryPlan(
+        schema_version=_SCHEMA_VERSION,
+        province=context.province,
+        mode=context.mode,
+        exam_year=context.exam_year,
+        research_year=research_year,
+        subject_group=context.subject_group,
+        authority_name=context.authority_name,
+        official_roots=context.official_roots,
+        catalog_verified_at=context.catalog_verified_at,
+        catalog_digest=context.catalog_digest,
+        decision_policy_id=policy.policy_id,
+        decision_policy_digest=_policy_digest(policy),
+        decision_basis_id=policy.basis.basis_id,
+        decision_source_id=policy.basis.source_id,
+        decision_source_version=policy.basis.source_version,
+        source_policy_id=policy.source_policy.policy_id,
+        source_policy_version=policy.source_policy.version,
+        pathway_trace=trace,
+        tasks=tuple(tasks),
+    )
+
+
+def build_query_plan(
+    profile: PlanningProfile,
+    catalog: ProvinceCatalogSnapshot,
+    policy: DecisionPolicySnapshot,
+) -> QueryPlan:
+    """Build public research work from a confirmed profile and trusted catalog."""
+
+    return _build_query_plan_for_year(
+        profile,
+        catalog,
+        policy,
+        research_year=_current_utc_year(),
+    )
+
+
+def validate_query_plan_for_profile(
+    profile: PlanningProfile,
+    plan: QueryPlan,
+    *,
+    catalog: ProvinceCatalogSnapshot | None = None,
+) -> QueryPlan:
+    """Replay every profile-derived trace and task against a canonical plan.
+
+    Context fields alone are insufficient: pathway preferences and school
+    context also change the task universe. Rebuilding with the plan-bound
+    research year prevents a different canonical profile from silently
+    authorizing a compatible-looking plan.
+    """
+
+    if type(profile) is not PlanningProfile:
+        raise TypeError("profile must be a strict PlanningProfile")
+    if type(plan) is not QueryPlan:
+        raise TypeError("plan must be a strict QueryPlan")
+    active_catalog = load_province_catalog() if catalog is None else catalog
+    canonical = validate_query_plan_payload(
+        plan.to_dict(),
+        catalog=active_catalog,
+    )
+    expected = _build_query_plan_for_year(
+        profile,
+        active_catalog,
+        DecisionPolicySnapshot.load_default(),
+        research_year=canonical.research_year,
+    )
+    if expected.to_dict() != canonical.to_dict():
+        raise QueryPlanInputError(
+            "query plan does not match the complete profile-derived task universe"
+        )
+    return canonical
 
 
 def validate_query_plan_payload(
@@ -1329,30 +2048,66 @@ def validate_query_plan_payload(
         if not isinstance(raw_task, dict) or set(raw_task) != _TASK_FIELDS:
             raise ValueError("query-task object fields do not match the contract")
         tasks.append(QueryTask(**raw_task))
+    raw_trace = payload["pathway_trace"]
+    if not isinstance(raw_trace, list):
+        raise TypeError("query-plan pathway_trace must be an array")
+    pathway_trace: list[PathwayResearchTrace] = []
+    for raw_item in raw_trace:
+        if not isinstance(raw_item, dict) or set(raw_item) != _PATHWAY_TRACE_FIELDS:
+            raise ValueError("pathway trace fields do not match the contract")
+        pathway_trace.append(PathwayResearchTrace(**raw_item))
     plan = QueryPlan(
         schema_version=payload["schema_version"],
         province=payload["province"],
+        mode=payload["mode"],
         exam_year=payload["exam_year"],
+        research_year=payload["research_year"],
         subject_group=payload["subject_group"],
         authority_name=payload["authority_name"],
         official_roots=tuple(payload["official_roots"]),
         catalog_verified_at=payload["catalog_verified_at"],
+        catalog_digest=payload["catalog_digest"],
+        decision_policy_id=payload["decision_policy_id"],
+        decision_policy_digest=payload["decision_policy_digest"],
+        decision_basis_id=payload["decision_basis_id"],
+        decision_source_id=payload["decision_source_id"],
+        decision_source_version=payload["decision_source_version"],
+        source_policy_id=payload["source_policy_id"],
+        source_policy_version=payload["source_policy_version"],
+        pathway_trace=tuple(pathway_trace),
         tasks=tuple(tasks),
     )
+    if plan.research_year > _current_utc_year():
+        raise ValueError("query-plan research_year cannot be in the future")
     if catalog is None:
         catalog = load_province_catalog()
     if type(catalog) is not ProvinceCatalogSnapshot:
         raise TypeError("catalog must be a strict ProvinceCatalogSnapshot")
+    if not _is_tracked_catalog(catalog):
+        raise ProvinceCatalogError("query-plan validation requires the tracked trusted catalog")
     discovery = catalog.resolve(plan.province)
+    default_policy = DecisionPolicySnapshot.load_default()
     if (
         discovery.province != plan.province
+        or discovery.mode != plan.mode
         or discovery.authority_name != plan.authority_name
         or discovery.official_roots != plan.official_roots
         or catalog.verified_at != plan.catalog_verified_at
+        or catalog.digest != plan.catalog_digest
     ):
         raise ValueError(
             "query-plan discovery metadata does not match the trusted catalog"
         )
+    if (
+        plan.decision_policy_id != default_policy.policy_id
+        or plan.decision_policy_digest != _policy_digest(default_policy)
+        or plan.decision_basis_id != default_policy.basis.basis_id
+        or plan.decision_source_id != default_policy.basis.source_id
+        or plan.decision_source_version != default_policy.basis.source_version
+        or plan.source_policy_id != default_policy.source_policy.policy_id
+        or plan.source_policy_version != default_policy.source_policy.version
+    ):
+        raise ValueError("query-plan decision metadata does not match the reviewed policy")
     return plan
 
 
@@ -1403,6 +2158,31 @@ def _strict_json_file(path_value: Any) -> Any:
         raise ValueError("input is not strict UTF-8 JSON") from error
 
 
+def _strict_json_bytes(data: Any) -> Any:
+    if not isinstance(data, bytes) or len(data) > _MAX_INPUT_BYTES:
+        raise ValueError("input is not bounded bytes")
+    try:
+        return json.loads(
+            data.decode("utf-8"),
+            object_pairs_hook=_strict_object,
+            parse_constant=_reject_constant,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError("input is not strict UTF-8 JSON") from error
+
+
+def _read_stdin_profile() -> Any:
+    stream = getattr(sys.stdin, "buffer", None)
+    if stream is None:
+        text = sys.stdin.read(_MAX_INPUT_BYTES + 1)
+        if not isinstance(text, str):
+            raise ValueError("stdin did not provide text")
+        data = text.encode("utf-8")
+    else:
+        data = stream.read(_MAX_INPUT_BYTES + 1)
+    return _strict_json_bytes(data)
+
+
 def _profile_array(payload: dict[str, Any], name: str) -> tuple[str, ...]:
     value = payload[name]
     if not isinstance(value, list):
@@ -1412,7 +2192,7 @@ def _profile_array(payload: dict[str, Any], name: str) -> tuple[str, ...]:
 
 def _load_profile(path: Any) -> tuple[RecommendationProfile | PlanningProfile, str, int]:
     payload = _strict_json_file(path)
-    if isinstance(payload, dict) and payload.get("schema_version") == "2.0":
+    if isinstance(payload, dict) and payload.get("schema_version") in {"2.0", "3.0"}:
         profile = load_planning_profile(payload)
         return profile, profile.subject_mode, profile.exam_year
     if not isinstance(payload, dict) or set(payload) != _PROFILE_FIELDS:
@@ -1450,13 +2230,9 @@ def _load_province(path: Any) -> ProvinceConfig:
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = _SafeArgumentParser(description="Build a deterministic research query plan")
-    parser.add_argument("--profile", required=True, action=_SingleUseAction)
-    parser.add_argument("--province", required=True, action=_SingleUseAction)
-    parser.add_argument("--exam-year", required=True, action=_SingleUseAction)
-    parser.add_argument("--pathway", action="append", default=[])
-    parser.add_argument("--high-school", action=_SingleUseAction)
-    return parser
+    return _SafeArgumentParser(
+        description="Build a deterministic research query plan from a v3 profile on stdin"
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1464,25 +2240,16 @@ def main(argv: list[str] | None = None) -> int:
         sys.stderr.write("query-plan: missing capability\n")
         return 3
     try:
-        arguments = _parser().parse_args(argv)
-        try:
-            raw_exam_year: Any = int(arguments.exam_year)
-        except (TypeError, ValueError) as error:
-            raise ValueError("exam-year CLI value must be an integer") from error
-        exam_year = _normalize_exam_year(raw_exam_year)
-        profile, subject_mode, profile_year = _load_profile(arguments.profile)
-        province = _load_province(arguments.province)
-        if subject_mode != province.mode or profile_year != exam_year:
-            raise ValueError("profile context does not match requested plan")
-        plan = build_query_plan(
-            profile,
-            province,
-            exam_year,
-            high_school_name=arguments.high_school,
-            requested_pathways=arguments.pathway,
-        )
+        _parser().parse_args(argv)
+        raw_profile = _read_stdin_profile()
+        if not isinstance(raw_profile, dict) or raw_profile.get("schema_version") != "3.0":
+            raise ValueError("public query-plan input must be a v3 profile")
+        profile = PlanningProfile.create(raw_profile)
+        catalog = load_province_catalog()
+        policy = DecisionPolicySnapshot.load_default()
+        plan = build_query_plan(profile, catalog, policy)
         payload = plan.to_dict()
-        validate_query_plan_payload(payload)
+        validate_query_plan_payload(payload, catalog=catalog)
         encoded = json.dumps(
             payload,
             ensure_ascii=False,
@@ -1500,7 +2267,7 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _reconfigure_utf8() -> None:
-    for stream in (sys.stdout, sys.stderr):
+    for stream in (sys.stdin, sys.stdout, sys.stderr):
         try:
             stream.reconfigure(encoding="utf-8")
         except (AttributeError, ValueError):
@@ -1512,11 +2279,13 @@ __all__ = [
     "ProvinceCatalogError",
     "ProvinceCatalogSnapshot",
     "ProvinceDiscovery",
+    "ResearchContext",
     "QueryPlan",
     "QueryPlanCapabilityError",
     "QueryTask",
     "build_query_plan",
     "load_province_catalog",
+    "validate_query_plan_for_profile",
     "validate_query_plan_payload",
 ]
 

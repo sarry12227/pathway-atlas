@@ -4,6 +4,7 @@ from collections.abc import Iterator, Mapping
 import contextlib
 from dataclasses import FrozenInstanceError, replace
 from enum import Enum
+import hashlib
 import http.client
 import io
 import json
@@ -11,7 +12,6 @@ import math
 import os
 from pathlib import Path
 import socket
-import shutil
 import stat
 import subprocess
 import sys
@@ -492,7 +492,7 @@ class _AdmissionEvidenceBridgeContractMixin:
     def _inputs():
         from scripts.contracts import RecommendationProfile
         from scripts.province_registry import discover_provinces
-        from scripts.query_plan import build_query_plan, load_province_catalog
+        from scripts.query_plan import _build_query_plan_legacy, load_province_catalog
         from scripts.validate_data import ValidatedAdmissionRow
 
         configs = discover_provinces(ROOT / "tests" / "fixtures" / "provinces")
@@ -503,7 +503,7 @@ class _AdmissionEvidenceBridgeContractMixin:
             subject_group="物理",
             secondary_subjects=frozenset({"化学", "地理"}),
         )
-        plan = build_query_plan(
+        plan = _build_query_plan_legacy(
             profile, config, 2026, catalog=load_province_catalog()
         )
         task = next(
@@ -521,6 +521,7 @@ class _AdmissionEvidenceBridgeContractMixin:
                 "school_code": "SYN312A",
                 "school_name": "虚构甲大学",
                 "program_group": "第01组",
+                "major_group_name": "计算机类",
                 "min_score": 645,
                 "min_rank": 1100,
                 "remarks": "",
@@ -560,8 +561,131 @@ class _AdmissionEvidenceBridgeContractMixin:
         )
         return task, dataset_row, adapter_row, table
 
-    def test_bridge_reuses_public_whole_row_hash_and_keeps_coverage_status_separate(self):
+    def _bridge(self, *, coverage_status=EvidenceStatus.PARTIAL):
         from scripts.adapters.admission_bridge import bridge_admission_evidence
+
+        task, dataset_row, adapter_row, table = self._inputs()
+        return bridge_admission_evidence(
+            table=table,
+            adapter_row=adapter_row,
+            task=task,
+            dataset_row=dataset_row,
+            fact_id="html-admission-row",
+            candidates=(self._candidate(),),
+            coverage_status=coverage_status,
+        )
+
+    def test_validator_rejects_coverage_escalation_even_after_visible_digest_rehash(self):
+        from scripts.adapters.admission_bridge import (
+            AdmissionBridgeError,
+            validate_admission_evidence_bridge,
+        )
+
+        bridged = self._bridge(coverage_status=EvidenceStatus.PARTIAL)
+        object.__setattr__(bridged, "coverage_status", EvidenceStatus.OFFICIAL)
+
+        # An attacker can recompute every public digest.  The factory-owned
+        # origin must remain the authority rather than the visible enum/hash.
+        visible = bridged.to_dict()
+        for name in ("origin_digest", "bridge_digest"):
+            self.assertTrue(hasattr(bridged, name), f"missing {name}")
+            body = {key: value for key, value in visible.items() if key != name}
+            forged = "sha256:" + hashlib.sha256(
+                json.dumps(
+                    body,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+            object.__setattr__(bridged, name, forged)
+
+        with self.assertRaises(AdmissionBridgeError):
+            validate_admission_evidence_bridge(bridged)
+
+    def test_validator_replays_and_binds_the_complete_query_task_projection(self):
+        from copy import copy
+
+        from scripts.adapters.admission_bridge import (
+            AdmissionBridgeError,
+            validate_admission_evidence_bridge,
+        )
+
+        mutations = {
+            "year": 2025,
+            "kind": "score_table",
+            "target_name": "伪造批次",
+            "query_variants": ("黑龙江 2026 物理 黑龙江省招生考试院 伪造普通批",),
+            "source_policy_id": "forged-source-policy",
+            "source_policy_version": "9.9",
+        }
+        for field, value in mutations.items():
+            with self.subTest(field=field):
+                bridged = self._bridge()
+                detached = copy(bridged.task)
+                object.__setattr__(detached, field, value)
+                object.__setattr__(bridged, "task", detached)
+                with self.assertRaises(AdmissionBridgeError):
+                    validate_admission_evidence_bridge(bridged)
+
+        bridged = self._bridge()
+        self.assertEqual(bridged.to_dict()["task"], bridged.task.to_dict())
+
+    def test_planning_receipt_cannot_promote_mutated_partial_coverage(self):
+        from copy import copy
+
+        from scripts.adapters.admission_bridge import (
+            AdmissionBridgeError,
+            bridge_admission_evidence,
+        )
+        from scripts.planning_session import (
+            PlanningSessionInputError,
+            build_task_evidence_outcome,
+        )
+        from scripts.validate_data import ValidatedAdmissionRow
+        from tests.test_pathway_evidence_bridge import profile, plan
+
+        student = profile()
+        query_plan = plan(student)
+        task = next(
+            item
+            for item in query_plan.tasks
+            if item.kind == "batch_admission"
+            and item.target_name == "普通批"
+        )
+        _legacy_task, dataset_row, adapter_row, table = self._inputs()
+        contextual_row = ValidatedAdmissionRow.from_mapping(
+            {
+                **dataset_row.to_dict(),
+                "year": task.year,
+                "province": task.province,
+                "subject_group": task.subject_group,
+            }
+        )
+        bridge = bridge_admission_evidence(
+            table=table,
+            adapter_row=adapter_row,
+            task=copy(task),
+            dataset_row=contextual_row,
+            fact_id="receipt-admission-row",
+            candidates=(self._candidate(),),
+            coverage_status=EvidenceStatus.PARTIAL,
+        )
+        object.__setattr__(bridge, "coverage_status", EvidenceStatus.OFFICIAL)
+
+        with self.assertRaisesRegex(
+            PlanningSessionInputError,
+            "admission evidence bridge failed canonical replay",
+        ):
+            build_task_evidence_outcome(
+                student, query_plan, task, (bridge,)
+            )
+
+    def test_bridge_reuses_public_whole_row_hash_and_keeps_coverage_status_separate(self):
+        from scripts.adapters.admission_bridge import (
+            bridge_admission_evidence,
+            validate_admission_evidence_bridge,
+        )
         from scripts.validate_data import admission_row_hash
 
         task, dataset_row, adapter_row, table = self._inputs()
@@ -580,12 +704,29 @@ class _AdmissionEvidenceBridgeContractMixin:
                 coverage_status=EvidenceStatus.PARTIAL,
             )
         hasher.assert_called_once_with(dataset_row)
+        self.assertIs(validate_admission_evidence_bridge(bridged), bridged)
         self.assertEqual(bridged.admission_row_hash, admission_row_hash(dataset_row))
         self.assertEqual(bridged.coverage_status, EvidenceStatus.PARTIAL)
         self.assertEqual(bridged.fact.status, EvidenceStatus.OFFICIAL)
         self.assertEqual(bridged.fact.value["coverage_status"], "partial")
         self.assertEqual(
             bridged.fact.value["row_hash"], bridged.admission_row_hash
+        )
+        self.assertEqual(
+            bridged.fact.value["dataset_row"], dataset_row.to_dict()
+        )
+        with self.assertRaises(FrozenInstanceError):
+            bridged.admission_row_hash = "sha256:" + "0" * 64
+        with self.assertRaises(TypeError):
+            replace(bridged, admission_row_hash="sha256:" + "0" * 64)
+        detached_value = bridged.fact.value
+        detached_value["dataset_row"]["school_name"] = "篡改大学"
+        self.assertEqual(
+            bridged.fact.value["dataset_row"], dataset_row.to_dict()
+        )
+        object.__setattr__(candidate, "summary", "篡改来源")
+        self.assertEqual(
+            bridged.to_dict()["sources"][0]["summary"], "合成普通批投档表"
         )
 
         with tempfile.TemporaryDirectory() as temporary:
@@ -600,8 +741,78 @@ class _AdmissionEvidenceBridgeContractMixin:
         self.assertIsNotNone(validation.snapshot)
         fact = validation.snapshot.facts[0].to_dict()
         self.assertEqual(fact["value"]["row_hash"], admission_row_hash(dataset_row))
+        self.assertEqual(fact["value"]["dataset_row"], dataset_row.to_dict())
         self.assertEqual(fact["value"]["coverage_status"], "partial")
         self.assertEqual(fact["status"], "official")
+
+    def test_optional_school_decision_metadata_must_be_exactly_observed_by_adapter(self):
+        from scripts.adapters.admission_bridge import (
+            AdmissionBridgeError,
+            bridge_admission_evidence,
+            validate_admission_evidence_bridge,
+        )
+        from scripts.validate_data import ValidatedAdmissionRow
+
+        task, dataset_row, adapter_row, table = self._inputs()
+        metadata = {
+            "city_location": "武汉",
+            "school_province": "湖北",
+            "majors_in_group": ("人工智能", "计算机科学与技术"),
+            "institution_type": "public",
+            "affordable_for": ("limited", "moderate"),
+            "adjustment_required": False,
+        }
+        authenticated_row = ValidatedAdmissionRow.from_mapping(
+            {**dataset_row.to_dict(), **metadata}
+        )
+        arguments = {
+            "table": table,
+            "adapter_row": adapter_row,
+            "task": task,
+            "dataset_row": authenticated_row,
+            "fact_id": "observed-admission-row",
+            "candidates": (self._candidate(),),
+            "coverage_status": EvidenceStatus.PARTIAL,
+        }
+
+        with self.assertRaises(AdmissionBridgeError):
+            bridge_admission_evidence(**arguments)
+
+        observed_adapter = replace(
+            adapter_row,
+            values={**dict(adapter_row.values), **metadata},
+            cell_status={
+                **dict(adapter_row.cell_status),
+                **{name: CellStatus.EXACT for name in metadata},
+            },
+        )
+        observed_table = replace(table, rows=(observed_adapter,))
+        bridged = bridge_admission_evidence(
+            **{
+                **arguments,
+                "table": observed_table,
+                "adapter_row": observed_adapter,
+            }
+        )
+        self.assertIs(validate_admission_evidence_bridge(bridged), bridged)
+        self.assertEqual(
+            {name: bridged.fact.value["dataset_row"][name] for name in metadata},
+            metadata,
+        )
+        self.assertEqual(bridged.fact.status, EvidenceStatus.OFFICIAL)
+
+        mismatched_adapter = replace(
+            observed_adapter,
+            values={**dict(observed_adapter.values), "city_location": "上海"},
+        )
+        with self.assertRaises(AdmissionBridgeError):
+            bridge_admission_evidence(
+                **{
+                    **arguments,
+                    "table": replace(table, rows=(mismatched_adapter,)),
+                    "adapter_row": mismatched_adapter,
+                }
+            )
 
     def test_bridge_rejects_detached_nonexact_or_context_mismatched_rows(self):
         from scripts.adapters.admission_bridge import (
@@ -610,7 +821,7 @@ class _AdmissionEvidenceBridgeContractMixin:
         )
         from scripts.contracts import RecommendationProfile
         from scripts.province_registry import discover_provinces
-        from scripts.query_plan import build_query_plan, load_province_catalog
+        from scripts.query_plan import _build_query_plan_legacy, load_province_catalog
 
         task, dataset_row, adapter_row, table = self._inputs()
         arguments = {
@@ -635,7 +846,7 @@ class _AdmissionEvidenceBridgeContractMixin:
         )
         wrong_task = next(
             item
-            for item in build_query_plan(
+            for item in _build_query_plan_legacy(
                 RecommendationProfile(
                     rank=1100,
                     target_province="黑龙江",
@@ -1194,60 +1405,6 @@ class AdmissionAdapterEndToEndTest(unittest.TestCase):
             score_scale=(0, 750),
         )
 
-    def _dataset_context(self, workspace: Path):
-        from scripts.contracts import RecommendationProfile
-        from scripts.query_plan import build_query_plan, load_province_catalog
-        from scripts.validate_data import validate_dataset_snapshot
-
-        dataset = workspace / "dataset"
-        shutil.copytree(ROOT / "tests" / "fixtures" / "provinces" / "demo-312", dataset)
-        metadata_path = dataset / "province.json"
-        metadata = json.loads(metadata_path.read_text("utf-8"))
-        metadata["province"] = "黑龙江"
-        metadata_path.write_text(
-            json.dumps(metadata, ensure_ascii=False), encoding="utf-8"
-        )
-        admission_path = dataset / "tou_dang.csv"
-        admission_path.write_text(
-            admission_path.read_text("utf-8").replace("演示甲省", "黑龙江"),
-            encoding="utf-8",
-        )
-        profile_path = workspace / "profile.json"
-        profile = json.loads(
-            (ROOT / "tests" / "fixtures" / "profiles" / "demo.json").read_text(
-                "utf-8"
-            )
-        )
-        profile["province"] = "黑龙江"
-        profile_path.write_text(
-            json.dumps(profile, ensure_ascii=False), encoding="utf-8"
-        )
-
-        validation = validate_dataset_snapshot(dataset.resolve())
-        self.assertEqual(validation.issues, ())
-        self.assertIsNotNone(validation.snapshot)
-        snapshot = validation.snapshot
-        recommendation_profile = RecommendationProfile(
-            rank=1100,
-            target_province="黑龙江",
-            subject_group="物理",
-            secondary_subjects=frozenset({"化学", "地理"}),
-        )
-        plan = build_query_plan(
-            recommendation_profile,
-            snapshot.config,
-            2026,
-            catalog=load_province_catalog(),
-        )
-        task = next(
-            item
-            for item in plan.tasks
-            if item.kind == "batch_admission"
-            and item.target_name == "普通批"
-            and item.year == 2026
-        )
-        return dataset, profile_path, snapshot.admission_rows[0], task
-
     def _html_table(self, workspace: Path):
         path = (workspace / "admission.html").resolve()
         path.write_text(
@@ -1255,7 +1412,7 @@ class AdmissionAdapterEndToEndTest(unittest.TestCase):
             "<th>院校代码</th><th>院校名称</th><th>专业组</th>"
             "<th>最低分</th><th>最低位次</th></tr>"
             "<tr><td>SYN312A</td><td>虚构甲大学</td><td>第01组</td>"
-            "<td>645</td><td>1100</td></tr></table>",
+            "<td>605</td><td>20000</td></tr></table>",
             encoding="utf-8",
         )
         return extract_html_table(
@@ -1273,7 +1430,7 @@ class AdmissionAdapterEndToEndTest(unittest.TestCase):
         sheet = workbook.active
         sheet.title = "普通批"
         sheet.append(("院校代码", "院校名称", "专业组", "最低分", "最低位次"))
-        sheet.append(("SYN312A", "虚构甲大学", "第01组", 645, 1100))
+        sheet.append(("SYN312A", "虚构甲大学", "第01组", 605, 20000))
         workbook.save(path)
         workbook.close()
         return extract_spreadsheet(path, sheet="普通批", mapping=self._mapping())
@@ -1283,8 +1440,8 @@ class AdmissionAdapterEndToEndTest(unittest.TestCase):
 
         labels = ("院校代码", "院校名称", "专业组", "最低分", "最低位次")
         rows = (
-            ("SYN312A", "虚构甲大学", "第01组", 645, 1100),
-            ("SYN312B", "虚构乙大学", "第02组", 640, 1200),
+            ("SYN312A", "虚构甲大学", "第01组", 605, 20000),
+            ("SYN312B", "虚构乙大学", "第02组", 600, 21000),
         )
         payload_rows = []
         for row_index, values in enumerate(rows):
@@ -1330,8 +1487,8 @@ class AdmissionAdapterEndToEndTest(unittest.TestCase):
                     "row_index": 2,
                     "label": "最低位次",
                     "bbox": [400, 50, 490, 90],
-                    "raw_text": "1200",
-                    "normalized_value": 1200,
+                    "raw_text": "21000",
+                    "normalized_value": 21000,
                 },
             ],
         }
@@ -1344,10 +1501,16 @@ class AdmissionAdapterEndToEndTest(unittest.TestCase):
             min_exact_confidence=0.95,
         )
 
-    def test_html_xlsx_and_ocr_reach_authenticated_markdown_and_docx(self):
-        from scripts import docx_export, generate_report
+    def test_html_xlsx_and_ocr_reach_one_shared_markdown_docx_model(self):
+        from scripts import docx_export
         from scripts.adapters.admission_bridge import bridge_admission_evidence
-        from scripts.validate_data import admission_row_hash
+        from scripts.decision_policy import DecisionPolicySnapshot
+        from scripts.generate_report import build_pathway_atlas_model
+        from scripts.report_model import render_markdown
+        from scripts.research_snapshot import build_research_snapshot
+        from scripts.validate_data import ValidatedAdmissionRow, admission_row_hash
+        from tests.test_docx_semantic_parity import typed_atlas_artifacts
+        from tests.test_research_snapshot import bridges
 
         builders = {
             "html": self._html_table,
@@ -1357,7 +1520,25 @@ class AdmissionAdapterEndToEndTest(unittest.TestCase):
         for index, (adapter_name, build_table) in enumerate(builders.items()):
             with self.subTest(adapter=adapter_name), tempfile.TemporaryDirectory() as temporary:
                 workspace = Path(temporary).resolve()
-                dataset, profile_path, dataset_row, task = self._dataset_context(workspace)
+                planning, query_plan, _rank_bridge, _unused_admission_bridge = bridges()
+                task = next(
+                    item for item in query_plan.tasks
+                    if item.kind == "batch_admission" and item.target_name == "普通批"
+                    and item.year == 2025
+                )
+                dataset_row = ValidatedAdmissionRow.from_mapping(
+                    {
+                        "year": 2025,
+                        "province": planning.province,
+                        "subject_group": query_plan.subject_group,
+                        "school_code": "SYN312A",
+                        "school_name": "虚构甲大学",
+                        "program_group": "第01组",
+                        "min_score": 605,
+                        "min_rank": 20000,
+                        "remarks": "",
+                    }
+                )
                 table = build_table(workspace)
                 adapter_row = next(
                     row
@@ -1370,8 +1551,8 @@ class AdmissionAdapterEndToEndTest(unittest.TestCase):
                     url=f"https://www.hljea.org.cn/{adapter_name}-admission",
                     publisher="黑龙江省招生考试院",
                     tier=SourceTier.A,
-                    published_at="2026-06-25",
-                    retrieved_at="2026-08-24T00:00:00Z",
+                    published_at="2025-06-25",
+                    retrieved_at="2026-06-26T00:00:00Z",
                     content_hash="sha256:" + chr(ord("a") + index) * 64,
                     citation_root="https://www.hljea.org.cn/",
                     summary=f"{adapter_name} 合成普通批投档表",
@@ -1393,70 +1574,35 @@ class AdmissionAdapterEndToEndTest(unittest.TestCase):
                     bridged.fact.value["coverage_status"], "partial"
                 )
 
-                evidence_root = workspace / "evidence-root"
-                evidence_root.mkdir()
-                store = EvidenceStore.create(
-                    evidence_root,
-                    CapabilityReport(
-                        tier=CapabilityTier.STANDARD,
-                        host_capabilities=("browse", "search"),
-                        available_capabilities=("browse", "search"),
-                        missing_capabilities=("pdfplumber", "vision"),
-                        degradations=("synthetic offline replay",),
-                        python_version="3.14.0",
-                        optional_modules=("docx", "openpyxl"),
-                    ),
-                )
-                store.add_candidate(candidate)
-                bridged.persist(store)
-                store.finalize()
-                validation = validate_bundle_snapshot(store.session_path)
-                self.assertEqual(validation.issues, ())
-                self.assertIsNotNone(validation.snapshot)
-
-                markdown_stdout, markdown_stderr = io.StringIO(), io.StringIO()
-                with contextlib.redirect_stdout(markdown_stdout), contextlib.redirect_stderr(
-                    markdown_stderr
-                ):
-                    markdown_exit = generate_report.main(
-                        [
-                            "--dataset",
-                            str(dataset),
-                            "--profile",
-                            str(profile_path),
-                            "--evidence",
-                            str(store.session_path),
-                        ]
+                with typed_atlas_artifacts(
+                    admission_bridge=bridged, admission_candidates=(candidate,)
+                ) as (typed_profile, typed_plan, bundle, _profile_path):
+                    self.assertEqual(typed_profile.digest, planning.digest)
+                    self.assertEqual(typed_plan, query_plan)
+                    reviewed = DecisionPolicySnapshot.load_default()
+                    research = build_research_snapshot(
+                        typed_profile, typed_plan, bundle, reviewed
                     )
-                self.assertEqual(markdown_exit, 0, markdown_stderr.getvalue())
-                self.assertEqual(markdown_stderr.getvalue(), "")
-                self.assertIn("虚构甲大学", markdown_stdout.getvalue())
-
-                docx_directory = workspace / "docx-output"
-                docx_directory.mkdir()
-                docx_path = docx_directory / docx_export.PUBLIC_DOCX_BASENAME
-                docx_stdout, docx_stderr = io.StringIO(), io.StringIO()
-                with contextlib.redirect_stdout(docx_stdout), contextlib.redirect_stderr(
-                    docx_stderr
-                ):
-                    docx_exit = docx_export.main(
-                        [
-                            "--dataset",
-                            str(dataset),
-                            "--profile",
-                            str(profile_path),
-                            "--evidence",
-                            str(store.session_path),
-                            "--output",
-                            str(docx_path),
-                        ]
+                    report = build_pathway_atlas_model(
+                        typed_profile,
+                        research,
+                        bundle,
+                        typed_plan,
+                        decision_policy=reviewed,
                     )
-                self.assertEqual(docx_exit, 0, docx_stderr.getvalue())
-                self.assertEqual(docx_stderr.getvalue(), "")
-                self.assertTrue(zipfile.is_zipfile(docx_path))
-                with zipfile.ZipFile(docx_path) as archive:
-                    document_xml = archive.read("word/document.xml").decode("utf-8")
-                self.assertIn("虚构甲大学", document_xml)
+                    markdown = render_markdown(report)
+                    docx_path = docx_export.export_docx(
+                        report, workspace / docx_export.PUBLIC_DOCX_BASENAME
+                    )
+                    with zipfile.ZipFile(docx_path) as archive:
+                        document_xml = archive.read("word/document.xml").decode("utf-8")
+
+                for literal in (
+                    "虚构甲大学", source_id, "二、当前最需要做的事",
+                    "八、证据披露",
+                ):
+                    self.assertIn(literal, markdown)
+                    self.assertIn(literal, document_xml)
 
 
 class SpreadsheetAdapterTest(unittest.TestCase):
@@ -1819,10 +1965,14 @@ socket.create_connection = blocked
 socket.getaddrinfo = blocked
 import scripts.adapters.html_table
 import scripts.adapters.spreadsheet
+import scripts.adapters.pathway_extraction
+import scripts.adapters.pathway_bridge
 sys.modules.pop('adapters', None)
 sys.path.insert(0, {str(ROOT / 'scripts')!r})
 import adapters.html_table
 import adapters.spreadsheet
+import adapters.pathway_extraction
+import adapters.pathway_bridge
 print('ok')
 """
         completed = subprocess.run(
@@ -1872,6 +2022,80 @@ print('ok')
                 mapping=HtmlAdapterTest.mapping(),
             ).rows), 3)
             self.assertEqual(len(extract_spreadsheet(XLSX_FIXTURE, sheet="物理类", mapping=self.mapping()).rows), 3)
+
+
+class PathwayStructuredProjectionTest(unittest.TestCase):
+    def test_html_output_and_candidate_generator_reach_typed_pathway_projection(self):
+        from scripts.adapters.pathway_extraction import extract_pathway_policy
+        from tests.test_pathway_evidence_bridge import (
+            POLICY_FIELDS,
+            candidate,
+            plan,
+            policy_values,
+            profile,
+            task_for,
+        )
+
+        values = policy_values()
+        headers = "".join(f"<th>{name}</th>" for name in POLICY_FIELDS)
+        cells = "".join(f"<td>{values[name]}</td>" for name in POLICY_FIELDS)
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary, "pathway.html").resolve()
+            source.write_text(
+                f"<table><caption>合成路径政策</caption><tr>{headers}</tr><tr>{cells}</tr></table>",
+                encoding="utf-8",
+            )
+            table = extract_html_table(
+                source,
+                table_index=1,
+                expected_caption="合成路径政策",
+                mapping=ColumnMapping({name: name for name in POLICY_FIELDS}),
+            )
+
+        student = profile()
+        query_plan = plan(student)
+        task = task_for(query_plan)
+        projection = extract_pathway_policy(
+            profile=student,
+            plan=query_plan,
+            task=task,
+            extraction=table,
+            field_map={name: name for name in POLICY_FIELDS},
+            candidates=(item for item in (candidate(),)),
+        )
+        self.assertIs(projection.evidence_status, EvidenceStatus.OFFICIAL)
+        self.assertEqual(projection.institution, "示例高校")
+        self.assertEqual(
+            {method for item in projection.field_provenance for method in item.extraction_methods},
+            {"html-table"},
+        )
+
+    def test_xlsx_adapter_contract_output_is_accepted_without_path_material(self):
+        from scripts.adapters.pathway_extraction import extract_pathway_policy
+        from tests.test_pathway_evidence_bridge import (
+            POLICY_FIELDS,
+            candidate,
+            plan,
+            policy_table,
+            profile,
+            task_for,
+        )
+
+        student = profile()
+        query_plan = plan(student)
+        task = task_for(query_plan)
+        table = replace(policy_table(), extraction_method="xlsx-worksheet")
+        projection = extract_pathway_policy(
+            profile=student,
+            plan=query_plan,
+            task=task,
+            extraction=table,
+            field_map={name: name for name in POLICY_FIELDS},
+            candidates=(candidate(),),
+        )
+        serialized = json.dumps(projection.to_dict(), ensure_ascii=False)
+        self.assertIn("xlsx-worksheet", serialized)
+        self.assertNotIn(str(ROOT), serialized)
 
 
 if __name__ == "__main__":

@@ -319,7 +319,9 @@ class ValidateEvidenceCliTest(unittest.TestCase):
                     summary,
                 )
 
-    def test_public_snapshot_is_factory_only_deep_frozen_and_hash_bound(self):
+    def test_public_snapshot_is_factory_only_deep_frozen_and_digest_diagnostic(self):
+        import scripts.validate_evidence as validator_module
+
         result = validate_bundle_snapshot(FIXTURES / "three-source-consensus")
 
         self.assertEqual(result.issues, ())
@@ -328,15 +330,49 @@ class ValidateEvidenceCliTest(unittest.TestCase):
         assert snapshot is not None
         self.assertEqual(snapshot.retrieval_dates, ("2026-08-23",))
         self.assertEqual(snapshot.manifest.manifest_hash, snapshot.manifest_hash)
+        self.assertRegex(snapshot.facts_digest, r"^sha256:[0-9a-f]{64}$")
+        self.assertEqual(len(snapshot.candidates), 3)
+        self.assertEqual(len(snapshot.contexts), 2)
+        self.assertEqual(snapshot.candidates[0].to_dict()["source_id"], "s1")
+        self.assertEqual(
+            next(
+                item.to_dict()["fact_id"]
+                for item in snapshot.contexts
+                if item.to_dict().get("kind") == "fact-provenance"
+            ),
+            snapshot.facts[0].to_dict()["fact_id"],
+        )
+        self.assertFalse(
+            hasattr(validator_module, "validate_evidence_snapshot_identity")
+        )
         payload = snapshot.facts[0].to_dict()
         payload["field"] = "tampered"
         self.assertNotEqual(snapshot.facts[0].to_dict()["field"], "tampered")
+        candidate_payload = snapshot.candidates[0].to_dict()
+        candidate_payload["url"] = "https://tampered.example.cn/"
+        self.assertNotEqual(
+            snapshot.candidates[0].to_dict()["url"],
+            candidate_payload["url"],
+        )
         with self.assertRaises(FrozenInstanceError):
             snapshot.retrieval_dates = ("2026-08-24",)
         with self.assertRaises(TypeError):
             replace(snapshot, retrieval_dates=("2026-08-24",))
         with self.assertRaises(TypeError):
             ValidatedEvidenceSnapshot()
+
+        self.assertFalse(
+            hasattr(ValidatedEvidenceSnapshot, "_from_validated_bundle")
+        )
+
+        direct = ValidatedEvidenceSnapshot._create(
+            snapshot.manifest,
+            snapshot.capability,
+            snapshot.retrieval_dates,
+            snapshot.facts,
+            snapshot.rejections,
+        )
+        self.assertEqual(direct.facts_digest, snapshot.facts_digest)
 
     def test_invalid_bundle_snapshot_returns_issues_and_no_data(self):
         result = validate_bundle_snapshot(FIXTURES / "repost-conflict")

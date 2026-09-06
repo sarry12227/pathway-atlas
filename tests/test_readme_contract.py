@@ -1,4 +1,5 @@
 import json
+import hashlib
 import os
 import re
 from pathlib import Path
@@ -15,9 +16,16 @@ except ModuleNotFoundError:  # pragma: no cover - Python 3.10 test extra
 
 ROOT = Path(__file__).resolve().parents[1]
 README = ROOT / "README.md"
+RELEASE_PROCESS = ROOT / "docs" / "release-process.md"
 PYPROJECT = ROOT / "pyproject.toml"
 SCRIPTS = ROOT / "scripts"
 FIXTURES = ROOT / "tests" / "fixtures"
+FIXED_README_PREFIX = """一句话让AI调用此skill：
+
+```bash
+请使用你当前环境的 Skill 安装能力，从 GitHub `https://github.com/sarry12227/pathway-atlas` 安装 `pathway-atlas`（多元星途）；如果 GitHub 无法访问，请改用 Gitee 镜像 `https://gitee.com/sarry1/pathway-atlas`。若环境没有专用安装工具，请将仓库克隆或下载到当前 Agent 的 Skills 目录，确认根目录存在 `SKILL.md` 且其中 `name` 为 `pathway-atlas`，然后重新加载并调用它。
+```
+"""
 INTRODUCTION = (
     "多元星途（PathwayAtlas）是面向全国新高考省份的开源 AI 升学规划 Skill："
     "实时检索并交叉验证公开数据，"
@@ -28,6 +36,7 @@ PUBLIC_SCRIPT_CLIS = {
     "docx_export.py",
     "generate_report.py",
     "live_smoke.py",
+    "planning_session.py",
     "preflight.py",
     "query_plan.py",
     "validate_data.py",
@@ -90,25 +99,43 @@ class ReadmeContractTest(unittest.TestCase):
     def setUpClass(cls):
         cls.text = README.read_text(encoding="utf-8")
 
+    def test_readme_starts_with_user_owned_install_prompt(self):
+        raw = README.read_bytes()
+        prefix = FIXED_README_PREFIX.encode("utf-8")
+        self.assertTrue(raw.startswith(prefix))
+        self.assertEqual(raw.count(prefix), 1)
+        logo_start = raw.index(b"<p align=")
+        self.assertEqual(raw[len(prefix) :], b"\n" + raw[logo_start:])
+        self.assertEqual(
+            hashlib.sha256(raw[: len(prefix)]).hexdigest(),
+            hashlib.sha256(prefix).hexdigest(),
+        )
+
+    def test_docx_docs_describe_the_v3_host_flow_without_user_json_or_paths(self):
+        legacy_command = (
+            "python scripts/docx_export.py --dataset tests/fixtures/provinces/demo-312"
+        )
+        self.assertNotIn(legacy_command, self.text)
+        self.assertIn("宿主内部", self.text)
+        self.assertIn("canonical QueryPlan", self.text)
+        release = RELEASE_PROCESS.read_text(encoding="utf-8")
+        self.assertNotIn("scripts\\docx_export.py --dataset", release)
+        self.assertIn("宿主内部", release)
+
+    def test_readme_describes_the_unified_profile_sensitive_session(self):
+        journey = section(self.text, "用户旅程")
+        for marker in (
+            "planning_session.py", "host_workflow.py start", "next", "ingest",
+            "finish", "当前查询年", "Y → Y-1 → Y-2 → Y-3",
+            "偏好参与判断", "当前最需要做的事", "公开预览",
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, journey)
+        self.assertIn("用户不接触内部 JSON、文件路径或命令", journey)
+
     def test_readme_contains_the_approved_public_description(self):
         paragraphs = [part.strip() for part in self.text.split("\n\n") if part.strip()]
         self.assertIn(INTRODUCTION, paragraphs)
-
-    def test_first_line_install_prompt_invokes_the_full_intake_and_decision_flow(self):
-        first_line = self.text.splitlines()[0]
-        for phrase in (
-            "复制给 AI",
-            "github.com/sarry12227/pathway-atlas",
-            "gitee.com/sarry1/pathway-atlas",
-            "不超过 20 题",
-            "自动回填",
-            "确认匿名画像",
-            "乐观、中性、保守位次",
-            "普通批冲稳保",
-            "主攻、重点准备、备选、观察或不建议",
-        ):
-            with self.subTest(phrase=phrase):
-                self.assertIn(phrase, first_line)
 
     def test_readme_explains_realtime_and_deterministic_halves(self):
         for phrase in (
@@ -184,11 +211,11 @@ class ReadmeContractTest(unittest.TestCase):
         self.assertGreaterEqual(
             documented,
             {
+                "docx_export.py",
                 "preflight.py",
                 "validate_data.py",
                 "validate_evidence.py",
                 "generate_report.py",
-                "docx_export.py",
             },
         )
         self.assertLessEqual(documented, PUBLIC_SCRIPT_CLIS)

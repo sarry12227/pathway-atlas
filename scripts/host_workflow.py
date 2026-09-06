@@ -1,0 +1,381 @@
+"""Host-owned planning workflow: real receipts in, recoverable report files out.
+
+All arguments and files are prepared by the Agent, never by the family. Network
+discovery stays with the host; this module owns the previously manual plumbing.
+"""
+from __future__ import annotations
+
+import argparse
+from dataclasses import replace
+import hashlib
+import json
+import os
+from pathlib import Path
+import sys
+import tempfile
+from uuid import uuid4
+
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from scripts.contracts import CapabilityReport, EvidenceStatus, SourceCandidate, SourceTier
+from scripts.adapters import StructuredAdapterError
+from scripts.decision_policy import DecisionPolicySnapshot
+from scripts.evidence import EvidenceStore
+from scripts.planning_profile import PlanningProfile
+from scripts.planning_session import (
+    PlanningSession, PlanningSessionReplayContext, PlanningSessionReplayJournal,
+    SessionStage, build_task_evidence_outcome,
+)
+from scripts.preflight import detect_capabilities
+from scripts.query_plan import build_query_plan, load_province_catalog
+from scripts.questionnaire_intake import build_profile_from_questionnaire
+
+
+def _digest(value):
+    raw = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    return "sha256:" + hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _directory(root: Path, name: str) -> Path:
+    path = root / name
+    path.mkdir(mode=0o700, exist_ok=True)
+    if path.is_symlink() or path.resolve() != root / name:
+        raise ValueError("workspace directory is not private")
+    return path
+
+
+class PlanningWorkflow:
+    """Small host facade; every successful update saves a replayable checkpoint."""
+
+    def __init__(self, root: Path, context: PlanningSessionReplayContext):
+        self.root = root.resolve(strict=True)
+        self.journal = PlanningSessionReplayJournal(_directory(self.root, "journal"))
+        self.context = context
+
+    @property
+    def session(self):
+        return self.context.session
+
+    @property
+    def profile(self):
+        return self.context.profile
+
+    @property
+    def plan(self):
+        return self.context.query_plan
+
+    @classmethod
+    def start(cls, root: Path, profile: PlanningProfile, capability: CapabilityReport, *, confirmed: bool):
+        if confirmed is not True:
+            raise ValueError("profile confirmation is required")
+        root = Path(root).resolve(strict=True)
+        journal = PlanningSessionReplayJournal(_directory(root, "journal"))
+        session = PlanningSession.create(uuid4().hex, profile).confirm_profile(profile.digest)
+        journal.save(session, profile=profile)
+        session = session.with_preflight(capability)
+        journal.save(session, profile=profile, capability_report=capability)
+        plan = build_query_plan(profile, load_province_catalog(), DecisionPolicySnapshot.load_default())
+        session = session.with_query_plan(plan, profile=profile)
+        journal.save(session, profile=profile, capability_report=capability, query_plan=plan)
+        return cls(root, journal.load(session.session_id))
+
+    @classmethod
+    def resume(cls, root: Path, session_id: str):
+        root = Path(root).resolve(strict=True)
+        journal = PlanningSessionReplayJournal(_directory(root, "journal"))
+        return cls(root, journal.load(session_id))
+
+    def _save(self, context):
+        self.journal.save(
+            context.session, profile=context.profile, query_plan=context.query_plan,
+            capability_report=context.capability_report, bundle_path=context.bundle_path,
+            task_outcomes=context.task_outcomes,
+        )
+        self.context = context
+
+    def pending(self):
+        if self.session.stage not in {SessionStage.QUERY_PLAN_READY, SessionStage.RESEARCH_IN_PROGRESS}:
+            return ()
+        available = self.session.next_tasks(self.plan, profile=self.profile)
+        canonical = {task.task_id: task for task in self.plan.tasks}
+        return tuple(canonical[task.task_id] for task in available)
+
+    def _bundle(self, outcomes, candidates=()):
+        store = EvidenceStore.create(_directory(self.root, "snapshots"), self.context.capability_report)
+        seen = {}
+        sources = list(candidates)
+        if self.context.bundle_path is not None:
+            from scripts.validate_evidence import validate_bundle_snapshot
+            validation = validate_bundle_snapshot(self.context.bundle_path)
+            snapshot = validation.snapshot
+            if snapshot is None:
+                raise ValueError("previous evidence bundle no longer validates")
+            for record in snapshot.candidates:
+                value = record.to_dict()
+                value["tier"] = SourceTier(value["tier"])
+                sources.append(SourceCandidate(**value))
+        for outcome in outcomes:
+            for bridge in outcome._bridges:
+                sources.extend(getattr(bridge, "candidates", ()))
+        for source in sources:
+            if source.source_id in seen:
+                if seen[source.source_id] != source.to_dict():
+                    raise ValueError("source ID refers to different public materials")
+            else:
+                store.add_candidate(source)
+                seen[source.source_id] = source.to_dict()
+        for outcome in outcomes:
+            outcome.validate(self.profile, self.plan)
+            for bridge in outcome._bridges:
+                if not set(bridge.source_ids) <= seen.keys():
+                    raise ValueError("completed bridge requires its original source candidates")
+                bridge.persist(store)
+        store.finalize()
+        return store.session_path
+
+    def complete(self, task_id: str, bridges, *, candidates=()):
+        task = next((t for t in self.pending() if t.task_id == task_id), None)
+        if task is None:
+            raise ValueError("task is not pending")
+        outcome = build_task_evidence_outcome(self.profile, self.plan, task, tuple(bridges))
+        session = self.session.ingest_task(
+            task_id, query_plan_digest=self.session.query_plan_digest,
+            query_plan=self.plan, profile=self.profile, outcome="completed", evidence_outcome=outcome,
+        )
+        outcomes = tuple(sorted((*self.context.task_outcomes, outcome), key=lambda item: item.task_id))
+        self._save(replace(self.context, session=session, task_outcomes=outcomes,
+                           bundle_path=self._bundle(outcomes, candidates)))
+
+    def unavailable(self, task_ids, *, reason: str, newer_task: str | None = None):
+        ids = tuple(task_ids)
+        if not ids or len(set(ids)) != len(ids):
+            raise ValueError("select distinct pending tasks")
+        session = self.session
+        newer = None
+        if newer_task is not None:
+            newer = next((item for item in self.context.task_outcomes if item.task_id == newer_task), None)
+            if newer is None:
+                raise ValueError("newer task must identify a completed evidence receipt")
+        for task_id in ids:
+            session = session.ingest_task(
+                task_id, query_plan_digest=session.query_plan_digest, query_plan=self.plan,
+                profile=self.profile, outcome="unavailable", unavailable_reason=reason,
+                newer_evidence_outcome=newer,
+            )
+        bundle = self.context.bundle_path or self._bundle(self.context.task_outcomes)
+        self._save(replace(self.context, session=session, bundle_path=bundle))
+
+    def ingest(self, task_id: str, submission):
+        """Extract saved source files and construct receipts in this process.
+
+        The submission is host-owned extraction configuration, not an evidence
+        receipt. No caller-supplied status or digest can authorize a fact.
+        """
+        task = next((t for t in self.pending() if t.task_id == task_id), None)
+        if task is None:
+            raise ValueError("task is not pending")
+        sources = submission["sources"]
+        if not sources or len(sources) > task.max_candidates:
+            raise ValueError("source count is outside the task candidate limit")
+        extracted, candidates = [], []
+        for source in sources:
+            from scripts.adapters import read_stable_local_file
+            path = Path(source["path"])
+            raw = read_stable_local_file(path, suffixes=(".html", ".htm", ".xlsx", ".txt", ".pdf", ".png", ".jpg", ".jpeg", ".webp", ".json"))
+            metadata = dict(source["candidate"])
+            actual_hash = "sha256:" + hashlib.sha256(raw).hexdigest()
+            if metadata.get("content_hash", actual_hash) != actual_hash:
+                raise ValueError("saved source hash does not match its metadata")
+            metadata["content_hash"] = actual_hash
+            metadata["tier"] = SourceTier(metadata["tier"])
+            candidate = SourceCandidate(**metadata)
+            options = source.get("options", {})
+            if source["adapter"] == "html":
+                from scripts.adapters import ColumnMapping
+                from scripts.adapters.html_table import extract_html_table
+                mapping = ColumnMapping(options["columns"], roles=options.get("roles"),
+                                        score_scale=options.get("score_scale"))
+                document = extract_html_table(path, table_index=options["table_index"],
+                    expected_caption=options.get("caption"), mapping=mapping)
+            elif source["adapter"] == "xlsx":
+                from scripts.adapters import ColumnMapping
+                from scripts.adapters.spreadsheet import extract_spreadsheet
+                mapping = ColumnMapping(options["columns"], roles=options.get("roles"),
+                                        score_scale=options.get("score_scale"))
+                document = extract_spreadsheet(path, sheet=options["sheet"], mapping=mapping)
+            elif source["adapter"] == "public_text":
+                from scripts.adapters.public_text import PublicTextField, bind_public_text
+                document = bind_public_text(source_id=candidate.source_id, url=candidate.url,
+                    text=raw.decode("utf-8-sig").replace("\r\n", "\n").replace("\r", "\n"),
+                    fields={key: PublicTextField(**value) for key, value in options["fields"].items()})
+            elif source["adapter"] == "ocr_rows":
+                from scripts.adapters import ColumnMapping
+                from scripts.adapters.ocr_rows import normalize_ocr_rows
+                mapping = ColumnMapping(options["columns"], roles=options.get("roles"),
+                    score_scale=options["score_scale"])
+                document = normalize_ocr_rows(Path(options["ocr_path"]), mapping,
+                    score_scale=options["score_scale"], min_exact_confidence=0.95)
+            else:
+                raise ValueError("unsupported host source adapter")
+            if read_stable_local_file(path, suffixes=(path.suffix,)) != raw:
+                raise ValueError("saved public source changed during extraction")
+            extracted.append(document)
+            candidates.append(candidate)
+        bridges = []
+        if task.kind in {"strong_foundation", "comprehensive_evaluation", "hk_macao_admission", "special_pathway"}:
+            from scripts.adapters.pathway_extraction import extract_pathway_policy
+            from scripts.adapters.pathway_bridge import bridge_pathway_policy_evidence
+            maps = [s.get("options", {}).get("field_map", submission.get("field_map")) for s in sources]
+            projection = extract_pathway_policy(profile=self.profile, plan=self.plan, task=task,
+                extraction=tuple(extracted), field_map=tuple(maps), candidates=tuple(candidates))
+            bridges.append(bridge_pathway_policy_evidence(projection))
+        elif all(source["adapter"] == "public_text" for source in sources):
+            from scripts.adapters.school_fit_bridge import bridge_school_fit_public_text
+            bridges.append(bridge_school_fit_public_text(self.profile, self.plan, task,
+                tuple(extracted), tuple(candidates)))
+        else:
+            records = submission["records"]
+            if not records:
+                raise ValueError("no extracted records were selected")
+            for record in records:
+                indexes = record["rows"]
+                if len(indexes) != len(extracted) or any(type(i) is not int or i < 0 for i in indexes):
+                    raise ValueError("select one source row per document")
+                rows = tuple(table.rows[index] for table, index in zip(extracted, indexes))
+                if task.kind in {"score_table", "joy_report"}:
+                    from scripts.adapters.rank_bridge import bridge_rank_evidence
+                    if any(row.values != rows[0].values for row in rows[1:]):
+                        raise ValueError("source values conflict; record source_conflict")
+                    bridges.append(bridge_rank_evidence(profile=self.profile, plan=self.plan, task=task,
+                        table=extracted[0], extracted_row=rows[0], candidates=tuple(candidates),
+                        coverage_status=EvidenceStatus(record.get("coverage_status", "partial"))))
+                elif task.kind == "batch_admission":
+                    from scripts.adapters.admission_bridge import bridge_admission_evidence
+                    from scripts.validate_data import ValidatedAdmissionRow
+                    if any(row.values != rows[0].values for row in rows[1:]):
+                        raise ValueError("source values conflict; record source_conflict")
+                    values = {"year": task.year, "province": task.province,
+                              "subject_group": task.subject_group, "remarks": "", **rows[0].values}
+                    dataset = ValidatedAdmissionRow.from_mapping(values)
+                    fact_id = "admission-" + _digest(dataset.to_dict()).split(":")[1][:24]
+                    bridges.append(bridge_admission_evidence(table=extracted[0], adapter_row=rows[0],
+                        task=task, dataset_row=dataset, fact_id=fact_id, candidates=tuple(candidates),
+                        coverage_status=EvidenceStatus(record.get("coverage_status", "partial"))))
+                else:
+                    from scripts.adapters.school_fit_bridge import bridge_school_fit_evidence
+                    bridges.append(bridge_school_fit_evidence(profile=self.profile, plan=self.plan, task=task,
+                        tables=tuple(extracted), adapter_rows=rows, candidates=tuple(candidates)))
+        self.complete(task_id, bridges, candidates=candidates)
+
+    def finish(self, *, format="markdown") -> Path:
+        if self.pending():
+            raise ValueError("research tasks remain; record results or their actual unavailable reasons")
+        if self.session.stage is SessionStage.RESEARCH_IN_PROGRESS:
+            session, _ = self.context.finalize_evidence()
+            self._save(replace(self.context, session=session))
+        if self.session.stage is SessionStage.EVIDENCE_FINALIZED:
+            session, _ = self.context.calculate()
+            self._save(replace(self.context, session=session))
+        _published_session, publication = self.context.publish(format=format)
+        # Keep the calculation checkpoint for retry and alternate format export.
+        directory = _directory(self.root, "reports")
+        extension = "md" if format == "markdown" else "docx"
+        destination = directory / f"{self.session.session_id}.{extension}"
+        content = publication.rendered_bytes
+        if destination.exists():
+            if destination.is_symlink() or destination.read_bytes() != content:
+                raise ValueError("report destination already contains a different artifact")
+            return destination
+        fd, temp_name = tempfile.mkstemp(prefix=".report-", dir=directory)
+        temp_path = Path(temp_name)
+        try:
+            with os.fdopen(fd, "wb") as stream:
+                stream.write(content)
+                stream.flush()
+                os.fsync(stream.fileno())
+            # Hard link is exclusive and atomic on supported local filesystems.
+            os.link(temp_path, destination)
+        finally:
+            temp_path.unlink(missing_ok=True)
+        return destination
+
+    def status(self, *, limit=3):
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise ValueError("task display limit must be between 1 and 100")
+        pending = sorted(self.pending(), key=lambda task: (-task.year, task.kind, task.task_id))
+        return {
+            "session_id": self.session.session_id,
+            "stage": self.session.stage.value,
+            "completed": len(self.session.completed_task_ids),
+            "unavailable": len(self.session.unavailable_task_ids),
+            "pending": len(pending),
+            "next": [t.to_dict() for t in pending[:limit]],
+        }
+
+    def public_sources(self):
+        """Give the host real public links for the report's source identifiers."""
+        if self.context.bundle_path is None:
+            return []
+        from scripts.validate_evidence import validate_bundle_snapshot
+        snapshot = validate_bundle_snapshot(self.context.bundle_path).snapshot
+        if snapshot is None:
+            raise ValueError("report sources no longer validate")
+        keys = ("source_id", "url", "publisher", "tier", "published_at", "retrieved_at")
+        return [{key: record.to_dict()[key] for key in keys} for record in snapshot.candidates]
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("command", choices=("start", "next", "ingest", "unavailable", "finish"))
+    parser.add_argument("--workspace", type=Path, required=True)
+    parser.add_argument("--session")
+    parser.add_argument("--answers", type=Path)
+    parser.add_argument("--submission", type=Path)
+    parser.add_argument("--confirmed", action="store_true")
+    parser.add_argument("--host-capability", action="append", default=[])
+    parser.add_argument("--task", action="append", default=[])
+    parser.add_argument("--reason")
+    parser.add_argument("--newer-task")
+    parser.add_argument("--limit", type=int, default=3)
+    parser.add_argument("--format", choices=("markdown", "docx"), default="markdown")
+    args = parser.parse_args(argv)
+    try:
+        if args.command == "start":
+            if args.answers is None:
+                raise ValueError("host-normalized answers are required")
+            answers = json.loads(args.answers.read_text(encoding="utf-8"))
+            profile = build_profile_from_questionnaire({int(k): v for k, v in answers.items()})
+            workflow = PlanningWorkflow.start(
+                args.workspace, profile, detect_capabilities(set(args.host_capability)), confirmed=args.confirmed,
+            )
+        else:
+            if args.session is None:
+                raise ValueError("session ID is required")
+            workflow = PlanningWorkflow.resume(args.workspace, args.session)
+        if args.command == "unavailable":
+            workflow.unavailable(args.task, reason=args.reason, newer_task=args.newer_task)
+        if args.command == "ingest":
+            if len(args.task) != 1 or args.submission is None:
+                raise ValueError("ingest requires one task and a host source submission")
+            workflow.ingest(args.task[0], json.loads(args.submission.read_text(encoding="utf-8")))
+        if args.command == "finish":
+            result = workflow.finish(format=args.format)
+            print(json.dumps({"session_id": workflow.session.session_id, "report": str(result),
+                              "format": args.format, "sources": workflow.public_sources()}, ensure_ascii=False))
+        else:
+            print(json.dumps(workflow.status(limit=args.limit), ensure_ascii=False))
+        return 0
+    except ModuleNotFoundError:
+        print("host-workflow: optional capability unavailable; Markdown remains available", file=sys.stderr)
+        return 3
+    except (ValueError, TypeError, OSError, KeyError, IndexError, StructuredAdapterError) as error:
+        print(f"host-workflow: {type(error).__name__}: {error}; last checkpoint retained", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8")
+    raise SystemExit(main())

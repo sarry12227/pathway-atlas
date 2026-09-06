@@ -8,9 +8,11 @@ import json
 import os
 import re
 import sys
-from collections.abc import Callable
+import unicodedata
+from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 if __package__:
@@ -120,32 +122,193 @@ def _cli_issue_dict(issue: ValidationIssue) -> dict[str, Any]:
     return payload
 
 
+_ADMISSION_METADATA_TEXT_FIELDS = frozenset(
+    {
+        "city_location",
+        "school_province",
+        "fee_currency",
+        "fee_period",
+        "affordability_policy_id",
+        "affordability_policy_version",
+        "affordability_policy_digest",
+        "admission_evidence_row_hash",
+        "subject_special_conditions",
+        "school_fit_enrollment_status",
+        "school_fit_subject_status",
+        "school_fit_province_policy_status",
+        "school_fit_charter_status",
+        "school_fit_tuition_status",
+        "school_fit_enrollment_current_status",
+        "school_fit_subject_current_status",
+        "school_fit_province_policy_current_status",
+        "school_fit_charter_current_status",
+        "school_fit_tuition_current_status",
+        "province_policy_exam_mode",
+        "province_policy_subject_structure",
+        "province_policy_batch_structure",
+        "province_policy_effective_date",
+        "charter_admission_rules",
+        "charter_adjustment_rules",
+        "charter_health_restrictions",
+        "charter_language_restrictions",
+        "charter_single_subject_restrictions",
+        "charter_special_conditions",
+        "tuition_fee_currency",
+        "tuition_fee_period",
+        "tuition_other_required_fees",
+        "tuition_financial_aid",
+        "tuition_affordability_policy_id",
+        "tuition_affordability_policy_version",
+        "tuition_affordability_policy_digest",
+    }
+)
+_ADMISSION_METADATA_TUPLE_FIELDS = frozenset(
+    {
+        "majors_in_group",
+        "affordable_for",
+        "required_secondary_subjects",
+        "school_fit_source_ids",
+        "school_fit_enrollment_source_ids",
+        "school_fit_subject_source_ids",
+        "school_fit_province_policy_source_ids",
+        "school_fit_charter_source_ids",
+        "school_fit_tuition_source_ids",
+        "school_fit_enrollment_current_source_ids",
+        "school_fit_subject_current_source_ids",
+        "school_fit_province_policy_current_source_ids",
+        "school_fit_charter_current_source_ids",
+        "school_fit_tuition_current_source_ids",
+        "school_fit_statuses",
+        "school_fit_conflict_kinds",
+        "tuition_majors",
+        "tuition_affordable_for",
+        "charter_unverified_fields",
+        "tuition_unverified_fields",
+    }
+)
+_INSTITUTION_TYPES = frozenset({"public", "private", "cooperative"})
+_BUDGET_LEVEL_ORDER = ("limited", "moderate", "flexible")
+
+
+def _canonical_metadata_text(value: Any, name: str) -> str:
+    if (
+        not isinstance(value, str)
+        or not value
+        or value != value.strip()
+        or value != unicodedata.normalize("NFKC", value)
+        or len(value) > 512
+        or any(ord(char) < 32 or ord(char) == 127 for char in value)
+    ):
+        raise ValueError(f"runtime admission {name} must be canonical exact text")
+    return value
+
+
+def _canonical_metadata_tuple(value: Any, name: str) -> tuple[str, ...]:
+    if not isinstance(value, tuple) or (
+        not value and name != "required_secondary_subjects"
+    ):
+        raise TypeError(f"runtime admission {name} must be a non-empty canonical tuple")
+    items = tuple(_canonical_metadata_text(item, name) for item in value)
+    if len(items) != len(set(items)):
+        raise ValueError(f"runtime admission {name} must be unique")
+    expected = (
+        tuple(item for item in _BUDGET_LEVEL_ORDER if item in items)
+        if name in {"affordable_for", "tuition_affordable_for"}
+        else tuple(sorted(items))
+    )
+    if items != expected:
+        raise ValueError(f"runtime admission {name} must use canonical ordering")
+    if name in {"affordable_for", "tuition_affordable_for"} and any(
+        item not in _BUDGET_LEVEL_ORDER for item in items
+    ):
+        raise ValueError("runtime admission affordable_for contains an unknown level")
+    return items
+
+
 @dataclass(frozen=True)
 class ValidatedAdmissionRow:
     """One normalized admission row captured by the validator's secure read."""
 
-    _items: tuple[tuple[str, str | int], ...]
+    _items: tuple[tuple[str, str | int | bool | tuple[str, ...]], ...]
 
     def __post_init__(self) -> None:
         if not self._items or tuple(sorted(self._items)) != self._items:
             raise ValueError("validated admission row must be a sorted non-empty snapshot")
         if len({key for key, _value in self._items}) != len(self._items):
             raise ValueError("validated admission row keys must be unique")
-        if any(
-            not isinstance(key, str)
-            or not key
-            or not isinstance(value, (str, int))
-            or isinstance(value, bool)
-            for key, value in self._items
-        ):
-            raise TypeError("validated admission row must contain JSON scalar fields")
+        for key, value in self._items:
+            if not isinstance(key, str) or not key:
+                raise TypeError("validated admission row keys must be non-empty text")
+            if key in _ADMISSION_METADATA_TUPLE_FIELDS:
+                _canonical_metadata_tuple(value, key)
+            elif key in _ADMISSION_METADATA_TEXT_FIELDS:
+                _canonical_metadata_text(value, key)
+            elif key == "institution_type":
+                if value not in _INSTITUTION_TYPES:
+                    raise ValueError(
+                        "validated admission institution_type is unsupported"
+                    )
+            elif key in {"adjustment_required", "charter_adjustment_required"}:
+                if not isinstance(value, bool):
+                    raise TypeError(
+                        f"validated admission {key} must be boolean"
+                    )
+            elif key == "secondary_subject_rule":
+                if value not in {"any", "all"}:
+                    raise ValueError(
+                        "validated admission secondary_subject_rule is unsupported"
+                    )
+            elif key in {
+                "annual_fee_amount",
+                "tuition_annual_fee_amount",
+                "tuition_accommodation_fee",
+            }:
+                if (
+                    not isinstance(value, int)
+                    or isinstance(value, bool)
+                    or value < 0
+                ):
+                    raise ValueError(
+                        "validated admission annual_fee_amount must be non-negative"
+                    )
+            elif not isinstance(value, (str, int)) or isinstance(value, bool):
+                raise TypeError(
+                    "validated admission row must contain canonical JSON fields"
+                )
 
     @classmethod
-    def from_mapping(cls, row: dict[str, str | int]) -> "ValidatedAdmissionRow":
+    def from_mapping(cls, row: Mapping[str, Any]) -> "ValidatedAdmissionRow":
         return cls(tuple(sorted(row.items())))
 
-    def to_dict(self) -> dict[str, str | int]:
+    def to_dict(self) -> dict[str, Any]:
         return dict(self._items)
+
+    def _value(self, name: str) -> Any:
+        return dict(self._items)[name]
+
+    @property
+    def year(self) -> int:
+        return int(self._value("year"))
+
+    @property
+    def school_code(self) -> str:
+        return str(self._value("school_code"))
+
+    @property
+    def school_name(self) -> str:
+        return str(self._value("school_name"))
+
+    @property
+    def program_group(self) -> str:
+        return str(self._value("program_group"))
+
+    @property
+    def min_score(self) -> int:
+        return int(self._value("min_score"))
+
+    @property
+    def min_rank(self) -> int:
+        return int(self._value("min_rank"))
 
 
 def admission_row_hash(row: ValidatedAdmissionRow) -> str:
@@ -191,6 +354,143 @@ class ValidatedScoreRow:
 
     def to_dict(self) -> dict[str, str | int]:
         return dict(self._items)
+
+    def _value(self, name: str) -> str | int:
+        return dict(self._items)[name]
+
+    @property
+    def year(self) -> int:
+        return int(self._value("year"))
+
+    @property
+    def score(self) -> int:
+        return int(self._value("score"))
+
+    @property
+    def rank(self) -> int:
+        return int(self._value("rank"))
+
+    @property
+    def cumulative_count(self) -> int:
+        return int(self._value("cumulative_count"))
+
+    @property
+    def subject_group(self) -> str:
+        return str(self._value("subject_group"))
+
+
+@dataclass(frozen=True)
+class RuntimeCalculationPolicy:
+    """The policy information Task 3 actually supplies, without fake deltas."""
+
+    policy_id: str
+    basis_id: str
+    tier_caps: Mapping[str, int]
+    rank_delta_status: str = "unavailable"
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.policy_id, str)
+            or not self.policy_id
+            or not isinstance(self.basis_id, str)
+            or not self.basis_id
+        ):
+            raise ValueError("runtime calculation policy identities are required")
+        if self.rank_delta_status != "unavailable":
+            raise ValueError("rank delta policy must remain explicitly unavailable")
+        if not isinstance(self.tier_caps, Mapping) or set(self.tier_caps) != {"冲", "稳", "保"}:
+            raise ValueError("runtime tier caps must contain exactly 冲, 稳, 保")
+        caps = dict(self.tier_caps)
+        if any(not isinstance(value, int) or isinstance(value, bool) or value < 1 for value in caps.values()):
+            raise ValueError("runtime tier caps must be positive integers")
+        object.__setattr__(self, "tier_caps", MappingProxyType(caps))
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "policy_id": self.policy_id,
+            "basis_id": self.basis_id,
+            "tier_caps": dict(self.tier_caps),
+            "rank_delta_status": self.rank_delta_status,
+        }
+
+
+def validate_runtime_score_row(
+    row: Mapping[str, Any],
+    *,
+    score_scale: int,
+    subject_group: str,
+    allowed_years: tuple[int, ...],
+) -> ValidatedScoreRow:
+    """Validate one authenticated in-memory score row without filesystem I/O."""
+
+    if not isinstance(row, Mapping) or set(row) != {
+        "year", "score", "rank", "cumulative_count", "subject_group"
+    }:
+        raise ValueError("runtime score row fields do not match the contract")
+    result = ValidatedScoreRow.from_mapping(dict(row))
+    payload = result.to_dict()
+    if payload["year"] not in allowed_years:
+        raise ValueError("runtime score row year is outside the query window")
+    if payload["subject_group"] != subject_group:
+        raise ValueError("runtime score row subject does not match the query plan")
+    if not 0 <= payload["score"] <= score_scale:
+        raise ValueError("runtime score row is outside the profile score scale")
+    if payload["cumulative_count"] < payload["rank"]:
+        raise ValueError("runtime cumulative count cannot be below rank")
+    return result
+
+
+def validate_runtime_admission_row(
+    row: Mapping[str, Any],
+    *,
+    province: str,
+    subject_group: str,
+    score_scale: int,
+    allowed_years: tuple[int, ...],
+) -> ValidatedAdmissionRow:
+    """Validate one authenticated in-memory admission row and its full hash."""
+
+    required = {
+        "year", "province", "subject_group", "school_code", "school_name",
+        "program_group", "min_score", "min_rank", "remarks",
+    }
+    allowed = required | {
+        "major_group_name",
+        *_ADMISSION_METADATA_TEXT_FIELDS,
+        *_ADMISSION_METADATA_TUPLE_FIELDS,
+        "institution_type",
+        "adjustment_required",
+    }
+    if not isinstance(row, Mapping) or not required.issubset(row) or not set(row) <= allowed:
+        raise ValueError("runtime admission row fields do not match the contract")
+    result = ValidatedAdmissionRow.from_mapping(dict(row))
+    payload = result.to_dict()
+    if payload["year"] not in allowed_years:
+        raise ValueError("runtime admission row year is outside the query window")
+    if payload["province"] != province or payload["subject_group"] != subject_group:
+        raise ValueError("runtime admission row context does not match the query plan")
+    if not isinstance(payload["min_score"], int) or isinstance(payload["min_score"], bool) or not 0 <= payload["min_score"] <= score_scale:
+        raise ValueError("runtime admission score is outside the profile score scale")
+    if not isinstance(payload["min_rank"], int) or isinstance(payload["min_rank"], bool) or payload["min_rank"] < 1:
+        raise ValueError("runtime admission rank must be a positive integer")
+    for name in ("school_code", "school_name", "program_group"):
+        if not isinstance(payload[name], str) or not payload[name] or payload[name] != payload[name].strip():
+            raise ValueError("runtime admission identities must be exact text")
+    for name in _ADMISSION_METADATA_TEXT_FIELDS & set(payload):
+        _canonical_metadata_text(payload[name], name)
+    if "majors_in_group" in payload:
+        _canonical_metadata_tuple(payload["majors_in_group"], "majors_in_group")
+    if "institution_type" in payload:
+        if payload["institution_type"] not in _INSTITUTION_TYPES:
+            raise ValueError("runtime admission institution_type is unsupported")
+    if "affordable_for" in payload:
+        _canonical_metadata_tuple(payload["affordable_for"], "affordable_for")
+    if "adjustment_required" in payload and not isinstance(
+        payload["adjustment_required"], bool
+    ):
+        raise TypeError("runtime admission adjustment_required must be boolean")
+    admission_row_hash(result)
+    return result
 
 
 @dataclass(frozen=True)

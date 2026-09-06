@@ -33,13 +33,25 @@ if __package__:
     from .contracts import CapabilityTier, EvidenceStatus, RecommendationProfile
     from .path_recommend import evaluate_pathways
     from .rank_locator import RankScenario
-    from .report_model import ReportModel, StudentProfile, build_report_model
+    from .report_model import (
+        ReportModel,
+        StudentProfile,
+        action_linkage_lines,
+        build_report_model,
+        pathway_field_evidence_lines,
+    )
 else:  # pragma: no cover - direct script execution
     from compliance_scan import scan_text
     from contracts import CapabilityTier, EvidenceStatus, RecommendationProfile
     from path_recommend import evaluate_pathways
     from rank_locator import RankScenario
-    from report_model import ReportModel, StudentProfile, build_report_model
+    from report_model import (
+        ReportModel,
+        StudentProfile,
+        action_linkage_lines,
+        build_report_model,
+        pathway_field_evidence_lines,
+    )
 
 
 CONTENT_WIDTH_DXA = 9360
@@ -51,7 +63,10 @@ HEADING_BLUE = "2E74B5"
 HEADING_DARK_BLUE = "1F4D78"
 INK_BLUE = "0B2545"
 MUTED = "666666"
-DISCLAIMER = "AI 生成，仅供参考；不构成录取承诺，最终以当年官方发布为准。"
+DISCLAIMER = (
+    "基于公开数据由 AI 整理，仅供参考；不构成升学建议或录取承诺，"
+    "最终以当年官方发布为准。"
+)
 PUBLIC_DOCX_BASENAME = "anonymous-admission-report.docx"
 
 _STATUS_LABEL = {
@@ -349,6 +364,7 @@ def _empty_recommendation_text(model):
     }:
         return "经验证覆盖范围内未找到匹配院校；未硬凑冲稳保数量。"
     return {
+        "partial_observations_only": "仅发现部分覆盖的院校线索；这些学校仅作方向性观察，不进入冲稳保。",
         "no_match_within_verified_coverage": "数据仅部分覆盖：当前已验证覆盖范围内未找到匹配院校，不能解释为没有符合院校。",
         "rank_outside_verified_coverage": "用户位次超出已验证数据覆盖范围，未生成精确推荐。",
         "unusable_evidence": "输入包含屏蔽、冲突或不可精确使用的证据，未生成数值边界。",
@@ -384,39 +400,58 @@ def _cover(document, model):
     retrieved.paragraph_format.space_after = Pt(22)
     _set_font(retrieved.add_run(f"检索日期：{'、'.join(model.retrieval_dates)}"), size=10, color=MUTED)
     _callout(document, DISCLAIMER)
-    document.add_paragraph().add_run().add_break(WD_BREAK.PAGE)
+    document.add_heading("一、结论摘要与免责声明", level=1)
+    document.add_paragraph("本报告是已认证材料的行动投影，不构成录取或资格承诺。")
+
+
+def _action_detail(document, model, item, bullet_id):
+    document.add_heading(item.title, level=2)
+    for detail in (
+        f"阶段：{item.phase}；紧急程度：{item.urgency}；战略价值：{item.strategic_value}；投入：{item.effort}",
+        f"完成标准：{'；'.join(item.completion_criteria)}",
+        f"原因：{item.reason}",
+        f"未完成后果：{item.consequence}",
+        f"截止：{item.deadline or '未提供具体日期'}；证据状态：{_STATUS_LABEL[item.evidence_status]}；来源编号：{_ids(item.source_ids)}",
+        *action_linkage_lines(model, item),
+    ):
+        _list_item(document, detail, bullet_id)
+
+
+def _priority_actions_section(document, model, bullet_id, decimal_id):
+    document.add_heading("二、当前最需要做的事", level=1)
+    for item in model.priority_actions:
+        _list_item(document, item.title, decimal_id)
+        _action_detail(document, model, item, bullet_id)
 
 
 def _evidence_section(document, model, bullet_id):
     profile = model.profile
-    document.add_heading("一、输入与证据边界", level=1)
+    document.add_heading("八、证据披露", level=1)
     rows = [
         ("年级", profile.grade),
         ("选科", f"{profile.subject_mode}；{profile.subject_selection_key}；再选科目：{_ids(profile.secondary_subjects)}"),
         ("当前定位位次", profile.rank if profile.rank is not None else "暂无可靠位次"),
         ("能力档位", _TIER_LABEL[model.capability_tier]),
         ("查询覆盖", model.query_coverage),
-        ("证据状态 / 置信度", f"{_STATUS_LABEL[model.evidence_status]} / {_CONFIDENCE_LABEL[model.evidence_status]}"),
+        ("整份报告最低证据状态 / 置信度", f"{_STATUS_LABEL[model.evidence_status]} / {_CONFIDENCE_LABEL[model.evidence_status]}"),
         ("数据覆盖", _STATUS_LABEL[model.recommendation_coverage_status]),
         ("检索日期", "、".join(model.retrieval_dates)),
         ("普通批输入年份", "、".join(map(str, model.input_years)) or "无"),
         ("普通批可用年份", "、".join(map(str, model.usable_years)) or "无"),
-        ("普通批策略", model.ordinary_batch_policy.policy_id),
-        ("普通批策略依据", model.ordinary_batch_policy.basis_id),
-        (
-            "普通批检索/分档参数",
-            f"检索Δ[{model.ordinary_batch_policy.search_delta_min},"
-            f"{model.ordinary_batch_policy.search_delta_max}]；"
-            f"冲< {model.ordinary_batch_policy.challenge_delta_lt}；"
-            f"稳≤ {model.ordinary_batch_policy.stable_delta_le}；"
-            f"上限冲={model.ordinary_batch_policy.tier_caps['冲']}、"
-            f"稳={model.ordinary_batch_policy.tier_caps['稳']}、"
-            f"保={model.ordinary_batch_policy.tier_caps['保']}",
-        ),
         ("证据包标识", model.manifest_session_id),
         ("清单哈希", model.manifest_hash),
         ("来源编号", _ids(model.source_ids)),
     ]
+    if model.ordinary_batch_policy is not None:
+        rows.extend(
+            (
+                ("普通批策略", model.ordinary_batch_policy.policy_id),
+                ("普通批策略依据", model.ordinary_batch_policy.basis_id),
+                ("普通批检索/分档参数", f"冲={model.ordinary_batch_policy.tier_caps['冲']}、稳={model.ordinary_batch_policy.tier_caps['稳']}、保={model.ordinary_batch_policy.tier_caps['保']}"),
+            )
+        )
+    else:
+        rows.append(("普通批位次差策略", "不可用；未使用位次差阈值"))
     if model.verified_rank_coverage is not None:
         rows.append(("普通批已验证位次覆盖", f"{model.verified_rank_coverage[0]}–{model.verified_rank_coverage[1]}"))
     _table(document, ("项目", "内容"), rows, (2700, 6660))
@@ -427,7 +462,7 @@ def _evidence_section(document, model, bullet_id):
 
 
 def _rank_section(document, model, bullet_id):
-    document.add_heading("二、成绩定位", level=1)
+    document.add_heading("三、位次情景与置信度", level=1)
     rank = model.rank
     if isinstance(rank, RankScenario):
         if rank.status in {EvidenceStatus.OFFICIAL, EvidenceStatus.INFERRED}:
@@ -465,7 +500,7 @@ def _rank_section(document, model, bullet_id):
 
 
 def _recommendation_section(document, model):
-    document.add_heading("三、普通批冲稳保", level=1)
+    document.add_heading("四、普通批代表院校", level=1)
     if model.recommendations:
         rows = [
             (
@@ -487,15 +522,53 @@ def _recommendation_section(document, model):
         )
     else:
         document.add_paragraph(_empty_recommendation_text(model))
+    if model.school_observations:
+        document.add_heading("观察学校（部分覆盖，不进入冲稳保）", level=2)
+        document.add_paragraph(
+            "以下院校仅作方向性观察；部分覆盖证据不能支持最低分、最低位次或冲稳保判断。"
+        )
+        rows = [
+            (
+                item.school_name,
+                item.school_level or "当前证据未提供",
+                item.city or "当前证据未提供",
+                item.data_year,
+                _STATUS_LABEL[item.evidence_status],
+                "、".join(item.source_ids),
+                "仅作方向性观察，不进入冲稳保",
+            )
+            for item in model.school_observations
+        ]
+        _table(
+            document,
+            ("院校", "层次", "城市", "年份", "证据状态", "来源编号", "处理结论"),
+            rows,
+            (1450, 850, 900, 700, 850, 1300, 3310),
+        )
     for warning in model.recommendation_warnings:
         paragraph = document.add_paragraph()
         _set_font(paragraph.add_run("风险提示："), color=HEADING_DARK_BLUE, bold=True)
         paragraph.add_run(warning)
+    if model.school_decisions:
+        document.add_heading("普通批逐维判断证据", level=2)
+        for decision in model.school_decisions:
+            outcome_label = "纳入" if decision.outcome == "included" else "排除"
+            for reason in decision.reasons:
+                status_label = (
+                    _STATUS_LABEL[reason.evidence_status]
+                    if reason.evidence_status is not None
+                    else "未单列"
+                )
+                document.add_paragraph(
+                    f"{decision.school_name}（{outcome_label}） · "
+                    f"{reason.dimension}/[{reason.code}]：{reason.explanation}；"
+                    f"证据等级：{status_label}；来源编号：{_ids(reason.source_ids)}"
+                )
     _callout(document, DISCLAIMER)
 
 
 def _pathway_section(document, model, bullet_id):
-    document.add_heading("四、多元升学路径", level=1)
+    document.add_heading("五、多元升学路径矩阵", level=1)
     if not model.pathways_available:
         document.add_paragraph("多元升学数据不足：未提供经验证的政策结果，本章节不作正式推荐。")
     elif not model.pathways:
@@ -522,6 +595,11 @@ def _pathway_section(document, model, bullet_id):
                 f"计算依据：{item.calculation_basis}",
             ):
                 _list_item(document, detail, bullet_id)
+            document.add_heading(
+                f"逐字段证据审计：{item.title} · {item.institution}", level=3
+            )
+            for audit_line in pathway_field_evidence_lines(item):
+                _list_item(document, audit_line, bullet_id)
     if model.pathway_target_rank is not None:
         for detail in (
             f"有依据的路径目标位次：{model.pathway_target_rank}；位次模型证据状态：{_STATUS_LABEL[model.pathway_target_evidence_status]}",
@@ -537,19 +615,24 @@ def _pathway_section(document, model, bullet_id):
         paragraph.add_run(warning)
 
 
-def _actions_section(document, model, bullet_id, decimal_id):
-    document.add_heading("五、下一步行动建议", level=1)
-    for action in model.action_items:
-        _list_item(document, action, decimal_id)
-    document.add_heading("六、证据清单与免责声明", level=1)
-    document.add_paragraph("来源编号（仅展示安全编号，不展示原始 URL 或本机路径）：")
-    for source_id in model.source_ids:
-        _list_item(document, source_id, bullet_id)
-    document.add_paragraph(f"证据包清单哈希：{model.manifest_hash}")
-    _callout(document, DISCLAIMER)
-    document.add_paragraph(
-        "屏蔽值、冲突、部分覆盖与缺失数据均未被补成精确边界；请以省教育考试院和高校当年正式信息为准。"
-    )
+def _pathway_gaps_section(document, model, bullet_id):
+    document.add_heading("六、详细路径缺口", level=1)
+    if not model.pathways:
+        document.add_paragraph("当前没有可展开的路径缺口。")
+        return
+    for item in model.pathways:
+        _list_item(document, f"{item.title}：{'；'.join(item.missing_constraints) or '当前无已知缺口'}", bullet_id)
+
+
+def _timeline_section(document, model, bullet_id):
+    document.add_heading("七、分阶段时间表", level=1)
+    if not model.action_timeline:
+        document.add_paragraph("当前优先行动已覆盖完整行动计划。")
+        return
+    for group in model.action_timeline:
+        document.add_heading(group.phase, level=2)
+        for item in group.actions:
+            _action_detail(document, model, item, bullet_id)
 
 
 def _scrub(document):
@@ -643,11 +726,13 @@ def export_docx(model: ReportModel, output=None) -> Path:
     bullet_id = _numbering(document, "bullet")
     decimal_id = _numbering(document, "decimal")
     _cover(document, model)
-    _evidence_section(document, model, bullet_id)
+    _priority_actions_section(document, model, bullet_id, decimal_id)
     _rank_section(document, model, bullet_id)
     _recommendation_section(document, model)
     _pathway_section(document, model, bullet_id)
-    _actions_section(document, model, bullet_id, decimal_id)
+    _pathway_gaps_section(document, model, bullet_id)
+    _timeline_section(document, model, bullet_id)
+    _evidence_section(document, model, bullet_id)
     _scrub(document)
     text = _document_text(document)
     if "http://" in text or "https://" in text:
@@ -683,65 +768,39 @@ def _model_from_cli(args):
     loaded_profile = report_cli._load_public_profile(args.profile)
     if isinstance(loaded_profile, report_cli.PlanningProfile):
         planning_profile = loaded_profile
+    else:
+        # Reuse the named v1/v2-to-v3 adapter before the public snapshot flow;
+        # the DOCX path never revives the removed hand-built pathway replay.
+        planning_profile = report_cli.load_planning_profile(
+            report_cli._strict_json_file(args.profile, "用户画像")
+        )
+    if isinstance(planning_profile, report_cli.PlanningProfile):
         if args.secondary_subject is not None:
             payload = planning_profile.to_dict()
             payload.pop("mode")
             payload.pop("digest")
             payload["secondary_subjects"] = list(args.secondary_subject)
             planning_profile = report_cli.PlanningProfile.create(payload)
-        dataset = report_cli._resolve_public_dataset(args.dataset, planning_profile)
-        evidence = report_cli._validated_evidence_snapshot(args.evidence)
+        reviewed = report_cli.DecisionPolicySnapshot.load_default()
+        query_plan = report_cli.build_query_plan(
+            planning_profile,
+            report_cli.load_province_catalog(),
+            reviewed,
+        )
+        research_snapshot = report_cli.build_research_snapshot(
+            planning_profile,
+            query_plan,
+            args.evidence,
+            reviewed,
+        )
         return report_cli.build_pathway_atlas_model(
-            planning_profile, dataset, evidence
+            planning_profile,
+            research_snapshot,
+            args.evidence,
+            query_plan,
+            decision_policy=reviewed,
         )
-
-    report_profile, recommendation_profile, pathway_profile = loaded_profile
-    if args.secondary_subject is not None:
-        subjects = tuple(args.secondary_subject)
-        report_profile = StudentProfile(
-            province=report_profile.province,
-            subject_mode=report_profile.subject_mode,
-            subject_group=report_profile.subject_group,
-            secondary_subjects=subjects,
-            rank=report_profile.rank,
-            grade=report_profile.grade,
-            current_year=report_profile.current_year,
-        )
-        recommendation_profile = RecommendationProfile(
-            rank=recommendation_profile.rank,
-            target_province=recommendation_profile.target_province,
-            subject_group=recommendation_profile.subject_group,
-            secondary_subjects=frozenset(subjects),
-            target_major_categories=recommendation_profile.target_major_categories,
-            target_cities=recommendation_profile.target_cities,
-            target_schools=recommendation_profile.target_schools,
-        )
-    dataset = report_cli._resolve_public_dataset(args.dataset, report_profile)
-    report_profile, recommendation_profile = report_cli._profiles_with_canonical_subject_key(
-        dataset, report_profile, recommendation_profile
-    )
-    evidence = report_cli._validated_evidence_snapshot(args.evidence)
-    facts = tuple(record.to_dict() for record in evidence.facts)
-    recommendations = report_cli._public_recommendations(
-        dataset.admission_rows,
-        recommendation_profile,
-        dataset.config.ordinary_batch_policy,
-        facts,
-    )
-    policies = report_cli.bridge_pathway_policies(
-        evidence,
-        province=pathway_profile.province,
-        subject_mode=pathway_profile.subject_mode,
-        target_year=pathway_profile.current_year,
-    )
-    pathways = evaluate_pathways(pathway_profile, policies, model=None)
-    return build_report_model(
-        report_profile,
-        recommendations,
-        rank=None,
-        pathways=pathways,
-        evidence=evidence,
-    )
+    raise TypeError("public profile adapter did not produce a PlanningProfile")
 
 
 def _reconfigure_utf8():

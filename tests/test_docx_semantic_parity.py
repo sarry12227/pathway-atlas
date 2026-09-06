@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from contextlib import contextmanager
 import hashlib
 import io
 import json
@@ -21,24 +22,72 @@ from docx import Document
 from lxml import etree
 
 from scripts import docx_export
-from scripts.contracts import EvidenceStatus, RecommendationResult
+from scripts.adapters.pathway_bridge import (
+    bridge_pathway_policies,
+    bridge_pathway_policy_evidence,
+)
+from scripts.contracts import EvidenceStatus, RecommendationResult, SourceTier
+from scripts.decision_policy import DecisionPolicySnapshot
+from scripts.evidence import EvidenceStore
+from scripts.generate_report import build_pathway_atlas_model
+from scripts.path_recommend import (
+    PATHWAY_DISPLAY_EVIDENCE_FIELDS,
+    PathwayFieldEvidenceOrigin,
+)
+from scripts.research_snapshot import build_research_snapshot
 from scripts.report_model import ReportModel, build_report_model, render_markdown
 from scripts.school_recommend import recommend_schools
 from tests.test_generate_report_evidence import (
+    capability,
     evidence_snapshot,
     formal_pathway_result,
+    pathway_rank_model,
+    pathway_rank_scenario,
     pathway_result,
     partial_task3_recommendations,
     rank_estimate,
     recommendations,
     student,
 )
-from tests.test_pathway_atlas_blackbox import pathway_result as decisive_pathway_result
+from tests.test_pathway_atlas_blackbox import school_anchor_bridge
+from tests.test_pathway_evidence_bridge import candidate as pathway_candidate
+from tests.test_pathway_evidence_bridge import project as pathway_projection
+from tests.test_rank_evidence_bridge import candidate as rank_candidate
+from tests.test_research_snapshot import bridges
 from tests.test_scenario_recommendations import policy, profile, rows, scenario
 
 
 ROOT = Path(__file__).resolve().parents[1]
 NS = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+
+
+def canonical_digest(value) -> str:
+    encoded = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+def expected_origin_binding(origin: PathwayFieldEvidenceOrigin, payload) -> str:
+    return canonical_digest(
+        {
+            "contract": "pathway-field-origin-v1",
+            "origin": origin.value,
+            "payload": payload,
+        }
+    )
+
+
+def expected_record_digest(record) -> str:
+    payload = record.to_dict()
+    payload.pop("digest")
+    return canonical_digest(
+        {"contract": "pathway-field-evidence-v2", "record": payload}
+    )
 
 
 def model(**overrides) -> ReportModel:
@@ -67,46 +116,436 @@ def xml_part(path: Path, name: str):
         return etree.fromstring(package.read(name))
 
 
-class DocxSemanticParityTest(unittest.TestCase):
-    def test_rank_scenarios_and_decisive_pathways_have_markdown_docx_parity(self):
-        safe_rows = []
-        for index, value in enumerate(rows()):
-            safe = dict(value)
-            safe["source_ids"] = [
-                f"parity-{index}-a",
-                f"parity-{index}-b",
-                f"parity-{index}-c",
-            ]
-            safe_rows.append(safe)
-        report = build_report_model(
-            student(rank=22000),
-            recommend_schools(
-                safe_rows,
-                profile(),
-                policy(),
-                rank_scenario=scenario(),
+@contextmanager
+def typed_atlas_artifacts(*, admission_bridge=None, admission_candidates=()):
+    """Persist a full v3 bundle, optionally with an adapter-produced admission bridge."""
+    planning, query_plan, rank_bridge, default_admission_bridge = bridges()
+    active_admission_bridge = (
+        default_admission_bridge if admission_bridge is None else admission_bridge
+    )
+    active_admission_candidates = (
+        (
+            rank_candidate(
+                "official-admission",
+                publisher="湖北省普通批发布机关",
+                host="admission.hubei.gov.cn",
             ),
-            rank=scenario(),
-            pathways=decisive_pathway_result(),
-            evidence=evidence_snapshot(),
+        )
+        if admission_bridge is None
+        else tuple(admission_candidates)
+    )
+    school_2025 = school_anchor_bridge(planning, query_plan, 2025, 20000)
+    school_2026 = school_anchor_bridge(planning, query_plan, 2026, 20000)
+    pathway_source = pathway_candidate()
+    pathway_bridge = bridge_pathway_policy_evidence(
+        pathway_projection(
+            student=planning,
+            query_plan=query_plan,
+            candidates=(pathway_source,),
+        )
+    )
+    registered_sources = (
+        rank_candidate(),
+        *active_admission_candidates,
+        *school_2025.candidates,
+        *school_2026.candidates,
+        pathway_source,
+    )
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        store = EvidenceStore.create(root, capability())
+        for source in registered_sources:
+            store.add_candidate(source)
+        rank_bridge.persist(store)
+        school_2025.persist(store)
+        school_2026.persist(store)
+        active_admission_bridge.persist(store)
+        pathway_bridge.persist(store)
+        store.finalize()
+        profile_path = root / "profile.json"
+        profile_payload = planning.to_dict()
+        profile_payload.pop("mode")
+        profile_payload.pop("digest")
+        profile_path.write_text(
+            json.dumps(profile_payload, ensure_ascii=False), encoding="utf-8"
+        )
+        yield planning, query_plan, store.session_path, profile_path
+
+
+class DocxSemanticParityTest(unittest.TestCase):
+    def test_authenticated_field_trails_bind_query_task_year_plan_and_rank_scenario(self):
+        with typed_atlas_artifacts() as (planning, query_plan, bundle, _profile):
+            reviewed = DecisionPolicySnapshot.load_default()
+            research = build_research_snapshot(planning, query_plan, bundle, reviewed)
+            report = build_pathway_atlas_model(
+                planning, research, bundle, query_plan, decision_policy=reviewed
+            )
+            plan_digest = canonical_digest(query_plan.to_dict())
+            policies = bridge_pathway_policies(
+                bundle,
+                province=planning.province,
+                subject_mode=planning.subject_mode,
+                target_year=query_plan.research_year,
+                expected_profile_digest=planning.digest,
+                expected_query_plan_digest=plan_digest,
+            )
+
+        self.assertEqual(len(policies), 1)
+        policy = policies[0]
+        evaluated = tuple(
+            item for item in report.pathways if item.policy_id == policy.policy_id
+        )
+        observations = tuple(
+            item for item in report.pathways if item.policy_id != policy.policy_id
+        )
+        expected_titles = {
+            task.target_name
+            for task in query_plan.tasks
+            if task.target_name is not None
+            and task.kind
+            in {
+                "strong_foundation",
+                "comprehensive_evaluation",
+                "hk_macao_admission",
+                "special_pathway",
+            }
+        }
+        self.assertEqual(len(evaluated), 1)
+        self.assertEqual({item.title for item in report.pathways}, expected_titles)
+        self.assertEqual(len(observations), len(expected_titles) - 1)
+        self.assertTrue(
+            all(
+                item.status == "pending_verification"
+                and item.investment_decision == "观察"
+                and item.qualification_status == "待核验"
+                and item.evidence_status is EvidenceStatus.MISSING
+                and not item.source_ids
+                and item.target_rank is None
+                and item.target_year is None
+                and item.data_year is None
+                and not item.timeline
+                and not item.professional_options
+                and item.institution == "待核验"
+                and item.training_arrangements is None
+                and item.transition_rules is None
+                and item.outcomes is None
+                for item in observations
+            )
+        )
+        for observation in observations:
+            self.assertEqual(
+                tuple(record.field for record in observation.field_evidence),
+                PATHWAY_DISPLAY_EVIDENCE_FIELDS,
+            )
+            self.assertTrue(
+                all(not record.source_ids for record in observation.field_evidence)
+            )
+        item = evaluated[0]
+        projection = policy._authenticated_projection
+        self.assertIsNotNone(projection)
+        task = projection.input_projection["task"]
+        self.assertEqual(
+            task["task_digest"],
+            canonical_digest(
+                {name: value for name, value in task.items() if name != "task_digest"}
+            ),
+        )
+        self.assertEqual(policy.profile_digest, planning.digest)
+        self.assertEqual(policy.query_plan_digest, plan_digest)
+        self.assertEqual(projection.query_plan_digest, plan_digest)
+
+        records = {record.field: record for record in item.field_evidence}
+        self.assertEqual(
+            tuple(record.field for record in item.field_evidence),
+            PATHWAY_DISPLAY_EVIDENCE_FIELDS,
+        )
+        self.assertEqual(len(records), 22)
+        self.assertTrue(
+            all(record.digest == expected_record_digest(record) for record in records.values())
+        )
+
+        title = records["title"]
+        institution = records["institution"]
+        self.assertIs(title.origin, PathwayFieldEvidenceOrigin.QUERY_CONTEXT)
+        self.assertEqual(item.title, task["target_name"])
+        self.assertEqual(title.upstream_fields, ("query_task.target_name",))
+        self.assertEqual(
+            title.locators,
+            (f"query-task:{task['task_id']}/target_name",),
+        )
+        self.assertFalse(set(title.locators).intersection(institution.locators))
+        self.assertEqual(
+            title.origin_binding,
+            expected_origin_binding(
+                PathwayFieldEvidenceOrigin.QUERY_CONTEXT,
+                {
+                    "projection_digest": projection.digest,
+                    "task": task,
+                    "field": "target_name",
+                },
+            ),
+        )
+
+        policy_records = {record.field: record for record in policy.field_evidence}
+        data_year = policy_records["data_year"]
+        year = records["year_basis"]
+        self.assertIs(year.origin, PathwayFieldEvidenceOrigin.DERIVED_DECISION)
+        self.assertEqual(
+            year.upstream_fields,
+            ("data_year", "query_plan.research_year", "query_task.target_year"),
+        )
+        self.assertEqual(year.profile_fields, ("query_plan.research_year",))
+        self.assertEqual(year.upstream_evidence_digests, (data_year.digest,))
+        self.assertIn(f"query-task:{task['task_id']}/target_year", year.locators)
+        self.assertEqual(task["target_year"], item.target_year)
+        self.assertEqual(query_plan.research_year, item.target_year)
+        self.assertEqual(
+            year.origin_binding,
+            expected_origin_binding(
+                PathwayFieldEvidenceOrigin.DERIVED_DECISION,
+                {
+                    "policy_id": policy.policy_id,
+                    "field": "year_basis",
+                    "decision_reasons": [
+                        reason.to_dict() for reason in item.decision_reasons
+                    ],
+                    "year_basis": item.year_basis,
+                    "target_year": item.target_year,
+                    "data_year": item.data_year,
+                    "fallback_distance": item.fallback_distance,
+                    "research_year": query_plan.research_year,
+                    "query_task_digest": task["task_digest"],
+                },
+            ),
+        )
+
+        self.assertIsNotNone(report.rank)
+        rank_scenario = report.rank
+        calculation = records["calculation_basis"]
+        self.assertIs(
+            calculation.origin, PathwayFieldEvidenceOrigin.DERIVED_DECISION
+        )
+        self.assertEqual(
+            calculation.upstream_fields,
+            (
+                "data_year",
+                "rank_scenario.basis",
+                "rank_scenario.central_rank",
+                "rank_scenario.source_ids",
+                "rank_scenario.status",
+            ),
+        )
+        self.assertEqual(calculation.upstream_evidence_digests, (data_year.digest,))
+        self.assertEqual(
+            calculation.source_ids,
+            tuple(sorted(set(policy.policy_source_ids) | set(rank_scenario.source_ids))),
+        )
+        self.assertEqual(
+            calculation.origin_binding,
+            expected_origin_binding(
+                PathwayFieldEvidenceOrigin.DERIVED_DECISION,
+                {
+                    "policy_id": policy.policy_id,
+                    "field": "calculation_basis",
+                    "decision_reasons": [
+                        reason.to_dict() for reason in item.decision_reasons
+                    ],
+                    "target_rank": None,
+                    "transformation": None,
+                    "rank_scenario": rank_scenario.to_dict(),
+                    "rank_model": None,
+                },
+            ),
+        )
+
+    def test_model_backed_calculation_trail_binds_rank_scenario_and_model(self):
+        rank_scenario = pathway_rank_scenario()
+        rank_model = pathway_rank_model()
+        pathways = formal_pathway_result()
+        empty_recommendations = recommendations(
+            items=(),
+            coverage_status=EvidenceStatus.REFERENCE,
+            empty_reason="no_match_within_verified_coverage",
+            warnings=(),
+        )
+        report = model(
+            rank=rank_scenario,
+            pathways=pathways,
+            recommendations=empty_recommendations,
+        )
+        item = report.pathways[0]
+        calculation = next(
+            record
+            for record in item.field_evidence
+            if record.field == "calculation_basis"
+        )
+
+        self.assertIs(
+            calculation.origin, PathwayFieldEvidenceOrigin.DERIVED_DECISION
+        )
+        self.assertEqual(
+            calculation.upstream_fields,
+            (
+                "data_year",
+                "rank_model.cohort_years",
+                "rank_model.evidence_status",
+                "rank_model.method",
+                "rank_model.model_id",
+                "rank_model.source_ids",
+                "rank_scenario.basis",
+                "rank_scenario.central_rank",
+                "rank_scenario.source_ids",
+                "rank_scenario.status",
+            ),
+        )
+        self.assertEqual(
+            calculation.source_ids,
+            tuple(
+                sorted(
+                    {"s5"}
+                    | set(rank_scenario.source_ids)
+                    | set(rank_model.source_ids)
+                )
+            ),
+        )
+        self.assertTrue(calculation.upstream_evidence_digests)
+        self.assertEqual(calculation.digest, expected_record_digest(calculation))
+        self.assertEqual(
+            calculation.origin_binding,
+            expected_origin_binding(
+                PathwayFieldEvidenceOrigin.DERIVED_DECISION,
+                {
+                    "policy_id": item.policy_id,
+                    "field": "calculation_basis",
+                    "decision_reasons": [],
+                    "target_rank": pathways.target_rank,
+                    "transformation": pathways.transformation,
+                    "rank_scenario": rank_scenario.to_dict(),
+                    "rank_model": rank_model.to_dict(),
+                },
+            ),
         )
         markdown = render_markdown(report)
         with tempfile.TemporaryDirectory() as temporary:
-            output = docx_export.export_docx(report, Path(temporary) / "parity.docx")
+            output = docx_export.export_docx(
+                report, Path(temporary) / "model-backed-field-evidence.docx"
+            )
             text = document_text(output)
-
         for literal in (
-            "乐观位次：18000",
-            "中性位次：22000",
-            "保守位次：27000",
-            "观察大学",
-            "重点准备",
-            "待核验",
-            "本学期准备材料",
-            "历史回退 2025→2026",
+            "rank_model.source_ids",
+            "rank_model.evidence_status",
+            "rank_model.method",
+            "rank_scenario.source_ids",
+            "rank_scenario.status",
+            "s3、s4、s5、s6",
         ):
             self.assertIn(literal, markdown)
             self.assertIn(literal, text)
+
+    def test_markdown_and_docx_reject_mutated_field_evidence_record(self):
+        with typed_atlas_artifacts() as (planning, query_plan, bundle, _profile):
+            reviewed = DecisionPolicySnapshot.load_default()
+            research = build_research_snapshot(planning, query_plan, bundle, reviewed)
+            report = build_pathway_atlas_model(
+                planning, research, bundle, query_plan, decision_policy=reviewed
+            )
+
+        trail = report.pathways[0].field_evidence[0]
+        object.__setattr__(trail, "source_ids", ("forged-source",))
+        with self.assertRaisesRegex(ValueError, "field evidence digest"):
+            render_markdown(report)
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "mutated-trail.docx"
+            with self.assertRaisesRegex(ValueError, "field evidence digest"):
+                docx_export.export_docx(report, output)
+            self.assertFalse(output.exists())
+
+    def test_markdown_and_docx_reject_mutated_displayed_pathway_value(self):
+        with typed_atlas_artifacts() as (planning, query_plan, bundle, _profile):
+            reviewed = DecisionPolicySnapshot.load_default()
+            research = build_research_snapshot(planning, query_plan, bundle, reviewed)
+            report = build_pathway_atlas_model(
+                planning, research, bundle, query_plan, decision_policy=reviewed
+            )
+
+        object.__setattr__(
+            report.pathways[0], "professional_options", ("FAKE-MAJOR",)
+        )
+        with self.assertRaisesRegex(
+            ValueError, "professional_options.*value digest"
+        ):
+            render_markdown(report)
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "mutated-value.docx"
+            with self.assertRaisesRegex(
+                ValueError, "professional_options.*value digest"
+            ):
+                docx_export.export_docx(report, output)
+            self.assertFalse(output.exists())
+
+    def test_rank_scenarios_and_decisive_pathways_have_markdown_docx_parity(self):
+        with typed_atlas_artifacts() as (planning, query_plan, bundle, _profile):
+            reviewed = DecisionPolicySnapshot.load_default()
+            research = build_research_snapshot(planning, query_plan, bundle, reviewed)
+            report = build_pathway_atlas_model(
+                planning, research, bundle, query_plan, decision_policy=reviewed
+            )
+            markdown = render_markdown(report)
+            with tempfile.TemporaryDirectory() as temporary:
+                output = docx_export.export_docx(report, Path(temporary) / "parity.docx")
+                text = document_text(output)
+
+        rank_values = (
+            report.rank.optimistic_rank,
+            report.rank.central_rank,
+            report.rank.conservative_rank,
+        )
+        self.assertGreater(len(set(rank_values)), 1)
+        for literal in (
+            f"乐观位次：{rank_values[0]}",
+            f"中性位次：{rank_values[1]}",
+            f"保守位次：{rank_values[2]}",
+            "official-pathway",
+            "2025",
+        ):
+            self.assertIn(literal, markdown)
+            self.assertIn(literal, text)
+
+    def test_direct_and_derived_pathway_field_audits_have_markdown_docx_parity(self):
+        report = model(pathways=formal_pathway_result())
+        markdown = render_markdown(report)
+        with tempfile.TemporaryDirectory() as temporary:
+            output = docx_export.export_docx(
+                report, Path(temporary) / "field-evidence-parity.docx"
+            )
+            text = document_text(output)
+
+        expected = (
+            "字段：professional_options（专业选项）；证据状态：官方；覆盖：完整；"
+            "来源编号：s5；证据定位：policy-record:policy-formal:professional_options；"
+            "抽取方式：legacy-policy-record；证据方法："
+            "legacy-policy-field-v1；上游字段：professional_options；"
+            "画像字段：无；提示：无",
+            "字段：investment_decision（投入结论）；证据状态：推断；覆盖：完整；"
+            "来源编号：s5；证据定位：policy-record:policy-formal:activity_requirements",
+            "证据方法：pathway-investment-decision-v1",
+        )
+        self.assertIn("逐字段证据审计", markdown)
+        self.assertIn("逐字段证据审计", text)
+        for literal in expected:
+            self.assertIn(literal, markdown)
+            self.assertIn(literal, text)
+
+    def test_docx_revalidates_pathway_field_trails_after_frozen_object_mutation(self):
+        report = model(pathways=formal_pathway_result())
+        pathway = report.pathways[0]
+        object.__setattr__(pathway, "field_evidence", pathway.field_evidence[:-1])
+
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "invalid-field-evidence.docx"
+            with self.assertRaisesRegex(ValueError, "field evidence is incomplete"):
+                docx_export.export_docx(report, output)
+            self.assertFalse(output.exists())
 
     def test_docx_gate_uses_shared_semantics_and_exception_never_echoes_amount(self):
         safe = "武汉大学学费 30000元；国家助学金 6000元"
@@ -134,9 +573,48 @@ class DocxSemanticParityTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             output = docx_export.export_docx(report, Path(temporary) / "partial.docx")
             text = document_text(output)
-        for literal in ("部分覆盖大学", "部分覆盖", "当前已验证覆盖范围内", "s2"):
+        self.assertEqual(report.recommendations, ())
+        for literal in ("部分覆盖大学", "部分覆盖", "s2", "仅作方向性观察", "不进入冲稳保"):
             self.assertIn(literal, markdown)
             self.assertIn(literal, text)
+        self.assertNotIn("| 620 |", markdown)
+        self.assertNotIn("| 4300 |", markdown)
+        for observation in report.school_observations:
+            self.assertFalse(hasattr(observation, "min_score"))
+            self.assertFalse(hasattr(observation, "min_rank"))
+        self.assertNotIn("620", text)
+        self.assertNotIn("4300", text)
+
+    def test_task3_outside_coverage_partial_result_has_markdown_docx_parity(self):
+        result = partial_task3_recommendations(rank=6000)
+        report = model(
+            profile=student(
+                rank=6000,
+                secondary_subjects=("化学", "生物"),
+            ),
+            recommendations=result,
+            rank=None,
+        )
+        markdown = render_markdown(report)
+        with tempfile.TemporaryDirectory() as temporary:
+            output = docx_export.export_docx(
+                report,
+                Path(temporary) / "partial-outside.docx",
+            )
+            text = document_text(output)
+
+        for literal in (
+            "部分覆盖大学",
+            "部分覆盖",
+            "仅作方向性观察",
+            "不进入冲稳保",
+            "s2",
+        ):
+            self.assertIn(literal, markdown)
+            self.assertIn(literal, text)
+        for forbidden in ("620", "4300"):
+            self.assertNotIn(forbidden, markdown)
+            self.assertNotIn(forbidden, text)
 
     def test_docx_accepts_strict_machine_ids_with_phone_shaped_digits(self):
         from scripts.contracts import EvidenceManifest
@@ -205,15 +683,22 @@ class DocxSemanticParityTest(unittest.TestCase):
             "合成费用说明",
             "model-report",
             "documented_rank_delta",
-            "下一步行动建议",
-            "AI 生成，仅供参考",
+            "当前最需要做的事",
+            "战略价值：high",
+            "依赖行动：补齐或复核关键证据缺口（evidence-gap-review）",
+            "关联院校：虚构甲大学",
+            "关联路径：虚构正式专项",
+            "基于公开数据由 AI 整理，仅供参考",
         ):
             self.assertIn(literal, text)
         self.assertNotIn("http://", text)
         self.assertNotIn("https://", text)
         self.assertNotIn(str(ROOT), text)
-        self.assertGreaterEqual(text.count("AI 生成，仅供参考"), 3)
-        self.assertIn("一、输入与证据边界", render_markdown(report))
+        self.assertGreaterEqual(
+            text.count("基于公开数据由 AI 整理，仅供参考"),
+            2,
+        )
+        self.assertIn("八、证据披露", render_markdown(report))
 
     def test_optional_and_unusable_sections_degrade_without_proxy_values(self):
         """Catches DOCX-only fallbacks that invent rank or pathway values."""
@@ -261,84 +746,81 @@ class DocxSemanticParityTest(unittest.TestCase):
                 self.assertEqual(stdout.getvalue(), "")
                 self.assertFalse(output.exists())
 
-    def test_cli_repeated_secondary_subject_reaches_docx(self):
-        """Catches a parser that accepts repeated subjects but drops them downstream."""
-        with tempfile.TemporaryDirectory() as temporary:
-            output = Path(temporary) / "anonymous-admission-report.docx"
+    def test_cli_rejects_secondary_subject_override_when_bundle_digest_mismatches(self):
+        """Catches a DOCX CLI that replays a v3 evidence bundle for another profile."""
+        with typed_atlas_artifacts() as (_planning, _query_plan, bundle, profile_path):
+            with tempfile.TemporaryDirectory() as temporary:
+                output = Path(temporary) / "anonymous-admission-report.docx"
+                command = [
+                    sys.executable,
+                    str(ROOT / "scripts" / "docx_export.py"),
+                    "--dataset",
+                    str(ROOT / "tests" / "fixtures" / "provinces" / "demo-312"),
+                    "--profile",
+                    str(profile_path),
+                    "--evidence",
+                    str(bundle),
+                    "--secondary-subject",
+                    "化学",
+                    "--secondary-subject",
+                    "生物",
+                    "--output",
+                    str(output),
+                ]
+                completed = subprocess.run(
+                    command, capture_output=True, text=True, encoding="utf-8"
+                )
+                self.assertEqual(completed.returncode, 2)
+                self.assertFalse(output.exists())
+                self.assertEqual(completed.stdout, "")
+                self.assertEqual(completed.stderr, "错误[DOCX_002]：DOCX 生成或发布失败\n")
+
+    def test_public_cli_defaults_to_exclusive_canonical_output_in_cwd(self):
+        with typed_atlas_artifacts() as (_planning, _query_plan, bundle, profile_path):
             command = [
                 sys.executable,
                 str(ROOT / "scripts" / "docx_export.py"),
-                "--dataset",
-                str(ROOT / "tests" / "fixtures" / "provinces" / "demo-312"),
-                "--profile",
-                str(ROOT / "tests" / "fixtures" / "profiles" / "demo.json"),
-                "--evidence",
-                str(ROOT / "tests" / "fixtures" / "evidence" / "three-source-consensus"),
-                "--secondary-subject",
-                "化学",
-                "--secondary-subject",
-                "生物",
-                "--output",
-                str(output),
+                "--dataset", str(ROOT / "tests" / "fixtures" / "provinces" / "demo-312"),
+                "--profile", str(profile_path),
+                "--evidence", str(bundle),
             ]
-            completed = subprocess.run(
-                command, capture_output=True, text=True, encoding="utf-8"
-            )
-            self.assertEqual(completed.returncode, 0, completed.stderr)
-            self.assertTrue(output.is_file())
-            text = document_text(output)
+            with tempfile.TemporaryDirectory() as temporary:
+                sandbox = Path(temporary)
+                success_dir = sandbox / "success"
+                competing_dir = sandbox / "competing"
+                success_dir.mkdir()
+                competing_dir.mkdir()
 
-        self.assertIn("化学、生物", text)
-        self.assertNotIn("张三", text)
+                completed = subprocess.run(
+                    command,
+                    cwd=success_dir,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                )
+                output = success_dir / "anonymous-admission-report.docx"
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                self.assertEqual(
+                    json.loads(completed.stdout)["filename"],
+                    "anonymous-admission-report.docx",
+                )
+                self.assertTrue(output.is_file())
 
-    def test_public_cli_defaults_to_exclusive_canonical_output_in_cwd(self):
-        command = [
-            sys.executable,
-            str(ROOT / "scripts" / "docx_export.py"),
-            "--dataset",
-            str(ROOT / "tests" / "fixtures" / "provinces" / "demo-312"),
-            "--profile",
-            str(ROOT / "tests" / "fixtures" / "profiles" / "demo.json"),
-            "--evidence",
-            str(ROOT / "tests" / "fixtures" / "evidence" / "three-source-consensus"),
-        ]
-        with tempfile.TemporaryDirectory() as temporary:
-            sandbox = Path(temporary)
-            success_dir = sandbox / "success"
-            competing_dir = sandbox / "competing"
-            success_dir.mkdir()
-            competing_dir.mkdir()
-
-            completed = subprocess.run(
-                command,
-                cwd=success_dir,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-            )
-            output = success_dir / "anonymous-admission-report.docx"
-            self.assertEqual(completed.returncode, 0, completed.stderr)
-            self.assertEqual(
-                json.loads(completed.stdout)["filename"],
-                "anonymous-admission-report.docx",
-            )
-            self.assertTrue(output.is_file())
-
-            competitor = competing_dir / "anonymous-admission-report.docx"
-            competitor.write_bytes(b"competitor-owned")
-            refused = subprocess.run(
-                command,
-                cwd=competing_dir,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-            )
-            self.assertEqual(refused.returncode, 2)
-            self.assertEqual(refused.stdout, "")
-            self.assertEqual(
-                refused.stderr, "错误[DOCX_002]：DOCX 生成或发布失败\n"
-            )
-            self.assertEqual(competitor.read_bytes(), b"competitor-owned")
+                competitor = competing_dir / "anonymous-admission-report.docx"
+                competitor.write_bytes(b"competitor-owned")
+                refused = subprocess.run(
+                    command,
+                    cwd=competing_dir,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                )
+                self.assertEqual(refused.returncode, 2)
+                self.assertEqual(refused.stdout, "")
+                self.assertEqual(
+                    refused.stderr, "错误[DOCX_002]：DOCX 生成或发布失败\n"
+                )
+                self.assertEqual(competitor.read_bytes(), b"competitor-owned")
 
     def test_public_cli_rejects_pii_output_name_with_path_neutral_error(self):
         with tempfile.TemporaryDirectory() as temporary:

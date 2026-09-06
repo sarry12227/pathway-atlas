@@ -8,7 +8,7 @@ import os
 import sys
 import tempfile
 import unittest
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
 
 
@@ -25,9 +25,21 @@ from school_recommend import (  # noqa: E402
     SchoolRecommendError,
     is_in_province,
     parse_secondary_subjects,
+    personalize_school_recommendations,
     recommend_schools as public_recommend_schools,
 )
+from adapters.school_fit_bridge import (  # noqa: E402
+    validate_school_fit_enriched_admission_row,
+)
+from planning_profile import PlanningProfile  # noqa: E402
+from rank_locator import RankScenario  # noqa: E402
 from province_registry import discover_provinces  # noqa: E402
+from validate_data import (  # noqa: E402
+    ValidatedAdmissionRow,
+    admission_row_hash,
+    validate_runtime_admission_row,
+)
+from tests.test_planning_profile import reference_payload  # noqa: E402
 
 
 def ordinary_policy(**changes):
@@ -78,6 +90,102 @@ def admission_row(**changes):
     return row
 
 
+def authenticated_school_fit_row(
+    *,
+    enrollment: bool = False,
+    subject: bool = False,
+    charter: bool = False,
+    **changes,
+):
+    """Build a fit-enriched fixture whose metadata is bound to its base row."""
+
+    raw = admission_row(**changes)
+    ordinary_evidence = {
+        name: raw.pop(name)
+        for name in (
+            "evidence_status",
+            "coverage_status",
+            "source_ids",
+            "coverage_min_rank",
+            "coverage_max_rank",
+        )
+    }
+    fit_values = {
+        name: raw.pop(name)
+        for name in (
+            "majors_in_group",
+            "school_province",
+            "city_location",
+            "institution_type",
+            "adjustment_required",
+            "affordable_for",
+            "required_secondary_subjects",
+            "secondary_subject_rule",
+        )
+        if name in raw
+    }
+    base = ValidatedAdmissionRow.from_mapping(raw)
+    enriched = base.to_dict()
+    enriched["admission_evidence_row_hash"] = admission_row_hash(base)
+    source_ids = []
+
+    if enrollment:
+        enrollment_source = f"fit-enrollment-{raw['school_code']}"
+        source_ids.append(enrollment_source)
+        for name in (
+            "majors_in_group",
+            "school_province",
+            "city_location",
+            "institution_type",
+        ):
+            if name in fit_values:
+                value = fit_values[name]
+                if name == "majors_in_group" and isinstance(value, str):
+                    value = tuple(json.loads(value))
+                enriched[name] = value
+        enriched.update(
+            {
+                "school_fit_enrollment_source_ids": (enrollment_source,),
+                "school_fit_enrollment_status": "official",
+            }
+        )
+    if subject:
+        subject_source = f"fit-subject-{raw['school_code']}"
+        source_ids.append(subject_source)
+        required = fit_values.get("required_secondary_subjects", ())
+        enriched["required_secondary_subjects"] = tuple(sorted(required))
+        enriched["secondary_subject_rule"] = fit_values.get(
+            "secondary_subject_rule", "all"
+        )
+        enriched.update(
+            {
+                "school_fit_subject_source_ids": (subject_source,),
+                "school_fit_subject_status": "official",
+            }
+        )
+    if charter:
+        charter_source = f"fit-charter-{raw['school_code']}"
+        source_ids.append(charter_source)
+        enriched["charter_adjustment_required"] = fit_values.get(
+            "adjustment_required", False
+        )
+        enriched.update(
+            {
+                "school_fit_charter_source_ids": (charter_source,),
+                "school_fit_charter_status": "official",
+            }
+        )
+
+    enriched["school_fit_source_ids"] = tuple(sorted(source_ids))
+    validated = ValidatedAdmissionRow.from_mapping(enriched)
+    recovered, recovered_hash = validate_school_fit_enriched_admission_row(validated)
+    if recovered != base or recovered_hash != admission_row_hash(base):
+        raise AssertionError("school-fit fixture failed base-row replay")
+    result = validated.to_dict()
+    result.update(ordinary_evidence)
+    return result
+
+
 def profile(**changes):
     values = {
         "rank": 8000,
@@ -87,6 +195,66 @@ def profile(**changes):
     }
     values.update(changes)
     return RecommendationProfile(**values)
+
+
+def planning_profile(**changes):
+    payload = reference_payload()
+    payload.update(
+        {
+            "province": "上海",
+            "city": "上海",
+            "high_school": None,
+            "grade": "高三",
+            "exam_year": 2026,
+            "class_level": None,
+            "subject_group": "物理",
+            "secondary_subjects": ["化学", "生物"],
+            "rank_observations": [],
+            "best_rank": None,
+            "usual_rank": None,
+        }
+    )
+    for section in ("preparation_assets", "constraints", "priorities"):
+        if section in changes:
+            payload[section].update(changes.pop(section))
+    payload.update(changes)
+    return PlanningProfile.create(payload)
+
+
+def exact_rank(rank=8000):
+    return RankScenario._create(
+        status=EvidenceStatus.OFFICIAL,
+        basis="official_score_table",
+        optimistic_rank=rank,
+        central_rank=rank,
+        conservative_rank=rank,
+        confidence="high",
+        source_ids=("rank-official",),
+        contributing_years=(2025,),
+        backtest_error=None,
+        reasons=("official_score_table",),
+        channel_kinds=("official_score_table",),
+        channel_statuses=("official",),
+        rejected_channel_count=0,
+    )
+
+
+def interval_rank():
+    return RankScenario._create(
+        status=EvidenceStatus.INFERRED,
+        basis="authenticated_interval",
+        optimistic_rank=6000,
+        central_rank=8000,
+        conservative_rank=10000,
+        confidence="medium",
+        source_ids=("rank-a", "rank-b"),
+        contributing_years=(2024, 2025),
+        backtest_error=0.02,
+        reasons=("authenticated_interval",),
+        channel_kinds=("joint_exam",),
+        channel_statuses=("corroborated",),
+        rejected_channel_count=0,
+    )
 
 
 class ProvinceNormalizationTest(unittest.TestCase):
@@ -426,6 +594,7 @@ class EvidenceAndCoverageTest(unittest.TestCase):
             school_name="部分大学",
             evidence_status="official",
             coverage_status="partial",
+            coverage_max_rank=7000,
         )
         conflict = admission_row(
             school_name="冲突大学",
@@ -434,7 +603,11 @@ class EvidenceAndCoverageTest(unittest.TestCase):
         )
         result = recommend_schools([partial, conflict], profile())
         self.assertEqual(result.coverage_status, EvidenceStatus.CONFLICT)
-        self.assertEqual(tuple(item.school_name for item in result.items), ("部分大学",))
+        self.assertEqual(result.items, ())
+        self.assertEqual(
+            tuple(item.school_name for item in result.observations),
+            ("部分大学",),
+        )
         self.assertEqual(
             result.warnings[:2],
             (
@@ -444,18 +617,72 @@ class EvidenceAndCoverageTest(unittest.TestCase):
         )
         self.assertEqual(len(result.warnings), len(set(result.warnings)))
 
-    def test_partial_exact_rows_are_used_only_inside_explicit_verified_coverage(self):
+    def test_reference_fact_with_partial_coverage_is_nonnumeric_inside_declared_range(self):
         row = admission_row(evidence_status="reference", coverage_status="partial")
         inside = recommend_schools([row], profile(rank=8000))
-        outside = recommend_schools([row], profile(rank=13000))
-        self.assertEqual(len(inside.items), 1)
+
+        self.assertEqual(inside.items, ())
         self.assertEqual(inside.coverage_status, EvidenceStatus.PARTIAL)
-        self.assertEqual(inside.items[0].evidence_status, EvidenceStatus.REFERENCE)
-        self.assertEqual(inside.items[0].source_ids, ("source-2025-01",))
-        self.assertTrue(any("当前已验证覆盖范围内" in value
-                            for value in inside.warnings))
+        self.assertIsNone(inside.verified_rank_coverage)
+        self.assertEqual(len(inside.observations), 1)
+        self.assertEqual(inside.observations[0].school_name, "演示大学")
+        self.assertFalse(hasattr(inside.observations[0], "min_rank"))
+        self.assertEqual(inside.empty_reason, "partial_observations_only")
+        self.assertTrue(any("不进入精确冲稳保" in value for value in inside.warnings))
+
+    def test_partial_coverage_outside_verified_range_is_non_numeric_observation(self):
+        row = admission_row(evidence_status="reference", coverage_status="partial")
+        outside = recommend_schools([row], profile(rank=13000))
+
         self.assertEqual(outside.items, ())
-        self.assertEqual(outside.empty_reason, "rank_outside_verified_coverage")
+        self.assertEqual(outside.coverage_status, EvidenceStatus.PARTIAL)
+        self.assertIsNone(outside.verified_rank_coverage)
+        self.assertEqual(len(outside.observations), 1)
+        observation = outside.observations[0]
+        self.assertEqual(observation.school_name, "演示大学")
+        self.assertEqual(observation.evidence_status, EvidenceStatus.PARTIAL)
+        self.assertEqual(observation.source_ids, ("source-2025-01",))
+        self.assertFalse(hasattr(observation, "min_score"))
+        self.assertFalse(hasattr(observation, "min_rank"))
+        self.assertTrue(any("不进入精确冲稳保" in value for value in outside.warnings))
+        self.assertEqual(outside.empty_reason, "partial_observations_only")
+
+    def test_numeric_result_rejects_partial_items_even_with_matching_coverage(self):
+        exact = recommend_schools([admission_row()], profile(rank=8000))
+        for unusable in (
+            EvidenceStatus.PARTIAL,
+            EvidenceStatus.INFERRED,
+            EvidenceStatus.MISSING,
+            EvidenceStatus.MASKED,
+            EvidenceStatus.CONFLICT,
+        ):
+            for coverage in (EvidenceStatus.PARTIAL, EvidenceStatus.OFFICIAL):
+                with self.subTest(
+                    unusable=unusable, coverage=coverage
+                ), self.assertRaisesRegex(ValueError, "numeric recommendations"):
+                    replace(
+                        exact,
+                        items=(replace(exact.items[0], evidence_status=unusable),),
+                        coverage_status=coverage,
+                        verified_rank_coverage=(5000, 12000),
+                    )
+
+    def test_exact_numeric_items_can_keep_partial_aggregate_coverage(self):
+        exact = recommend_schools([admission_row()], profile(rank=8000))
+        for accepted in (
+            EvidenceStatus.OFFICIAL,
+            EvidenceStatus.CORROBORATED,
+            EvidenceStatus.REFERENCE,
+        ):
+            with self.subTest(accepted=accepted):
+                result = replace(
+                    exact,
+                    items=(replace(exact.items[0], evidence_status=accepted),),
+                    coverage_status=EvidenceStatus.PARTIAL,
+                )
+                self.assertEqual(result.items[0].min_rank, 8000)
+                self.assertEqual(result.items[0].evidence_status, accepted)
+                self.assertEqual(result.coverage_status, EvidenceStatus.PARTIAL)
 
     def test_coverage_is_not_inferred_from_recommendation_hits(self):
         row = admission_row()
@@ -626,6 +853,472 @@ class ResultContractTest(unittest.TestCase):
                 },
             )
         self.assertEqual(mapping_error.exception.code, "REC_001")
+
+
+class FullProfileSchoolDecisionTest(unittest.TestCase):
+    def test_partial_rows_inside_scenario_remain_nonnumeric_without_delta_policy(self):
+        result = personalize_school_recommendations(
+            [
+                admission_row(
+                    evidence_status="reference",
+                    coverage_status="partial",
+                )
+            ],
+            planning_profile(),
+            rank_scenario=interval_rank(),
+        )
+
+        self.assertEqual(result.items, ())
+        self.assertEqual(result.decisions, ())
+        self.assertEqual(len(result.observations), 1)
+        self.assertEqual(result.observations[0].school_name, "演示大学")
+        self.assertFalse(hasattr(result.observations[0], "min_rank"))
+        self.assertTrue(any("位次差策略不可用" in item for item in result.warnings))
+
+    def test_empty_institution_types_is_unknown_and_reject_filters_each_major_group(self):
+        rows = [
+            authenticated_school_fit_row(
+                enrollment=True,
+                charter=True,
+                school_name="混合专业组大学",
+                school_code="M001",
+                major_group_name="",
+                major_group_code="",
+                program_group="第00组",
+                adjustment_required=True,
+                institution_type="public",
+            ),
+            authenticated_school_fit_row(
+                enrollment=True,
+                charter=True,
+                school_name="混合专业组大学",
+                school_code="M001",
+                major_group_name="",
+                major_group_code="",
+                program_group="第01组",
+                adjustment_required=False,
+                institution_type="public",
+            ),
+        ]
+
+        result = personalize_school_recommendations(
+            rows,
+            planning_profile(
+                constraints={
+                    "institution_types": [],
+                    "adjustment_preference": "reject",
+                }
+            ),
+            ordinary_policy(),
+            rank_scenario=exact_rank(),
+        )
+
+        self.assertEqual(tuple(item.school_name for item in result.items), ("混合专业组大学",))
+        self.assertEqual(result.items[0].major_groups[0].major_group_name, "第01组")
+        self.assertNotIn(
+            "SCHOOL_INSTITUTION_TYPE_BLOCKED",
+            {reason.code for reason in result.decision("混合专业组大学").reasons},
+        )
+
+    def test_within_tier_order_uses_priority_adjustment_evidence_and_stable_ids(self):
+        school_target = authenticated_school_fit_row(
+            enrollment=True,
+            charter=True,
+            school_name="A目标院校",
+            school_code="S001",
+            major_group_code="GA",
+            majors_in_group='["法学"]',
+            adjustment_required=False,
+            evidence_status="reference",
+            coverage_status="reference",
+            source_ids=["reference-a"],
+        )
+        major_target = authenticated_school_fit_row(
+            enrollment=True,
+            charter=True,
+            school_name="Z目标专业",
+            school_code="S002",
+            major_group_code="GB",
+            majors_in_group='["计算机科学与技术"]',
+            adjustment_required=False,
+            evidence_status="official",
+            coverage_status="official",
+            source_ids=["official-b"],
+        )
+        common_priorities = {
+            "target_schools": ["A目标院校"],
+            "target_majors": ["计算机"],
+            "target_regions": [],
+        }
+        school_first = personalize_school_recommendations(
+            [major_target, school_target],
+            planning_profile(
+                priorities={**common_priorities, "school_vs_major": "school_first"}
+            ),
+            ordinary_policy(),
+            rank_scenario=exact_rank(),
+        )
+        major_first = personalize_school_recommendations(
+            [school_target, major_target],
+            planning_profile(
+                priorities={**common_priorities, "school_vs_major": "major_first"}
+            ),
+            ordinary_policy(),
+            rank_scenario=exact_rank(),
+        )
+        evidence_only = personalize_school_recommendations(
+            [school_target, major_target],
+            planning_profile(
+                priorities={
+                    "target_schools": [],
+                    "target_majors": [],
+                    "target_regions": [],
+                    "school_vs_major": "unknown",
+                }
+            ),
+            ordinary_policy(),
+            rank_scenario=exact_rank(),
+        )
+
+        self.assertEqual(school_first.items[0].school_name, "A目标院校")
+        self.assertEqual(major_first.items[0].school_name, "Z目标专业")
+        self.assertEqual(evidence_only.items[0].school_name, "Z目标专业")
+
+        adjustment_rows = [
+            authenticated_school_fit_row(
+                enrollment=True,
+                charter=True,
+                school_name="A无需调剂",
+                school_code="A001",
+                adjustment_required=False,
+            ),
+            authenticated_school_fit_row(
+                enrollment=True,
+                charter=True,
+                school_name="Z接受调剂",
+                school_code="A002",
+                adjustment_required=True,
+            ),
+        ]
+        adjustment_accept = personalize_school_recommendations(
+            adjustment_rows,
+            planning_profile(
+                constraints={"adjustment_preference": "accept"},
+                priorities={"target_regions": []},
+            ),
+            ordinary_policy(),
+            rank_scenario=exact_rank(),
+        )
+        shuffled = personalize_school_recommendations(
+            list(reversed(adjustment_rows)),
+            planning_profile(
+                constraints={"adjustment_preference": "accept"},
+                priorities={"target_regions": []},
+            ),
+            ordinary_policy(),
+            rank_scenario=exact_rank(),
+        )
+        expected = ("Z接受调剂", "A无需调剂")
+        self.assertEqual(tuple(item.school_name for item in adjustment_accept.items), expected)
+        self.assertEqual(tuple(item.school_name for item in shuffled.items), expected)
+
+    def test_target_reason_presence_changes_commitment_only_for_a_matching_target(self):
+        rows = [admission_row(school_name="演示大学", school_code="T001")]
+        without_reason = personalize_school_recommendations(
+            rows,
+            planning_profile(
+                priorities={"target_schools": ["演示大学"]},
+                target_school_reasons=[],
+            ),
+            ordinary_policy(),
+            rank_scenario=exact_rank(),
+        )
+        committed = personalize_school_recommendations(
+            rows,
+            planning_profile(
+                priorities={"target_schools": ["演示大学"]},
+                target_school_reasons=["家庭已确认该目标"],
+            ),
+            ordinary_policy(),
+            rank_scenario=exact_rank(),
+        )
+        unrelated = personalize_school_recommendations(
+            rows,
+            planning_profile(
+                priorities={"target_schools": ["其他大学"]},
+                target_school_reasons=["家庭已确认其他目标"],
+            ),
+            ordinary_policy(),
+            rank_scenario=exact_rank(),
+        )
+
+        self.assertIn(
+            "SCHOOL_TARGET_SCHOOL_MATCH",
+            {reason.code for reason in without_reason.decision("演示大学").reasons},
+        )
+        self.assertEqual(
+            next(
+                reason.input_fields
+                for reason in without_reason.decision("演示大学").reasons
+                if reason.code == "SCHOOL_TARGET_SCHOOL_MATCH"
+            ),
+            ("priorities.target_schools", "target_school_reasons"),
+        )
+        self.assertIn(
+            "SCHOOL_TARGET_SCHOOL_COMMITTED",
+            {reason.code for reason in committed.decision("演示大学").reasons},
+        )
+        self.assertEqual(
+            next(
+                reason.input_fields
+                for reason in committed.decision("演示大学").reasons
+                if reason.code == "SCHOOL_TARGET_SCHOOL_COMMITTED"
+            ),
+            ("priorities.target_schools", "target_school_reasons"),
+        )
+        self.assertFalse(
+            {
+                "SCHOOL_TARGET_SCHOOL_MATCH",
+                "SCHOOL_TARGET_SCHOOL_COMMITTED",
+            }
+            & {reason.code for reason in unrelated.decision("演示大学").reasons}
+        )
+
+    def test_authenticated_public_rows_make_same_rank_target_profiles_differ(self):
+        canonical_rows = (
+            {
+                "year": 2025,
+                "province": "上海",
+                "subject_group": "物理",
+                "school_code": "D101",
+                "school_name": "武汉计算机大学",
+                "program_group": "第01组",
+                "min_score": 620,
+                "min_rank": 8001,
+                "remarks": "",
+                "city_location": "武汉",
+                "school_province": "湖北",
+                "majors_in_group": ("计算机科学与技术",),
+                "institution_type": "public",
+                "affordable_for": ("limited", "moderate", "flexible"),
+                "adjustment_required": False,
+            },
+            {
+                "year": 2025,
+                "province": "上海",
+                "subject_group": "物理",
+                "school_code": "D102",
+                "school_name": "上海医科大学",
+                "program_group": "第01组",
+                "min_score": 620,
+                "min_rank": 8002,
+                "remarks": "",
+                "city_location": "上海",
+                "school_province": "上海",
+                "majors_in_group": ("临床医学",),
+                "institution_type": "public",
+                "affordable_for": ("limited", "moderate", "flexible"),
+                "adjustment_required": False,
+            },
+        )
+        validated = tuple(
+            validate_runtime_admission_row(
+                row,
+                province="上海",
+                subject_group="物理",
+                score_scale=750,
+                allowed_years=(2025,),
+            )
+            for row in canonical_rows
+        )
+        self.assertNotEqual(admission_row_hash(validated[0]), admission_row_hash(validated[1]))
+        rows = []
+        for index, row in enumerate(validated):
+            replayed = row.to_dict()
+            replayed.update(
+                {
+                    "evidence_status": "official",
+                    "coverage_status": "official",
+                    "source_ids": [f"public-admission-{index}"],
+                    "coverage_min_rank": 5000,
+                    "coverage_max_rank": 12000,
+                }
+            )
+            rows.append(
+                authenticated_school_fit_row(enrollment=True, **replayed)
+            )
+        computing = personalize_school_recommendations(
+            rows,
+            planning_profile(
+                priorities={
+                    "target_majors": ["计算机"],
+                    "target_regions": ["武汉"],
+                    "target_schools": [],
+                    "school_vs_major": "major_first",
+                }
+            ),
+            ordinary_policy(),
+            rank_scenario=exact_rank(),
+        )
+        medicine = personalize_school_recommendations(
+            rows,
+            planning_profile(
+                priorities={
+                    "target_majors": ["临床医学"],
+                    "target_regions": ["上海"],
+                    "target_schools": [],
+                    "school_vs_major": "major_first",
+                }
+            ),
+            ordinary_policy(),
+            rank_scenario=exact_rank(),
+        )
+
+        self.assertEqual(computing.recommendations.items[0].school_name, "武汉计算机大学")
+        self.assertEqual(medicine.recommendations.items[0].school_name, "上海医科大学")
+        computing_codes = {
+            reason.code for reason in computing.decision("武汉计算机大学").reasons
+        }
+        same_school_other_profile_codes = {
+            reason.code for reason in medicine.decision("武汉计算机大学").reasons
+        }
+        self.assertIn("SCHOOL_TARGET_MAJOR_COMMITTED", computing_codes)
+        self.assertIn("SCHOOL_TARGET_REGION_MATCH", computing_codes)
+        self.assertNotEqual(computing_codes, same_school_other_profile_codes)
+        self.assertNotEqual(
+            computing.decision("武汉计算机大学").stable_key,
+            medicine.decision("上海医科大学").stable_key,
+        )
+
+    def test_excluded_region_institution_type_and_subject_emit_block_codes(self):
+        rows = [
+            authenticated_school_fit_row(
+                enrollment=True,
+                school_name="排除地区大学",
+                school_code="D201",
+                city_location="武汉",
+                school_province="湖北",
+            ),
+            authenticated_school_fit_row(
+                enrollment=True,
+                school_name="民办大学",
+                school_code="D202",
+                institution_type="private",
+            ),
+            authenticated_school_fit_row(
+                enrollment=True,
+                subject=True,
+                school_name="选科不符大学",
+                school_code="D203",
+                required_secondary_subjects=["政治"],
+                secondary_subject_rule="all",
+            ),
+            authenticated_school_fit_row(
+                enrollment=True,
+                school_name="保留大学",
+                school_code="D204",
+            ),
+        ]
+        result = personalize_school_recommendations(
+            rows,
+            planning_profile(
+                constraints={
+                    "excluded_regions": ["武汉"],
+                    "institution_types": ["public"],
+                },
+                priorities={"target_regions": []},
+            ),
+            ordinary_policy(),
+            rank_scenario=exact_rank(),
+        )
+
+        self.assertEqual(
+            tuple(item.school_name for item in result.recommendations.items),
+            ("保留大学",),
+        )
+        self.assertIn(
+            "SCHOOL_EXCLUDED_REGION",
+            {reason.code for reason in result.decision("排除地区大学").reasons},
+        )
+        self.assertIn(
+            "SCHOOL_INSTITUTION_TYPE_BLOCKED",
+            {reason.code for reason in result.decision("民办大学").reasons},
+        )
+        self.assertIn(
+            "SCHOOL_SUBJECT_MISMATCH",
+            {reason.code for reason in result.decision("选科不符大学").reasons},
+        )
+
+    def test_risk_changes_tier_caps_without_changing_historical_tiers(self):
+        rows = [
+            admission_row(
+                school_name=f"冲刺大学{index}",
+                school_code=f"R{index}",
+                min_rank=7000 + index,
+            )
+            for index in range(5)
+        ]
+        conservative = personalize_school_recommendations(
+            rows,
+            planning_profile(constraints={"risk_preference": "conservative"}),
+            ordinary_policy(tier_caps={"冲": 5, "稳": 5, "保": 5}),
+            rank_scenario=interval_rank(),
+        )
+        aggressive = personalize_school_recommendations(
+            rows,
+            planning_profile(constraints={"risk_preference": "aggressive"}),
+            ordinary_policy(tier_caps={"冲": 5, "稳": 5, "保": 5}),
+            rank_scenario=interval_rank(),
+        )
+
+        self.assertEqual({item.strategy for item in conservative.recommendations.items}, {"冲"})
+        self.assertEqual({item.strategy for item in aggressive.recommendations.items}, {"冲"})
+        self.assertEqual(len(conservative.recommendations.items), 1)
+        self.assertEqual(len(aggressive.recommendations.items), 5)
+        self.assertTrue(
+            any(
+                "SCHOOL_RISK_CAP_EXCLUDED" in {reason.code for reason in decision.reasons}
+                for decision in conservative.decisions
+                if decision.outcome == "excluded"
+            )
+        )
+
+    def test_unknown_cost_and_adjustment_data_are_explicitly_uncertain(self):
+        result = personalize_school_recommendations(
+            [admission_row()],
+            planning_profile(
+                constraints={
+                    "budget_level": "limited",
+                    "adjustment_preference": "reject",
+                }
+            ),
+            ordinary_policy(),
+            rank_scenario=exact_rank(),
+        )
+
+        reasons = result.decision("演示大学").reasons
+        self.assertIn("SCHOOL_AFFORDABILITY_UNVERIFIED", {item.code for item in reasons})
+        self.assertIn("SCHOOL_ADJUSTMENT_UNVERIFIED", {item.code for item in reasons})
+        self.assertTrue(
+            all(
+                item.effect == "uncertain"
+                for item in reasons
+                if item.code.endswith("_UNVERIFIED")
+            )
+        )
+
+    def test_snapshot_path_needs_no_placeholder_rank_delta_policy(self):
+        result = personalize_school_recommendations(
+            [admission_row(min_rank=9000)],
+            planning_profile(),
+            rank_scenario=interval_rank(),
+        )
+
+        self.assertEqual(result.policy_status, "rank_delta_policy_unavailable")
+        self.assertIsNone(result.compatibility_result)
+        self.assertEqual(tuple(item.school_name for item in result.items), ("演示大学",))
+        self.assertEqual(result.items[0].strategy, "稳")
+        self.assertIn("位次差策略不可用", "；".join(result.warnings))
 
 
 

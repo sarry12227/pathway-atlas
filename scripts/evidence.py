@@ -74,6 +74,7 @@ FACT_EXTRACTION_METHODS = (
     "xlsx-worksheet",
     "pdfplumber-text",
     "host-ocr-rows",
+    "host-public-text",
     "qr",
     "manual-structured",
 )

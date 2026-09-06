@@ -169,6 +169,20 @@ class TrackedBoundaryTest(unittest.TestCase):
 
 
 class ReleaseComponentTest(unittest.TestCase):
+    def test_full_suite_failure_keeps_test_ids_without_raw_traceback(self) -> None:
+        completed = subprocess.CompletedProcess(
+            [], 1, "", "FAIL: test_partial (test_report.ReportTest)\n"
+            "FAIL: unsafe/value (untrusted/location)\nRan 2 tests in 0.1s\n",
+        )
+        context = ReleaseContext(root=ROOT, expected_version="0.1.0")
+        with mock.patch.object(release_gate.subprocess, "run", return_value=completed):
+            result = release_gate._check_full_tests(context)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.count, 2)
+        self.assertEqual(result.details, (
+            "test-suite-failed", "failed-test:test_report.ReportTest.test_partial",
+        ))
+
     def test_binary_manifest_validation_reads_the_immutable_index_tree(self) -> None:
         original = b"synthetic-docx\x00original"
         with tempfile.TemporaryDirectory() as temporary:
