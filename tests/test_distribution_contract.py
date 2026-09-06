@@ -105,10 +105,14 @@ class DistributionContractTest(unittest.TestCase):
         for pattern in forbidden:
             self.assertIsNone(re.search(pattern, self.text))
 
-    def test_initial_ledger_does_not_overclaim_third_party_publication(self) -> None:
-        third_party = EXPECTED_PLATFORMS - {"GitHub", "Gitee"}
-        status_by_platform = {row["Platform"]: row["Status"] for row in self.rows}
-        self.assertTrue(all(status_by_platform[platform] == "pending" for platform in third_party))
+    def test_recorded_outcomes_require_dated_explanations(self) -> None:
+        for row in self.rows:
+            with self.subTest(platform=row["Platform"]):
+                self.assertNotEqual(row["Notes"], EMPTY_VALUE)
+                if row["Status"] != "pending":
+                    self.assertNotEqual(row["Last verified"], EMPTY_VALUE)
+                if row["Status"] in {"submitted", "indexed"}:
+                    self.assertNotEqual(row["Version/Commit"], EMPTY_VALUE)
 
 
 if __name__ == "__main__":
