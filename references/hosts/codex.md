@@ -4,7 +4,9 @@
 
 ## Intake boundary
 
-Accept the family's numbered answers as ordinary conversation text. Segment them with `scripts.questionnaire_intake.parse_numbered_questionnaire`, normalize only meanings explicitly present in those answers, then call `build_profile_from_questionnaire`. The mapping exists only inside the host; never ask the user for JSON or a path. An unasked or unclear readiness, strength, activity subtype, constraint, or preference remains `unknown` or empty instead of being inferred.
+Follow the one-question-at-a-time intake in SKILL.md. Accept each answer as ordinary conversation text, retain the private draft across turns, and show only the current question and its choices. Wait for the user's answer before advancing; split compound fields and question 20 conditions across turns. Use a currently available choice control for one question when it can hold all choices, otherwise show lettered choices. Only the user selects or skips; an unanswered item stays pending.
+
+Accumulate explicit answers under the twenty internal topic keys, then call `build_profile_from_questionnaire` only after collection is complete. `parse_numbered_questionnaire` is optional compatibility for a complete numbered document volunteered by the user, not a requirement for conversational replies. The mapping exists only inside the host; never ask the user for JSON or a path. An explicitly unknown readiness, strength, activity subtype, constraint, or preference remains `unknown` or empty instead of being inferred. Follow the separate profile confirmation gate before research.
 
 ## Capability map
 

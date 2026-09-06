@@ -77,9 +77,14 @@ themselves; do not ask the family to open the internal evidence bundle.
 
 ## Complete normalized twenty-answer file
 
-The host first segments the family's numbered prose with
-`parse_numbered_questionnaire`, then normalizes only explicit meanings. The keys
-remain exactly `1` through `20`; unclear values stay `null`, `unknown` or empty.
+The host collects answers through the one-question-at-a-time conversation in
+SKILL.md, saving the draft and next pending item privately after each user reply.
+Only after every topic and subitem is answered or explicitly skipped does the
+host normalize the accumulated explicit meanings under keys `1` through `20`.
+A complete numbered document volunteered by the user can optionally be segmented
+with `parse_numbered_questionnaire`; conversational replies need no numbering.
+Explicitly unknown or skipped values stay `null`, `unknown` or empty, while
+unasked items remain pending. Confirm the resulting profile before `start`.
 This valid sample shows the complete metadata shape, not values to copy into a
 different student's profile:
 

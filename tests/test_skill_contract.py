@@ -106,9 +106,9 @@ class SkillContractTest(unittest.TestCase):
         for command in ("init", "confirm", "next", "ingest", "finalize", "compute", "status"):
             self.assertIn(f"`{command}`", self.body)
 
-    def test_first_response_is_exactly_twenty_anonymous_questions(self):
+    def test_internal_bank_preserves_twenty_anonymous_topics(self):
         intake = section(self.body, "画像确认")
-        rows = questions(intake)
+        rows = questions((ROOT / "references/questionnaire.md").read_text(encoding="utf-8"))
         self.assertEqual(tuple(number for number, _ in rows), tuple(range(1, 21)))
         self.assertEqual(tuple(label for _, label in rows), QUESTION_LABELS)
         self.assertEqual(rows[4], (5, "班型/培养层次"))
@@ -120,7 +120,8 @@ class SkillContractTest(unittest.TestCase):
 
     def test_first_response_prefills_then_waits_for_explicit_confirmation(self):
         intake = section(self.body, "画像确认")
-        self.assertRegex(intake, r"首次回复只能[^。]*自动回填[^。]*完整问卷")
+        self.assertIn("[内部题库](references/questionnaire.md)", intake)
+        self.assertEqual(questions(intake), ())
         self.assertIn("不得重复询问已提供的信息", intake)
         self.assertIn("画像确认前不得运行 preflight、查询计划或检索，也不得计算、推荐或判断", intake)
         self.assertIn("确认后的匿名画像", intake)
@@ -208,6 +209,7 @@ class SkillContractTest(unittest.TestCase):
     def test_all_references_are_reachable_once(self):
         links = tuple(re.findall(r"\[[^]]+\]\(([^)]+)\)", self.body))
         expected = {
+            "references/questionnaire.md",
             "references/source-policy.md",
             "references/retrieval-playbook.md",
             "references/hosts/generic.md",

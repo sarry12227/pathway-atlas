@@ -492,7 +492,8 @@
     "scripts/planning_session.py",
     "scripts/adapters/public_text.py",
     "scripts/adapters/school_fit_bridge.py",
-    "references/host-workflow.md"
+    "references/host-workflow.md",
+    "references/questionnaire.md"
   ],
   "required_release_prefixes": [
     "tests/fixtures/evidence",
