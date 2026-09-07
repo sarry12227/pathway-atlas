@@ -124,7 +124,9 @@ def detect_capabilities(
     has_vision = "vision" in declared
     if has_network and has_vision and has_parsers and supported_python:
         tier = CapabilityTier.FULL
-    elif has_network and supported_python:
+    elif "browse" in declared and supported_python:
+        # A page reader can verify known official URLs without a search API.
+        # Search-only snippets still cannot replace opened source evidence.
         tier = CapabilityTier.STANDARD
     else:
         tier = CapabilityTier.OFFLINE

@@ -65,7 +65,7 @@ _ACCEPTED = frozenset(
 )
 _COVERAGE = _ACCEPTED
 _EXTRACTION_METHODS = frozenset(
-    {"html-table", "xlsx-worksheet", "host-ocr-rows"}
+    {"html-table", "xlsx-worksheet", "xls-worksheet", "pdf-text-table", "host-ocr-rows"}
 )
 _SHA256 = re.compile(r"^sha256:([0-9a-f]{64})$")
 _SYNTHETIC_PUBLISHER = re.compile(r"^rank-publisher-sha256-([0-9a-f]{64})$")

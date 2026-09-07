@@ -6,6 +6,7 @@ discovery stays with the host; this module owns the previously manual plumbing.
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 from dataclasses import replace
 import hashlib
 import json
@@ -25,7 +26,7 @@ from scripts.evidence import EvidenceStore
 from scripts.planning_profile import PlanningProfile
 from scripts.planning_session import (
     PlanningSession, PlanningSessionReplayContext, PlanningSessionReplayJournal,
-    SessionStage, build_task_evidence_outcome,
+    PlanningSessionInputError, SessionStage, build_task_evidence_outcome,
 )
 from scripts.preflight import detect_capabilities
 from scripts.query_plan import build_query_plan, load_province_catalog
@@ -107,7 +108,9 @@ class PlanningWorkflow:
         sources = list(candidates)
         if self.context.bundle_path is not None:
             from scripts.validate_evidence import validate_bundle_snapshot
-            validation = validate_bundle_snapshot(self.context.bundle_path)
+            validation = validate_bundle_snapshot(
+                self.context.bundle_path, _allow_empty=not self.session.completed_task_ids,
+            )
             snapshot = validation.snapshot
             if snapshot is None:
                 raise ValueError("previous evidence bundle no longer validates")
@@ -182,7 +185,7 @@ class PlanningWorkflow:
         for source in sources:
             from scripts.adapters import read_stable_local_file
             path = Path(source["path"])
-            raw = read_stable_local_file(path, suffixes=(".html", ".htm", ".xlsx", ".txt", ".pdf", ".png", ".jpg", ".jpeg", ".webp", ".json"))
+            raw = read_stable_local_file(path, suffixes=(".html", ".htm", ".xlsx", ".xls", ".txt", ".pdf", ".png", ".jpg", ".jpeg", ".webp", ".json"))
             metadata = dict(source["candidate"])
             actual_hash = "sha256:" + hashlib.sha256(raw).hexdigest()
             if metadata.get("content_hash", actual_hash) != actual_hash:
@@ -198,12 +201,43 @@ class PlanningWorkflow:
                                         score_scale=options.get("score_scale"))
                 document = extract_html_table(path, table_index=options["table_index"],
                     expected_caption=options.get("caption"), mapping=mapping)
-            elif source["adapter"] == "xlsx":
+            elif source["adapter"] in {"xlsx", "xls"}:
                 from scripts.adapters import ColumnMapping
-                from scripts.adapters.spreadsheet import extract_spreadsheet
+                if source["adapter"] == "xlsx":
+                    from scripts.adapters.spreadsheet import extract_spreadsheet, SpreadsheetDependencyError
+                    extractor, dependency_error = extract_spreadsheet, SpreadsheetDependencyError
+                else:
+                    from scripts.adapters.xls import extract_xls, XlsDependencyError
+                    extractor, dependency_error = extract_xls, XlsDependencyError
                 mapping = ColumnMapping(options["columns"], roles=options.get("roles"),
                                         score_scale=options.get("score_scale"))
-                document = extract_spreadsheet(path, sheet=options["sheet"], mapping=mapping)
+                try:
+                    document = extractor(path, sheet=options["sheet"], mapping=mapping)
+                except dependency_error:
+                    raise ModuleNotFoundError("spreadsheet parser unavailable") from None
+            elif source["adapter"] == "pdf_text":
+                if task.kind not in {"strong_foundation", "comprehensive_evaluation", "hk_macao_admission", "special_pathway"}:
+                    raise ValueError("PDF prose requires a pathway task; numeric tables need an exact table adapter")
+                from scripts.adapters.pdf_text import extract_pdf_text, PdfDependencyError
+                try:
+                    document = extract_pdf_text(path)
+                except PdfDependencyError:
+                    raise ModuleNotFoundError("PDF text parsers unavailable") from None
+            elif source["adapter"] == "pdf_table":
+                from scripts.adapters import ColumnMapping
+                from scripts.adapters.pdf_table import extract_pdf_table
+                from scripts.adapters.pdf_text import PdfDependencyError
+                mapping = ColumnMapping(options["columns"], roles=options.get("roles"),
+                                        score_scale=options.get("score_scale"))
+                try:
+                    document = extract_pdf_table(
+                        path, mapping=mapping, headers=options["headers"],
+                        page_number=options["page_number"], header_line=options["header_line"],
+                        first_data_line=options["first_data_line"], last_data_line=options["last_data_line"],
+                        column_group=options.get("column_group", 1), expected_caption=options.get("caption"),
+                    )
+                except PdfDependencyError:
+                    raise ModuleNotFoundError("PDF table parsers unavailable") from None
             elif source["adapter"] == "public_text":
                 from scripts.adapters.public_text import PublicTextField, bind_public_text
                 document = bind_public_text(source_id=candidate.source_id, url=candidate.url,
@@ -309,25 +343,80 @@ class PlanningWorkflow:
         _session, publication = self.context.publish(format="markdown")
         return publication.rendered_bytes.decode("utf-8")
 
+    def delivery(self):
+        """Describe what the replayed evidence supports, not just task closure."""
+        _session, publication = self.context.publish(format="markdown")
+        calculation = publication._calculation_outcome
+        fact_count = len(calculation._evidence_outcome._snapshot.facts)
+        mode = "profile_only" if fact_count == 0 else (
+            "partial" if calculation.degraded else "evidence_supported"
+        )
+        return {"mode": mode, "evidence_fact_count": fact_count, "degraded": calculation.degraded}
+
+    def research_summary(self):
+        completed = len(self.session.completed_task_ids)
+        unavailable = len(self.session.unavailable_task_ids)
+        total = len(self.session.expected_task_ids)
+        return {
+            "total": total, "completed": completed, "unavailable": unavailable,
+            "pending": total - completed - unavailable,
+            "unavailable_by_reason": dict(sorted(Counter(self.session.unavailable_reason_codes).items())),
+        }
+
+    def _older_year_resolution(self, pending):
+        """Offer bounded hints using the same receipt gate as an explicit update."""
+        hints, suggested = [], set()
+        newer_outcomes = sorted(self.context.task_outcomes, key=lambda item: (-item.year, item.task_id))
+        for newer in newer_outcomes:
+            if not newer.usable or "official" not in newer.evidence_statuses:
+                continue
+            ids = []
+            for task in pending:
+                if (task.task_id in suggested or task.kind != newer.kind
+                        or task.target_name != newer.target_name or task.year >= newer.year):
+                    continue
+                try:
+                    # The immutable transition is checked but never persisted here.
+                    self.session.ingest_task(
+                        task.task_id, query_plan_digest=self.session.query_plan_digest,
+                        query_plan=self.plan, profile=self.profile, outcome="unavailable",
+                        unavailable_reason="newer_comparable_year_accepted", newer_evidence_outcome=newer,
+                    )
+                except PlanningSessionInputError:
+                    continue
+                ids.append(task.task_id)
+                suggested.add(task.task_id)
+            if ids:
+                hints.append({"newer_task": newer.task_id, "task_ids": ids,
+                              "reason": "newer_comparable_year_accepted"})
+        return hints
+
     def status(self, *, limit=3):
         if type(limit) is not int or not 1 <= limit <= 100:
             raise ValueError("task display limit must be between 1 and 100")
         pending = sorted(self.pending(), key=lambda task: (-task.year, task.kind, task.task_id))
-        return {
+        result = {
             "session_id": self.session.session_id,
             "stage": self.session.stage.value,
             "completed": len(self.session.completed_task_ids),
             "unavailable": len(self.session.unavailable_task_ids),
             "pending": len(pending),
             "next": [t.to_dict() for t in pending[:limit]],
+            "research_summary": self.research_summary(),
+            "older_year_resolution": self._older_year_resolution(pending),
         }
+        if self.session.stage is SessionStage.CALCULATION_COMPLETE:
+            result["delivery"] = self.delivery()
+        return result
 
     def public_sources(self):
         """Give the host real public links for the report's source identifiers."""
         if self.context.bundle_path is None:
             return []
         from scripts.validate_evidence import validate_bundle_snapshot
-        snapshot = validate_bundle_snapshot(self.context.bundle_path).snapshot
+        snapshot = validate_bundle_snapshot(
+            self.context.bundle_path, _allow_empty=not self.session.completed_task_ids,
+        ).snapshot
         if snapshot is None:
             raise ValueError("report sources no longer validate")
         keys = ("source_id", "url", "publisher", "tier", "published_at", "retrieved_at")
@@ -372,7 +461,8 @@ def main(argv=None):
             result = workflow.finish(format=args.format)
             print(json.dumps({"session_id": workflow.session.session_id, "report": str(result),
                               "format": args.format, "report_text": workflow.report_text(),
-                              "sources": workflow.public_sources()}, ensure_ascii=False))
+                              "sources": workflow.public_sources(), "delivery": workflow.delivery(),
+                              "research_summary": workflow.research_summary()}, ensure_ascii=False))
         else:
             print(json.dumps(workflow.status(limit=args.limit), ensure_ascii=False))
         return 0

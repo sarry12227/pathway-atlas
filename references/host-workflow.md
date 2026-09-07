@@ -5,6 +5,15 @@ profile. Every command, JSON file, saved source and returned path stays inside a
 host-owned private workspace. The family sees questions, confirmation, progress,
 evidence limits and the final report; it never authors or locates these inputs.
 
+For failed tools, inaccessible pages, missing parsers or evidence gaps, use the
+[research recovery guide](research-recovery.md). Probe actual source reading;
+preflight records declarations and discoverable modules, not a successful browser
+launch or website request. `browse` includes a working host page reader or HTTP
+reader, not just Chrome. With `browse` but no `search`, `standard` can read known
+official sources and their public navigation while disclosing limited discovery.
+Only when no source-reading route works should live evidence collection stop;
+search snippets alone cannot establish facts. Explicit `offline` stays offline.
+
 ## Command loop
 
 Run the Python module commands with the installed Skill root as the command's
@@ -28,6 +37,26 @@ number of unfinished tasks, while `next` contains only the requested display
 slice. The default limit is 3 and the accepted range is 1 through 100. Hidden
 pending tasks remain in the journal. The slice is ordered by newest year first,
 then kind and task ID. There is no separate `status` command.
+
+`research_summary` accompanies every status and `finish` response:
+
+```json
+{
+  "total": 72,
+  "completed": 1,
+  "unavailable": 3,
+  "pending": 68,
+  "unavailable_by_reason": {"newer_comparable_year_accepted": 3}
+}
+```
+
+These illustrative counts describe task outcomes, not successful source requests
+or qualified pathways. `older_year_resolution` is a list of hints, each containing
+`newer_task`, `task_ids` and `reason: "newer_comparable_year_accepted"`. Each hint
+passes the existing same-family, newer-year and usable official receipt checks.
+It does not change the journal or remove pending tasks. Inspect comparability,
+then explicitly pass those IDs to `unavailable`; the command rechecks the receipt.
+There is no hint when a partial or otherwise unusable receipt cannot justify it.
 
 For one returned task, search only within its declared kind, year, province,
 subject context and candidate limit. Open each retained public page or attachment,
@@ -54,6 +83,24 @@ python -m scripts.host_workflow unavailable --workspace <private-workspace> --se
 The facade loads that typed receipt from the journal and lets the state machine
 verify its family and year. Do not pass `--newer-task` for another reason. The
 facade never skips older tasks automatically.
+
+The multi-year matrix is bounded fallback work, not a requirement for every year
+to succeed. Process each family's newest year first and continue other families
+when one stalls. A shared, actually observed outage may close the affected tasks
+in one command; do not retry a broken browser separately for every task. First
+consume any already saved, admissible material and try the available alternative
+routes described in the recovery guide. For example, after all applicable online
+readers have failed and neither pending task has readable saved evidence:
+
+```text
+python -m scripts.host_workflow unavailable --workspace <private-workspace> --session <session-id> --task <affected-task-1> --task <affected-task-2> --reason network_unavailable
+python -m scripts.host_workflow next --workspace <private-workspace> --session <session-id> --limit 100
+```
+
+Repeat only for the remaining affected IDs. Use `capability_unavailable` for a
+format with no working extractor, not every task in the plan. An inaccessible
+page does not establish `current_year_not_published`, and a tool failure says
+nothing about the student's eligibility.
 
 Repeat `next` after every `ingest` or `unavailable`. When `pending` is zero,
 publish through the same facade:
@@ -87,6 +134,29 @@ publication date and retrieval date for each authenticated `source_id`. Use
 those links next to the corresponding numbers, policies and recommendations in
 the conversation. Source IDs alone are not sufficient citations. Never ask the
 family to open internal evidence files to understand the conclusion.
+
+`finish` also returns `delivery`, derived from the authenticated calculation:
+
+```json
+{"mode": "profile_only", "evidence_fact_count": 0, "degraded": true}
+```
+
+`mode` is `profile_only` when the evidence snapshot has no facts, `partial` when
+it has facts but the calculation is degraded, and `evidence_supported` otherwise.
+Fact count is not a count of verified eligibility conclusions. Read every actual
+fact's state and coverage; even `evidence_supported` is not an admission guarantee.
+`delivery` also appears in status after the calculation checkpoint is complete,
+not while research remains pending.
+
+All-unavailable is a supported outcome: call the same `finish` after pending is
+zero. It returns the full report text, `sources: []`, the truthful research summary
+and `profile_only`; an empty evidence bundle does not fabricate a fact. Explain a
+preparation version based on the confirmed profile, with useful actions and review
+points, while keeping unsupported ranks, school tiers, deadlines and eligibility
+unknown. With partial evidence, deliver the supported portions and specific gaps.
+Do not ask the family to choose between repairing the machine and receiving an
+unsupported expert estimate. Keep both repeated technical actions and audit detail
+inside the host; follow the conversation guide for a readable, complete answer.
 
 ## Complete normalized twenty-answer file
 
@@ -156,6 +226,14 @@ If question 8 has no explicit joint-exam observation, omit
 subjects and activities. Unknown score/rank values may be `null`; the four
 question-7/8 numeric values are omitted from `rank_observations` only when all are
 null.
+
+The question-7 `scope` describes the real exam, not who stamped its report.
+School monthly exams, school term exams and school mock exams stay `school`;
+explicit province/city joint exams use `province_joint` / `city_joint`.
+`province_official` is only for the student's actual formal provincial gaokao
+result. A 750-point maximum, an official-looking school report or a need to make
+calculation succeed never changes that scope. Unclear exam scope remains pending
+clarification while independent research continues.
 
 ## Submission envelope and source metadata
 
@@ -258,6 +336,95 @@ building the validated admission row.
   "records": [{"rows": [0], "coverage_status": "official"}]
 }
 ```
+
+## Legacy XLS submission
+
+For an actual legacy workbook, use `adapter: "xls"` and the original `.xls` path.
+The `sheet`, `columns`, `roles`, `score_scale` and `records` fields are the same as
+the XLSX submission above. The facade calls
+`scripts.adapters.xls.extract_xls(path, sheet=..., mapping=...)`, records
+`xls-worksheet` and hashes the original bytes. The optional reader is `xlrd`;
+XLSX continues to use `openpyxl`. Hidden, merged, formula and error cells are not
+promoted to exact values. Never rename XLS to XLSX or rewrite it as a different
+file to make the evidence appear supported. Missing readers return exit `3` and
+retain the checkpoint, so the host can use another readable source or close only
+the affected tasks.
+
+## PDF policy-text submission
+
+Use `adapter: "pdf_text"` for a saved original `.pdf` and one of the pathway
+task kinds: `strong_foundation`, `comprehensive_evaluation`, `hk_macao_admission`
+or `special_pathway`. The facade calls `extract_pdf_text`; its available parser
+records `pdfplumber-text` or `pypdf-text`, retaining page numbers and warnings.
+It does not perform OCR on an image-only page.
+
+Inspect the actual normalized page text before selecting fields. Each
+`options.field_map` value is `[one_based_page_number, exact_supporting_text]`.
+For example, the options for a real page that contains those two unique strings
+could be:
+
+```json
+{
+  "field_map": {
+    "institution": [1, "示例大学"],
+    "year": [1, "2026"]
+  }
+}
+```
+
+Use the full source metadata envelope above, omit absent fields and do not provide
+`records` for these pathway tasks. Partial field maps retain missing conditions;
+an absent or ambiguous quote cannot establish a value. Do not fill unknown fees,
+qualifications or language requirements from memory. This prose adapter cannot
+stand in for a numeric score/admission table.
+
+## PDF integer-table submission
+
+Use `adapter: "pdf_table"` only for an unambiguous integer table in the actual
+output of `extract_pdf_text`. It accepts exactly one page, an explicit header line
+and an inclusive range of data lines. Page and line numbers are one-based; the
+submission's `records[].rows` indexes remain zero-based extracted rows. Example
+options for a previously inspected, matching region are:
+
+```json
+{
+  "columns": {"score": "分数", "cumulative_count": "累计人数"},
+  "roles": {"score": "score", "cumulative_count": "rank"},
+  "score_scale": [0, 750],
+  "headers": ["分数", "人数", "累计人数"],
+  "page_number": 1,
+  "header_line": 2,
+  "first_data_line": 3,
+  "last_data_line": 20,
+  "column_group": 1,
+  "caption": null
+}
+```
+
+The facade calls `extract_pdf_table(path, mapping=..., headers=..., page_number=...,
+header_line=..., first_data_line=..., last_data_line=..., column_group=...,
+expected_caption=...)`, with `options.caption` passed as `expected_caption`.
+It records `pdf-text-table`, the actual parser and original page/line/group
+locations. `headers` is one complete ordered group of exact single-token labels;
+the physical header may repeat that entire group side by side. `column_group`
+selects one group, starting at 1, while every source row must still contain all
+physical columns. Every mapped field needs a numeric score/rank role.
+
+The adapter rejects missing/extra columns, masked ranges, noninteger values and
+image-only pages. It neither guesses table boundaries nor repairs layout. Its
+coverage is only the selected page and range, not the whole PDF or province.
+For a genuinely exact row admitted from an official source, the surrounding
+submission may use `records: [{"rows": [0], "coverage_status": "official"}]`, as
+in the HTML example. This record state does not declare the entire PDF extracted:
+the adapter's explicit score/rank bounds and page/line selection retain that
+separate limit. Do not set `partial` merely because a verified region is a subset;
+the rank bridge rejects a non-consumable record state. Conversely, never promote
+uncertain cells or an unqualified source to `official` to make ingestion pass.
+The largest cumulative count in an excerpt is not the province's total cohort.
+Inspect each source with the active parser before reusing line selections; a
+different parser may change the layout. Complex admission tables with school names
+need an appropriate HTML/XLS/XLSX source or genuinely verified visual extraction.
+No converted prose, imagined OCR or guessed columns may be labeled exact.
 
 ## OCR-row submission
 

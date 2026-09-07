@@ -66,6 +66,7 @@ class DownloadResult:
     media_type: str
     size_bytes: int
     redirect_chain: tuple[str, ...] = ()
+    declared_media_type: str | None = None
 
     def __post_init__(self) -> None:
         chain = tuple(self.redirect_chain) or (self.source_url,)
@@ -74,6 +75,8 @@ class DownloadResult:
         if chain[-1] != self.source_url:
             raise ValueError("redirect_chain must end at source_url")
         object.__setattr__(self, "redirect_chain", chain)
+        if self.declared_media_type is None:
+            object.__setattr__(self, "declared_media_type", self.media_type)
 
 
 _MEDIA_TYPE_EXTENSIONS = {
@@ -649,6 +652,24 @@ def _validate_content_length(response: object, max_bytes: int) -> None:
         raise DownloadTooLarge("Response exceeds the download byte limit")
 
 
+def _document_route(prefix: bytes, media_type: str, extension: str) -> tuple[str, str]:
+    """Route binary attachments mislabeled HTML; the selected adapter validates them.
+
+    An OLE signature identifies a compound document, not a proven workbook. It
+    selects the XLS reader, which must still reject nonworkbooks or malformed
+    bytes. Neither a URL filename nor Content-Disposition can select a parser.
+    """
+    if media_type not in {"text/html", "application/xhtml+xml"}:
+        return media_type, extension
+    if prefix.startswith(b"%PDF-"):
+        return "application/pdf", ".pdf"
+    compound = prefix.startswith(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1")
+    biff = prefix[:2] == b"\x09\x08" and prefix[4:8] in {b"\x00\x05\x05\x00", b"\x00\x06\x05\x00"}
+    if compound or biff:
+        return "application/vnd.ms-excel", ".xls"
+    return media_type, extension
+
+
 def _stream_to_workspace(
     response: object,
     workspace: Path,
@@ -660,8 +681,10 @@ def _stream_to_workspace(
     redirect_chain: tuple[str, ...],
 ) -> DownloadResult:
     destination = workspace / f"{secrets.token_hex(16)}{extension}"
+    declared_media_type = media_type
     temporary_path: Path | None = None
     total = 0
+    prefix = b""
     try:
         with tempfile.NamedTemporaryFile(
             mode="wb",
@@ -691,10 +714,14 @@ def _stream_to_workspace(
                 total += len(chunk)
                 if total > max_bytes:
                     raise DownloadTooLarge("Response exceeds the download byte limit")
+                if len(prefix) < 16:
+                    prefix += chunk[:16 - len(prefix)]
                 temporary.write(chunk)
             temporary.flush()
             os.fsync(temporary.fileno())
         _remaining_timeout(deadline)
+        media_type, extension = _document_route(prefix, media_type, extension)
+        destination = destination.with_suffix(extension)
         os.replace(temporary_path, destination)
         temporary_path = None
     except DownloadError:
@@ -707,7 +734,10 @@ def _stream_to_workspace(
                 temporary_path.unlink()
             except FileNotFoundError:
                 pass
-    return DownloadResult(destination, source_url, media_type, total, redirect_chain)
+    return DownloadResult(
+        destination, source_url, media_type, total, redirect_chain,
+        declared_media_type=declared_media_type,
+    )
 
 
 __all__ = [

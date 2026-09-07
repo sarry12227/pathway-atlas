@@ -762,7 +762,7 @@ class PathwayEvidenceBridgeTest(unittest.TestCase):
         self.assertEqual(extraction["required_fields"], list(POLICY_FIELDS))
         self.assertEqual(
             extraction["adapter_outputs"],
-            ["html-table", "xlsx-worksheet", "pdfplumber-text", "host-ocr-rows"],
+            ["html-table", "xlsx-worksheet", "xls-worksheet", "pdf-text-table", "pdfplumber-text", "pypdf-text", "host-ocr-rows"],
         )
 
     def test_factory_projection_is_the_only_path_to_decisive_policy(self):

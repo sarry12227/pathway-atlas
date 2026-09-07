@@ -27,7 +27,10 @@
     "adapter_outputs": [
       "html-table",
       "xlsx-worksheet",
+      "xls-worksheet",
+      "pdf-text-table",
       "pdfplumber-text",
+      "pypdf-text",
       "host-ocr-rows"
     ],
     "required_fields": [

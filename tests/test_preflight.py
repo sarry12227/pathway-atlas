@@ -45,14 +45,15 @@ class PreflightTest(unittest.TestCase):
         self.assertTrue(any("browse" in item for item in report.degradations))
         self.assertFalse(any("search and browse" in item for item in report.degradations))
 
-    def test_browse_only_reports_only_missing_search_network_capability(self):
+    def test_browse_without_search_api_can_verify_known_official_sources(self):
         report = detect_capabilities({"browse"}, module_probe=self.no_modules)
-        self.assertEqual(report.tier, CapabilityTier.OFFLINE)
+        self.assertEqual(report.tier, CapabilityTier.STANDARD)
         self.assertEqual(report.available_capabilities, ("browse",))
         self.assertIn("search", report.missing_capabilities)
         self.assertNotIn("browse", report.missing_capabilities)
         self.assertTrue(any("search" in item for item in report.degradations))
         self.assertFalse(any("search and browse" in item for item in report.degradations))
+        self.assertFalse(any(item.startswith("offline mode:") for item in report.degradations))
 
     def test_no_network_reports_both_missing_network_capabilities(self):
         report = detect_capabilities(set(), module_probe=self.no_modules)

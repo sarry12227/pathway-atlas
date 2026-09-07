@@ -1627,6 +1627,12 @@ def _locate_rank_core(
                 "score_table_reference",
             }:
                 continue
+            # The PDF text-table adapter selects an explicit page/line region.
+            # Its last cumulative count is a regional coverage boundary, not
+            # evidence of the total number of provincial candidates. The same
+            # exact row remains available below for an official score lookup.
+            if value["input_projection"]["extraction_method"] == "pdf-text-table":
+                continue
             fact_status = EvidenceStatus(fact["status"])
             coverage_status = EvidenceStatus(value["coverage_status"])
             if fact_status not in _ACCEPTED or coverage_status not in _ACCEPTED:
@@ -1784,7 +1790,9 @@ def _locate_rank_core(
         )
         if bounded is not None:
             return bounded
-    if authenticated and provincial_cohorts:
+    if authenticated:
+        # Never reconstruct an excluded cohort from the snapshot's individual
+        # score rows: that would reintroduce a partial PDF's last row as a total.
         cohorts = provincial_cohorts
         cohort_years = provincial_cohort_years
     if authenticated and not provincial_cohorts:

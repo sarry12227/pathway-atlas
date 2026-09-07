@@ -69,7 +69,7 @@ _OPTIONAL_DECISION_FIELDS = frozenset(
     }
 )
 _ADMISSION_METHODS = frozenset(
-    {"html-table", "xlsx-worksheet", "host-ocr-rows"}
+    {"html-table", "xlsx-worksheet", "xls-worksheet", "pdf-text-table", "host-ocr-rows"}
 )
 _EVIDENCE_STATUSES = frozenset(
     {

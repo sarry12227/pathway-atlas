@@ -68,7 +68,7 @@ python scripts/preflight.py [--host-capability search] [--host-capability browse
 
 网页阅读器只显示标题、空白或 `[Input]` 时，先检查原页面 HTML 中的 `img src`、`input type="image" src` 和公开附件链接。统计表可能以图片呈现，文本抓取为空不能当作数据未公布。按原页 URL 解析相对链接，经 secure downloader 保存原始图片或附件；有可靠视觉能力时逐行核对并使用 `ocr_rows`，否则记录图片提取能力缺失并继续寻找可读的公开来源或最近可比年份。
 
-按 host workflow guide 的 submission schema 选择 exact adapter：HTML table、XLSX worksheet、host-normalized `ocr_rows` 或 quote/span 绑定的 public text；保存 URL/source provenance、year、`page/sheet/table/row` 或 `page/image/bbox` 字段 locator、coverage 和 ordered warnings。OCR 的 source path 指向原始公开图片或 PDF，`options.ocr_path` 指向宿主生成的 normalized JSON；门面固定使用 0.95 confidence floor，并验证 bbox anchors。Public text 先按 UTF-8-sig 读取并把 CRLF/CR 归一为 LF，再验证 quote/span；span 必须按该归一化文本计算。缺失 prose 字段从 field map 省略并保持 missing。尚未由门面支持的直接 PDF text 或 QR 输入记录受控 unavailable reason；QR 输入只能是 host-decoded text，并只通过 secure downloader 获取目标。
+按 host workflow guide 的 submission schema 选择 exact adapter：HTML table、XLS/XLSX worksheet、PDF text、PDF明确数字表选区、host-normalized `ocr_rows` 或 quote/span 绑定的 public text；保存 URL/source provenance、year、`page/sheet/table/row` 或 `page/image/bbox` 字段 locator、coverage 和 ordered warnings。OCR 的 source path 指向原始公开图片或 PDF，`options.ocr_path` 指向宿主生成的 normalized JSON；门面固定使用 0.95 confidence floor，并验证 bbox anchors。Public text 先按 UTF-8-sig 读取并把 CRLF/CR 归一为 LF，再验证 quote/span；span 必须按该归一化文本计算。缺失 prose 字段从 field map 省略并保持 missing。`pdf_text` 用于路径政策，按页码及唯一精确原文绑定字段；`pdf_table` 只读明确页、表头、行范围与横排列组，保留局部覆盖，不将局部最大累计位次当全省人数。PDF缺pdfplumber时可用已安装pypdf，原始XLS由xlrd读取，真实parser缺失只降级对应分支。尚未由门面支持的 QR 输入记录受控 unavailable reason；QR 输入只能是 host-decoded text，并只通过 secure downloader 获取目标。
 
 普通批投档行的唯一 handoff 是 `scripts.adapters.admission_bridge.bridge_admission_evidence`：组合 exact adapter row、对应 `QueryTask`、验证器返回的 `ValidatedAdmissionRow` 与 extraction coverage，委托公共 `admission_row_hash` 生成整行绑定，并将 `coverage_status` 与 evidence status 分开交给 `EvidenceStore`；本流程不重写这些语义。
 
@@ -125,6 +125,8 @@ Agent 把 submission 交给 `python -m scripts.host_workflow ingest --workspace 
 |---|---|---|---|---|
 | full | 完整档 | 执行当前 capability report 允许的所有步骤 | [同一信源规范](source-policy.md) | 只声明 snapshot 实际验证的年份与 coverage |
 | standard | 标准档 | 只执行 capability report 允许的分支，其余记录 degradation | [同一信源规范](source-policy.md) | 只声明实际验证的 coverage |
-| offline | 离线档 | 只使用用户提供且 authenticated 的 local fixtures/evidence；跳过 live discovery | [同一信源规范](source-policy.md) | 禁止声称当前或实时验证 |
+| offline | 离线档 | 只使用用户提供或本会话先前保存且 authenticated 的 local fixtures/evidence；跳过 live discovery | [同一信源规范](source-policy.md) | 禁止声称当前或实时验证 |
 
 三种分支都只调用同一规范入口；capability loss 只能减少 coverage。
+
+按[研究恢复指南](research-recovery.md)执行有界替代路线。只有 `browse` 也能从已知官方源取证；缺少某个搜索API、浏览器或解析库不能当作全部任务不可执行。`research_summary` 披露完成与缺口，`older_year_resolution` 提供通过门面校验的历史任务收束建议。全无事实仍正常 `finish` 交付准备版，有部分事实则交付部分证据版；不得用经验代替缺失位次、学校档位或资格。

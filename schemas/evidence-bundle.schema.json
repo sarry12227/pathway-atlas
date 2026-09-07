@@ -155,7 +155,10 @@
           "enum": [
             "html-table",
             "xlsx-worksheet",
+            "xls-worksheet",
+            "pdf-text-table",
             "pdfplumber-text",
+            "pypdf-text",
             "host-ocr-rows",
             "host-public-text",
             "qr",

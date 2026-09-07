@@ -1,4 +1,5 @@
 import ipaddress
+import importlib.util
 import socket
 import ssl
 import tempfile
@@ -713,6 +714,79 @@ class DownloaderResponseTest(unittest.TestCase):
                 )
                 self.assertEqual(result.path.suffix, extension)
                 self.assertEqual(result.path.read_bytes(), b"x")
+
+    @patch("scripts.downloader.socket.getaddrinfo")
+    @patch("scripts.downloader._open_pinned_request")
+    def test_binary_document_mislabeled_html_reaches_its_reader_with_original_bytes(
+        self, open_request, getaddrinfo
+    ):
+        from tests.test_document_fallback_adapters import _synthetic_xls
+
+        pdf_path = Path(__file__).parent / "fixtures/replay/pdf/text-and-image.pdf"
+        cases = (
+            (_synthetic_xls(), ".xls", "application/vnd.ms-excel"),
+            (pdf_path.read_bytes(), ".pdf", "application/pdf"),
+        )
+        getaddrinfo.return_value = self.public_dns
+        for payload, suffix, media_type in cases:
+            with self.subTest(suffix=suffix):
+                response = FakeHttpResponse(200, headers={"Content-Type": "text/html; charset=UTF-8"}, body=payload)
+                open_request.return_value = response
+                result = download_public_file("https://public.example.test/download.jsp", self.workspace)
+                self.assertEqual(result.path.suffix, suffix)
+                self.assertEqual(result.path.read_bytes(), payload)
+                self.assertEqual(result.media_type, media_type)
+                self.assertEqual(result.declared_media_type, "text/html")
+                if suffix == ".xls" and importlib.util.find_spec("xlrd"):
+                    from scripts.adapters.xls import extract_xls
+
+                    table = extract_xls(result.path, sheet="Synthetic", mapping={"name": "Name", "score": "Score", "rank": "Rank"})
+                    self.assertEqual(table.rows[0].values["score"], 630)
+                    self.assertEqual(table.rows[0].location, "Synthetic!A2:C2")
+
+    @patch("scripts.downloader.socket.getaddrinfo")
+    @patch("scripts.downloader._open_pinned_request")
+    def test_compound_file_signature_only_routes_and_reader_still_rejects_nonworkbook(
+        self, open_request, getaddrinfo
+    ):
+        from scripts.adapters import StructuredValidationError
+        from scripts.adapters.xls import extract_xls
+
+        payload = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + b"synthetic invalid compound document"
+        open_request.return_value = FakeHttpResponse(200, headers={"Content-Type": "text/html"}, body=payload)
+        getaddrinfo.return_value = self.public_dns
+        result = download_public_file("https://public.example.test/file", self.workspace)
+        self.assertEqual(result.path.suffix, ".xls")
+        self.assertEqual(result.path.read_bytes(), payload)
+        if importlib.util.find_spec("xlrd"):
+            with self.assertRaises(StructuredValidationError):
+                extract_xls(result.path, sheet="Synthetic", mapping={"score": "Score"})
+
+    @patch("scripts.downloader.socket.getaddrinfo")
+    @patch("scripts.downloader._open_pinned_request")
+    def test_filename_cannot_turn_html_into_a_workbook(self, open_request, getaddrinfo):
+        payload = b"<html><p>Temporarily unavailable</p></html>"
+        open_request.return_value = FakeHttpResponse(
+            200, headers={"Content-Type": "text/html", "Content-Disposition": 'attachment; filename="data.xls"'}, body=payload,
+        )
+        getaddrinfo.return_value = self.public_dns
+        result = download_public_file("https://public.example.test/data.xls", self.workspace)
+        self.assertEqual(result.path.suffix, ".html")
+        self.assertEqual(result.media_type, "text/html")
+
+    @patch("scripts.downloader.socket.getaddrinfo")
+    @patch("scripts.downloader._open_pinned_request")
+    def test_document_magic_does_not_bypass_disallowed_mime_or_stream_limit(
+        self, open_request, getaddrinfo
+    ):
+        getaddrinfo.return_value = self.public_dns
+        open_request.return_value = FakeHttpResponse(200, headers={"Content-Type": "application/octet-stream"}, body=b"%PDF-1.7\nsynthetic")
+        with self.assertRaises(DownloadMediaTypeError):
+            download_public_file("https://public.example.test/file", self.workspace)
+        open_request.return_value = FakeHttpResponse(200, headers={"Content-Type": "text/html"}, body=b"%PDF-1.7\nsynthetic")
+        with self.assertRaises(DownloadTooLarge):
+            download_public_file("https://public.example.test/file", self.workspace, max_bytes=8)
+        self.assertEqual(list(self.workspace.iterdir()), [])
 
     @patch("scripts.downloader.socket.getaddrinfo")
     @patch("scripts.downloader._open_pinned_request", create=True)

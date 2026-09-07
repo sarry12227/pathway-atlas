@@ -25,7 +25,7 @@ class PdfParseError(PdfAdapterError):
     """Raised when a PDF snapshot cannot be parsed safely."""
 
 
-_PAGE_METHODS = {"pdfplumber-text", "none"}
+_PAGE_METHODS = {"pdfplumber-text", "pypdf-text", "none"}
 _PAGE_WARNINGS = {"image-only", "empty-page"}
 _DOCUMENT_WARNINGS = {"image-only-pages-present", "empty-pages-present"}
 _DOCUMENT_ID = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -75,7 +75,7 @@ class PdfTextPage:
         if not isinstance(self.image_only, bool):
             raise TypeError("image_only must be boolean")
         warnings = _warnings(self.warnings, allowed=_PAGE_WARNINGS)
-        if text and (self.extraction_method != "pdfplumber-text" or self.image_only):
+        if text and (self.extraction_method not in _PAGE_METHODS - {"none"} or self.image_only):
             raise ValueError("text page extraction state is contradictory")
         if not text and self.extraction_method != "none":
             raise ValueError("empty text requires the none extraction method")
@@ -153,22 +153,47 @@ def _load_pdfplumber() -> Any:
     return pdfplumber
 
 
+def _load_pypdf() -> Any:
+    try:
+        import pypdf
+    except (ImportError, ModuleNotFoundError):
+        raise PdfDependencyError(
+            "PDF extraction requires pdfplumber>=0.11,<1 or pypdf>=4,<7"
+        ) from None
+    version = getattr(pypdf, "__version__", "")
+    match = re.match(r"^(\d+)\.(\d+)", version)
+    if match is None or not 4 <= int(match.group(1)) < 7:
+        raise PdfDependencyError("PDF fallback requires pypdf>=4,<7") from None
+    return pypdf
+
+
 def extract_pdf_text(path: str | Path) -> PdfTextDocument:
     source = read_stable_local_file(path, suffixes=(".pdf",))
-    pdfplumber = _load_pdfplumber()
+    try:
+        parser = _load_pdfplumber()
+        method = "pdfplumber-text"
+    except PdfDependencyError:
+        parser = _load_pypdf()
+        method = "pypdf-text"
     pages: list[PdfTextPage] = []
     try:
-        with pdfplumber.open(BytesIO(source)) as document:
-            if not document.pages:
-                raise PdfParseError("PDF must contain at least one page")
+        if method == "pdfplumber-text":
+            with parser.open(BytesIO(source)) as document:
+                for page_number, page in enumerate(document.pages, start=1):
+                    text = _normalize_text(page.extract_text() or "")
+                    pages.append(_page(page_number, text, method, bool(page.images or page.objects)))
+        else:
+            document = parser.PdfReader(BytesIO(source))
+            if document.is_encrypted:
+                raise PdfParseError("Encrypted PDF requires an authorized readable source")
             for page_number, page in enumerate(document.pages, start=1):
                 text = _normalize_text(page.extract_text() or "")
-                if text:
-                    pages.append(PdfTextPage(page_number, text, "pdfplumber-text"))
-                    continue
-                image_only = bool(page.images or page.objects)
-                warning = "image-only" if image_only else "empty-page"
-                pages.append(PdfTextPage(page_number, "", "none", (warning,), image_only))
+                # Inspect drawing content without decoding images or requiring Pillow/OCR.
+                content = page.get_contents()
+                visual_content = content is not None and bool(content.get_data())
+                pages.append(_page(page_number, text, method, visual_content))
+        if not pages:
+            raise PdfParseError("PDF must contain at least one page")
     except PdfParseError:
         raise
     except Exception:
@@ -184,6 +209,13 @@ def extract_pdf_text(path: str | Path) -> PdfTextDocument:
         pages,
         warnings,
     )
+
+
+def _page(number: int, text: str, method: str, visual_content: bool) -> PdfTextPage:
+    if text:
+        return PdfTextPage(number, text, method)
+    warning = "image-only" if visual_content else "empty-page"
+    return PdfTextPage(number, "", "none", (warning,), visual_content)
 
 
 __all__ = [

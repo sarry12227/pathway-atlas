@@ -104,7 +104,7 @@ _KINDS = frozenset(
         "subject_requirement",
     }
 )
-_METHODS = frozenset({"html-table", "xlsx-worksheet", "host-ocr-rows"})
+_METHODS = frozenset({"html-table", "xlsx-worksheet", "xls-worksheet", "pdf-text-table", "host-ocr-rows"})
 _PUBLIC_TEXT_METHOD = "host-public-text"
 _INSTITUTION_TYPES = frozenset({"public", "private", "cooperative"})
 _PERSISTED_ORIGIN_KIND = "school-fit-bridge-origin-v1"

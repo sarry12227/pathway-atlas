@@ -278,7 +278,7 @@
       "kinds": [
         "absolute_local_path"
       ],
-      "file_sha256": "f445c6b7dbccd79272fc6cfca38e7748a7a5780df3a5b1aed15b039ec8370bbf",
+      "file_sha256": "a76a040e1a19f9a94b5b8d05e1ac5734dacf49f504d20adfbb8cad608a5420d1",
       "reason": "synthetic negative fixture"
     },
     {
@@ -494,7 +494,10 @@
     "scripts/adapters/school_fit_bridge.py",
     "references/host-workflow.md",
     "references/questionnaire.md",
-    "references/conversation-output.md"
+    "references/conversation-output.md",
+    "references/research-recovery.md",
+    "scripts/adapters/xls.py",
+    "scripts/adapters/pdf_table.py"
   ],
   "required_release_prefixes": [
     "tests/fixtures/evidence",

@@ -209,6 +209,7 @@ class SkillContractTest(unittest.TestCase):
     def test_all_references_are_reachable_once(self):
         links = tuple(re.findall(r"\[[^]]+\]\(([^)]+)\)", self.body))
         expected = {
+            "references/research-recovery.md",
             "references/conversation-output.md",
             "references/questionnaire.md",
             "references/source-policy.md",

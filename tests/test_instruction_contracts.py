@@ -186,7 +186,7 @@ class InstructionContractTest(unittest.TestCase):
         )
         intro = text.split("## Intake boundary", 1)[0]
         intro_lines = [line for line in intro.splitlines()[1:] if line.strip()]
-        self.assertEqual(len(intro_lines), 2)
+        self.assertEqual(len(intro_lines), 3)
         self.assertTrue(all(line.startswith("- ") for line in intro_lines))
         intake = section(text, "## Intake boundary")
         for marker in (
@@ -198,7 +198,7 @@ class InstructionContractTest(unittest.TestCase):
         ):
             self.assertIn(marker, intake)
         links = re.findall(r"\[[^\]]+\]\(([^)]+)\)", text)
-        self.assertEqual(links, ["../retrieval-playbook.md", "../source-policy.md"])
+        self.assertEqual(links, ["../retrieval-playbook.md", "../source-policy.md", "../research-recovery.md"])
         for target in links:
             self.assertTrue((path.parent / target).is_file(), target)
             self.assertNotIn(Path(target).name, {"web-search-playbook.md", "gaokao-provinces.md"})
@@ -218,19 +218,19 @@ class InstructionContractTest(unittest.TestCase):
             self.assertNotIn(f"--host-capability {excluded}", text)
 
         fallback_markers = {
-            "search": ("already authenticated material", "offline mode", "discovery unavailable"),
+            "search": ("With browse", "known official URLs", "standard", "limited discovery", "already authenticated material"),
             "browse": ("do not claim page verification", "already authenticated material", "offline mode"),
             "vision": (
-                "machine-readable HTML/XLSX/PDF/text",
+                "machine-readable HTML/XLS/XLSX/PDF/text",
                 "host-decoded QR payload",
                 "missing",
             ),
-            "local_exec": ("stop before deterministic calculation", "disclose the limitation", "move the session"),
+            "local_exec": ("stop before deterministic calculation", "disclose the limitation", "preparation advice"),
             "file_output": ("path-neutral structured handoff", "do not claim", "written"),
             "offline": (
                 "no-live-network",
                 "no search/browse",
-                "already attached authenticated inputs",
+                "authenticated local inputs from the user or earlier retrieval in this session",
                 "current/live facts unavailable",
             ),
         }
@@ -625,7 +625,9 @@ class InstructionContractTest(unittest.TestCase):
                 ("retrieval-playbook.md", "source-policy.md"),
                 ("retrieval-playbook.md", "host-workflow.md"),
             ]
-            + [("retrieval-playbook.md", "source-policy.md")] * 3,
+            + [("retrieval-playbook.md", "source-policy.md")] * 3
+            + [("retrieval-playbook.md", "research-recovery.md"),
+               ("host-workflow.md", "research-recovery.md")],
         )
 
     def test_public_command_probes_named_by_playbook_execute(self):

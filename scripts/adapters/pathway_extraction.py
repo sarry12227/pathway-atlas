@@ -133,7 +133,8 @@ _PATHWAY_IDS = (
     "cross_border",
     "arts_sports",
 )
-_TABLE_METHODS = frozenset({"html-table", "xlsx-worksheet", "host-ocr-rows"})
+_TABLE_METHODS = frozenset({"html-table", "xlsx-worksheet", "xls-worksheet", "pdf-text-table", "host-ocr-rows"})
+_PDF_METHODS = frozenset({"pdfplumber-text", "pypdf-text"})
 
 
 class PathwayExtractionError(ValueError):
@@ -394,10 +395,22 @@ def _table_document(table: ExtractedTable, field_map: Any) -> dict[str, Any]:
 
 
 def _pdf_document(document: PdfTextDocument, field_map: Any) -> dict[str, Any]:
-    if not isinstance(field_map, Mapping) or set(field_map) != set(_FIELDS):
-        raise PathwayExtractionError("pathway PDF field map is incomplete")
+    if not isinstance(field_map, Mapping) or not set(field_map) <= set(_FIELDS):
+        raise PathwayExtractionError("pathway PDF field map contains unknown fields")
+    methods = {page.extraction_method for page in document.pages if page.text}
+    if len(methods) != 1 or not methods <= _PDF_METHODS:
+        raise PathwayExtractionError("PDF requires readable text from one supported parser")
+    method = next(iter(methods))
     fields: dict[str, Any] = {}
     for canonical in _FIELDS:
+        if canonical not in field_map:
+            fields[canonical] = {
+                "value": None,
+                "cell_status": CellStatus.EMPTY.value,
+                "locator": f"document/field[{canonical}]/missing",
+                "warning": f"{canonical}:missing",
+            }
+            continue
         selection = field_map[canonical]
         if (
             not isinstance(selection, Sequence)
@@ -433,7 +446,7 @@ def _pdf_document(document: PdfTextDocument, field_map: Any) -> dict[str, Any]:
     )
     body = {
         "adapter_kind": "pdf",
-        "extraction_method": "pdfplumber-text",
+        "extraction_method": method,
         "document_id": document.document_id,
         "page_count": document.page_count,
         "coverage_status": "complete" if not warnings else "partial",
@@ -737,10 +750,10 @@ def _project_from_input(value: Any) -> PathwayPolicyProjection:
         if not isinstance(fields, Mapping) or set(fields) != set(_FIELDS):
             raise PathwayExtractionError("pathway document field coverage is incomplete")
         method = document.get("extraction_method")
-        if method not in _TABLE_METHODS | {"pdfplumber-text", "host-public-text"}:
+        if method not in _TABLE_METHODS | _PDF_METHODS | {"host-public-text"}:
             raise PathwayExtractionError("pathway extraction method is unsupported")
         if (
-            (method == "pdfplumber-text") != (adapter_kind == "pdf")
+            (method in _PDF_METHODS) != (adapter_kind == "pdf")
             or adapter_kind not in {"pdf", "table", "ocr", "public-text"}
             or (adapter_kind == "ocr") != (method == "host-ocr-rows")
             or (adapter_kind == "public-text") != (method == "host-public-text")
@@ -826,7 +839,7 @@ def _project_from_input(value: Any) -> PathwayPolicyProjection:
         elif CellStatus.MASKED in cell_statuses:
             field_status = EvidenceStatus.MASKED
             field_evidence_method = "pathway-field-masked-v1"
-        elif any(item is not CellStatus.EXACT for item in cell_statuses):
+        elif any(item not in {CellStatus.EXACT, CellStatus.EMPTY} for item in cell_statuses):
             field_status = EvidenceStatus.PARTIAL
             field_evidence_method = "pathway-field-partial-v1"
         else:

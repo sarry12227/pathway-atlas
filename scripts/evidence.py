@@ -72,7 +72,10 @@ FACT_PROVENANCE_KIND = "fact-provenance"
 FACT_EXTRACTION_METHODS = (
     "html-table",
     "xlsx-worksheet",
+    "xls-worksheet",
+    "pdf-text-table",
     "pdfplumber-text",
+    "pypdf-text",
     "host-ocr-rows",
     "host-public-text",
     "qr",

@@ -25,7 +25,7 @@ description: Use when 学生或家长询问“这个分数能上哪个学校”�
 
 画像确认前不得运行 preflight、查询计划或检索，也不得计算、推荐或判断。逐题收集全部结束后，总结已知值、明确未知值和硬约束，请用户明确确认。确认后的匿名画像是后续推理、检索、计算和输出的唯一完整上下文；用户修改画像时建立新版本并使受影响的下游状态失效。
 
-没有官方位次时，使用所在学校、班型、考试范围、分数、校排或联考排位、参考人数、最高与常态表现及公开历史锚点，生成乐观、中性、保守位次区间，再生成估算位次参考版冲稳保院校池。只有完全没有可校准依据时才不生成数字，但仍完成多元路径判断，并列出最少需补充的校准资料。
+没有官方位次时，使用所在学校、班型、考试范围、分数、校排或联考排位、参考人数、最高与常态表现及公开历史锚点，在校准依据成立时生成乐观、中性、保守位次区间，再生成估算位次参考版冲稳保院校池。只有完全没有可校准依据时才不生成数字，但仍完成可支持的路径判断或观察，并列出最少需补充的校准资料。校内月考、期中或校模考的 `scope` 为 `school`；`province_official` 只用于明确的正式省级高考成绩。不能因满分同为750或材料来自学校，就把月考分数直接换算省排和院校档位。
 
 完成标准：20 题都有明确答案或明确未知状态，且用户已确认匿名画像。
 
@@ -37,11 +37,13 @@ description: Use when 学生或家长询问“这个分数能上哪个学校”�
 
 完成标准：会话处于 `query_plan_ready`，返回 session ID 与 typed next tasks，保存全部 degradation，不向用户暴露绝对路径或原始异常。
 
+预检后按[研究恢复与准备版交付](references/research-recovery.md)实测已有取证能力。`browse` 包括可读原文的宿主工具与安全HTTP读取，不等于Chrome；只有 `browse` 也可从受信官方入口开展 `standard` 研究。没有某个搜索API或PDF库时先换已有工具，不把用户修环境当作继续条件。
+
 ## 研究循环
 
 用 `next` 返回的 typed `QueryTask` 按[检索流程](references/retrieval-playbook.md)逐项搜索、打开并保存公开材料。宿主写入 `references/host-workflow.md` 定义的 submission 后，运行 `python -m scripts.host_workflow ingest --workspace … --session … --task … --submission …`，即调用 `ingest`；无法完成则运行同一门面的 `unavailable` 并给出真实 reason。每次之后反复调用 `next` 循环，直到没有 pending task。门面拥有 journal、evidence bundle、completed outcomes 和恢复上下文；Agent 只准备公开材料及其提取配置，不手工拼接 receipt、digest 或 journal JSON。
 
-每个任务保持 `ProvinceConfig.mode`、规范化 `subject_group`、`required_extraction_fields`、`availability`、`freshness` 和有界 `max_candidates`，不得另设固定 Top-N。搜索仅发现候选；必须打开原网页或附件，不能把搜索摘要当事实。按任务指定的 HTML、XLSX、PDF、OCR 或 QR adapter 提取，下载只走 secure downloader，并保存 year、method、locator、source provenance、coverage 与 warnings。
+每个任务保持 `ProvinceConfig.mode`、规范化 `subject_group`、`required_extraction_fields`、`availability`、`freshness` 和有界 `max_candidates`，不得另设固定 Top-N。搜索仅发现候选；必须打开原网页或附件，不能把搜索摘要当事实。按实际格式选择 HTML、XLS/XLSX、PDF、OCR 或 QR adapter 提取，下载只走 secure downloader，并保存 year、method、locator、source provenance、coverage 与 warnings。
 
 所有年度数据按 `Y → Y-1 → Y-2 → Y-3` 查询。最新年度没有、缺失或未公布时依次逐年回查，最多向前查三年；每种数据类型独立选择最近可比年份，不能因一项缺失停止整份规划。至少覆盖一分一段表、投档位次、招生计划、招生章程、学费、选科要求、多元路径政策、服务期与违约条款。当前年度只有第三方资料而上一年度有官方资料时同时保留：前者标当年参考，后者标历史基线；制度或口径变化导致不可比时停止数值聚合并说明原因。
 
@@ -49,7 +51,9 @@ description: Use when 学生或家长询问“这个分数能上哪个学校”�
 
 门面的 `ingest` 在同一宿主进程内执行 bridge→receipt→ingest：它用 exact adapter 产生的 typed bridge 调用 `scripts.planning_session.build_task_evidence_outcome(profile, query_plan, task, bridges)`，再以 `session.ingest_task(..., evidence_outcome=task_evidence_outcome)` 和内部 checkpoint 完成该任务。这里的 `evidence_outcome=`、factory-only receipt、完整 origin replay 和裸 digest 无授权能力是实现不变量；Agent 不调用这些底层步骤。
 
-offline 仅消费已认证的用户提供本地材料，不声称当前或实时验证；没有静默联网回退。每个 task 最终必须 `ingest` 为 completed，或用受控 unavailable reason 结束。
+offline 仅消费用户提供或本会话先前保存且已认证的本地材料，不声称当前或实时验证；没有静默联网回退。每个 task 最终必须 `ingest` 为 completed，或用受控 unavailable reason 结束。
+
+查询矩阵不是“所有年份全部抓取成功”的承诺。先核验各族最新年份；读取 `research_summary` 与 `older_year_resolution`，对已获合格较新证据的同族历史任务，按门面提示显式记录 `newer_comparable_year_accepted`。浏览器分支失败不影响其他读取方式，某格式失败不影响其他任务；同一确定故障在本轮只做初次尝试和至多一次重试，不能为每个任务重复启动失效工具。
 
 完成标准：`next` 不再返回查询任务，每个 task 恰有一个可重放 outcome。
 
@@ -63,6 +67,8 @@ offline 仅消费已认证的用户提供本地材料，不声称当前或实时
 
 完成标准：fresh evidence bundle 与研究快照已认证；依赖缺失事实的输出具有明确 unavailable reason。
 
+所有任务均真实标为 unavailable、没有公开事实时，也正常执行 `finish`；空证据包的认证仅证明记录和缺口一致，不意味着学生已有认证的位次或资格结论。不得绕过门面凭经验补数。
+
 ## 计算发布
 
 `finish` 在内部执行 `compute` gate：只把经过 `finalize_evidence` 绑定的 outcome 交给 `scripts.planning_session.build_calculation_outcome(...)`，再调用 `session.with_calculation(...)` 保存 checkpoint，并用 `scripts.planning_session.build_report_publication_outcome(...)` 及 `session.publish_report(...)` 原子发布。计算只消费 validated snapshots、dataset/config、规范化行、完整画像、canonical QueryPlan 与版本化 decision policy；不联网，不使用内嵌默认值、固定位次偏移或 legacy adapter。调用方提供的 calculation/report 裸 digest 不具有效力。
@@ -70,6 +76,8 @@ offline 仅消费已认证的用户提供本地材料，不声称当前或实时
 **最终交付以对话正文为主。** `finish` 成功表示内部报告已生成；Agent 还必须把完整结论直接写在当前对话中，用户不用打开附件就能读懂规划。只回复“报告已生成”、文件路径、下载链接或几句摘要，都不算交付完成。
 
 默认 `finish --format markdown`，读取 JSON 中的完整 `report_text` 和 `sources`，按[对话结论写法](references/conversation-output.md)写出面向学生和家长的详细解读。`report` 路径只用于附带下载与工具输出截断时由 Agent 读取正文；不得把阅读文件的任务交给用户。需要且能力存在时用 `finish --format docx`，仍须用其 `report_text` 完成对话交付。DOCX 能力缺失时保留 Markdown，按退出码 `3` 降级，不安装依赖或伪造文件。
+
+同时读取 `delivery` 和 `research_summary`。`profile_only` 交付“基于已确认画像的准备版”，`partial` 交付已成立的结论与具体缺口，`evidence_supported` 仍逐项解释证据边界。无材料时不给省排、冲稳保或资格判断，但必须根据已确认画像提出明确标为“准备建议”的行动与复盘节点；这类建议不是新增政策事实或引擎推荐。用户不需要在“修环境”与“凭经验继续”之间二选一。
 
 最终答复直接给出完整的结论、理由和行动，按以下顺序展开：
 
@@ -84,7 +92,7 @@ offline 仅消费已认证的用户提供本地材料，不声称当前或实时
 
 报告首尾写明：“本结果由 AI 基于公开数据整理，仅供升学规划参考，不构成录取承诺或正式升学建议。政策、招生计划和录取结果请以当年主管部门及招生高校最终公布内容为准。”输出保持匿名、确定性、path-neutral，并以 exclusive/原子发布避免覆盖；用户明确授权前，不发布、上传或 push 任何产物。
 
-完成标准：对话正文已经完整交付总体结论、典型学校及专业判断、每条路径决定、优先行动、分阶段计划、风险和逐项证据轨迹；用户无需打开附件即可理解所有结论，且只引用本会话 snapshot。文件写入成功不能替代这一步。
+完成标准：对话正文已经完整交付总体结论、典型学校及专业判断、每条路径决定、优先行动、分阶段计划、风险和逐项证据轨迹；证据不足的项目以对应的不能判断/待核验说明及画像准备建议完成，不补造学校或资格结论。用户无需打开附件即可理解所有结论，且只引用本会话 snapshot。文件写入成功不能替代这一步。
 
 ## 恢复与降级
 
@@ -94,6 +102,8 @@ offline 仅消费已认证的用户提供本地材料，不声称当前或实时
 
 宿主在发布完成前保留同一私有 journal 与 validated evidence bundle；journal 加载失败时停止依赖该 receipt 的推进并给出受控 degradation，不从头重跑已认证步骤，不重新向用户索取信息，不得让用户提供内部 JSON、本地路径或文件路径。
 
-联网不可用时仍基于已认证材料给出 partial 版本：位次区间使用最近可比的公开历史锚点或明确的学校/联考锚点；典型学校和路径给出方向性但明确标记年份、参考状态和缺口。普通批数据可用而路径政策不足时先给普通批；反之亦然。任何失败都转为受控 degradation 或 unavailable reason，不把内部路径、堆栈和学生身份写入回复。
+联网不可用时仍基于已认证材料给出 partial 版本：位次区间只使用可比且足以校准的公开历史锚点或学校/联考锚点；典型学校和路径只解释证据支持的结果，标记年份、参考状态和缺口。普通批数据可用而路径政策不足时先给普通批；反之亦然。零证据时保留所有画像和待核验路径，合并重复缺口，在正文交付具体准备建议及复盘节点。任何失败都转为受控 degradation 或 unavailable reason，不把内部路径、堆栈和学生身份写入回复。
+
+不得把“估算”“经验判断”或“待核验”当作无依据结论的通行证：没有竞赛不等于不具备强基/综评报名资格，日语或英语薄弱不等于所有港澳/中外合作项目不可行。分别核验项目类别、选科、语种、校测与授课要求；历史政策不能承诺未来申请年的要求或日期。
 
 完成标准：会话可从最后一个有效快照继续；所有未完成内容、缺口与降级对用户可见。
