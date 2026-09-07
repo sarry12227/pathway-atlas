@@ -8,17 +8,22 @@
 
 | Platform | Official URL | Method | Version/Commit | Status | Listing URL | Last verified | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| GitHub | https://github.com/sarry12227/pathway-atlas | Public repository and release | main 0.1.6 / fc7cec4 | indexed | https://github.com/sarry12227/pathway-atlas | 2026-09-07 | 首页已引用新 Logo；匿名回读 PNG 与确认原图 SHA-256 一致，README 与源文件一致。历史 v0.1.0 Release 保留原内容。 |
-| Gitee | https://gitee.com/sarry1/pathway-atlas | Public mirror and tag | main 0.1.6 / fc7cec4 | indexed | https://gitee.com/sarry1/pathway-atlas | 2026-09-07 | main 与 GitHub 同步；首页内嵌 README 已含新版图地址，公开 PNG 与 README 均逐字节回读一致。历史标签保留。 |
+| GitHub | https://github.com/sarry12227/pathway-atlas | Public repository and release | 0.1.7 / runtime 76be5b2 | indexed | https://github.com/sarry12227/pathway-atlas | 2026-09-07 | 多专业摘要修复已推送；匿名回读运行模块与版本文件逐字节一致。首页新Logo沿用已核验资源，历史v0.1.0 Release保留原内容。 |
+| Gitee | https://gitee.com/sarry1/pathway-atlas | Public mirror and tag | 0.1.7 / runtime 76be5b2 | indexed | https://gitee.com/sarry1/pathway-atlas | 2026-09-07 | 修复与GitHub同一提交，匿名回读运行模块与版本文件逐字节一致；首页继续引用新版Logo，历史标签保留。 |
 | SkillsMP | https://skillsmp.com | Public GitHub discovery | cached source | indexed | https://skillsmp.com/creators/sarry12227/pathway-atlas/skill | 2026-09-07 | 已核验公开名称、主源与安装方式；当前图片是作者头像，正文缓存尚未出现新版项目 Logo。官方自动采集，不提供手动上传。 |
 | skills.sh | https://skills.sh | npx skills add discovery | cached source | indexed | https://www.skills.sh/sarry12227/pathway-atlas/pathway-atlas | 2026-09-07 | 公开详情存在；当前未展示项目图，配置无独立 Logo 字段。主源 SKILL 已加新版图，页面缓存尚未刷新。 |
 | skills.homes | https://skills.homes | Official listing inquiry | v0.1.0 | pending | — | 2026-09-06 | 官方 contact 页面仅提供邮件收录咨询；申请草稿已准备，尚未发送。 |
 | skillhub.club | https://www.skillhub.club | Official ClawHub synchronization | v0.1.0 | pending | — | 2026-09-06 | 官方说明同步 ClawHub。直接发布 CLI 的 100 KiB 单文件限制会跳过两个必要模块，因此等待完整上游收录。 |
-| SkillHub.cn | https://skillhub.cn | Owner website version update | public latest 1.0.4 | submitted | https://skillhub.cn/skills/user_d9d3e443/pathway-atlas | 2026-09-07 | 公开 API 当前图标仍为平台预设；已准备1.0.7兼容包和新图，需在已有条目的“图标→自定义”中上传后提交。尚未声称新图已公开。 |
+| SkillHub.cn | https://skillhub.cn | Owner website version update | detail 1.0.4 / latest tag 1.0.5 / prepared 1.0.8 | submitted | https://skillhub.cn/skills/user_d9d3e443/pathway-atlas | 2026-09-07 | 18:21回读API的详情版本与latest标签不同，图标仍为平台预设。已准备含摘要修复的1.0.8兼容包和新图，需在已有条目更新文件，并在“图标→自定义”中上传后提交；此次修复包和新图尚未确认公开。 |
 | SkillsCat | https://skills.cat | Official repository submission | cached source | indexed | https://skills.cat/skills/sarry12227/pathway-atlas | 2026-09-07 | 本次官方 submit 返回条目已存在；公开详情仍为旧正文缓存、作者头像，尚未出现新版项目 Logo。 |
-| ClawHub | https://clawhub.ai | Official registry publish | public latest 0.1.6 | indexed | https://clawhub.ai/sarry12227/pathway-atlas | 2026-09-07 | 已核验0.1.6的189文件目录，远端PNG、WebP与图标配置大小和SHA均匹配，安全扫描与审核为clean。托管新图标也一致，但目录icon字段仍为空，不能视为目录图标绑定完成。已获版权所有者对 ClawHub 的额外 MIT-0 授权。 |
+| ClawHub | https://clawhub.ai | Official registry publish | public latest 0.1.6 / target 0.1.7 | submitted | https://clawhub.ai/sarry12227/pathway-atlas | 2026-09-07 | 0.1.7的190文件已上传，最终提交仅发一次后超时，未收到回执；18:21回读仍为0.1.6，0.1.7版本与扫描接口404，提交结果未确认，未重复发布。0.1.6图资源与配置SHA已核验，但目录icon仍为空。额外MIT-0授权沿用版权所有者确认。 |
 
 ## 安装包与平台差异
+
+摘要修复包固定到 `76be5b279e848d5d8da3b7259461a1263c8c16c8`：
+
+- `pathway-atlas-clawhub-0.1.7.zip`：190文件，SHA-256为`61dde8ba506c5531da9581986683004fbc280cb2143957ad9102697da4d970d4`，全部保留文件逐字节等于源提交。
+- `pathway-atlas-skillhub-1.0.8-runtime.zip`：91文件，SHA-256为`a20d94551c446b4eea5a85356119d897defd00996cb4963c3d233e1fe5c145c6`。只沿用下述腾讯包装适配；69个运行、配置、参考及Skill入口文件与修复源逐字节相同。
 
 品牌首次更新源为 `fc7cec4b52ee21764fc0f221805ee57a354067a1`。完整 PNG 的 SHA-256 为 `ec14043003e517138e19b97f2d46c186af7cf6afd01bc1079358557e0429b2c7`；ClawHub 目录图标采用102562字节的 WebP 压缩副本，由 `agents/openai.yaml` 指定。以下品牌包固定到该提交；0.1.7修复包沿用同样的筛选和运行文件逐字节核验规则。
 
