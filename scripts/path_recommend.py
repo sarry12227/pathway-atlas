@@ -387,6 +387,12 @@ def _output_string_tuple(
     return normalized
 
 
+def _canonical_professional_options(value: Any) -> tuple[str, ...]:
+    """Use the same major ordering for displayed values and their evidence."""
+
+    return tuple(sorted(_output_string_tuple(value, "professional_options")))
+
+
 def _source_id_tuple(value: Any, name: str) -> tuple[str, ...]:
     normalized = _string_tuple(
         value,
@@ -874,7 +880,7 @@ class PathwayPolicy(_Serializable):
         object.__setattr__(
             self,
             "professional_options",
-            tuple(sorted(_output_string_tuple(self.professional_options, "professional_options"))),
+            _canonical_professional_options(self.professional_options),
         )
         for name in (
             "training_arrangements",
@@ -1186,7 +1192,7 @@ class PathwayItem(_Serializable):
         object.__setattr__(
             self,
             "professional_options",
-            tuple(sorted(_output_string_tuple(self.professional_options, "professional_options"))),
+            _canonical_professional_options(self.professional_options),
         )
         for name in (
             "training_arrangements",
@@ -1417,7 +1423,11 @@ def _observation_pathway_item(observation: Any) -> PathwayItem:
         "eligibility": "pending_verification",
         "evidence_status": observation.evidence_status,
         "source_ids": observation.source_ids,
-        "professional_options": observation.professional_options,
+        # Bind the displayed ordering while the observation and its raw
+        # provenance remain unchanged for authenticated journal replay.
+        "professional_options": _canonical_professional_options(
+            observation.professional_options
+        ),
         "training_arrangements": None,
         "transition_rules": None,
         "outcomes": None,

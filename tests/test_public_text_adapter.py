@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from dataclasses import replace
 import unittest
 
 from scripts.adapters import CellStatus
@@ -133,6 +134,70 @@ class PublicTextAdapterTest(unittest.TestCase):
 
 
 class PublicTextPathwayTest(unittest.TestCase):
+    def test_partial_multi_major_prose_binds_the_display_without_changing_raw_evidence(self):
+        # Synthetic public prose reproduces an unsorted multi-major notice.
+        majors = ("信息与计算科学", "生物科学", "化学", "历史学", "哲学")
+        student = profile()
+        query_plan = plan(student)
+        source = candidate()
+        for raw_majors in (majors, majors[::-1], tuple(sorted(majors))):
+            with self.subTest(raw_majors=raw_majors):
+                quote = "招生专业包括" + "、".join(raw_majors)
+                document = bind_public_text(
+                    source_id=source.source_id,
+                    url=source.url,
+                    text="合成测试高校2026年招生简章。" + quote,
+                    fields={
+                        "institution": PublicTextField(
+                            value="合成测试高校", quote="合成测试高校"
+                        ),
+                        "year": PublicTextField(value=2026, quote="2026年"),
+                        "professional_options": PublicTextField(
+                            value=list(raw_majors), quote=quote
+                        ),
+                    },
+                )
+                projection = extract_pathway_policy(
+                    profile=student, plan=query_plan, task=task_for(query_plan),
+                    extraction=document,
+                    field_map={name: name for name in document.fields},
+                    candidates=(source,),
+                )
+                observations = bridge_pathway_observations(
+                    (bridge_pathway_policy_evidence(projection),),
+                    profile=student, plan=query_plan,
+                )
+                observation = next(item for item in observations if item.title == "强基计划")
+                raw_projection = deepcopy(projection.to_dict())
+                raw_observation = deepcopy(observation.to_dict())
+                self.assertEqual(observation.professional_options, raw_majors)
+
+                result = evaluate_pathways(
+                    student, (), rank_scenario=exact_rank(),
+                    query_plan=query_plan, observations=observations,
+                )
+
+                item = next(item for item in result.items if item.title == "强基计划")
+                self.assertEqual(item.professional_options, tuple(sorted(majors)))
+                self.assertEqual(item.status, "pending_verification")
+                self.assertEqual(item.investment_decision, "观察")
+                self.assertIsNone(item.target_rank)
+                trail = next(record for record in item.field_evidence
+                             if record.field == "professional_options")
+                self.assertIs(trail.status, EvidenceStatus.OFFICIAL)
+                self.assertEqual(trail.coverage, "complete")
+                retained = next(record for record in observation.field_provenance
+                                if record.field == "professional_options")
+                self.assertEqual(trail.source_ids, retained.source_ids)
+                self.assertEqual(trail.locators, retained.locators)
+                self.assertEqual(_project_pathway(item).professional_options,
+                                 tuple(sorted(majors)))
+                self.assertEqual(projection.to_dict(), raw_projection)
+                self.assertEqual(observation.to_dict(), raw_observation)
+                validate_pathway_evidence_observation(observation, student, query_plan)
+                with self.assertRaisesRegex(ValueError, "professional_options field evidence value digest disagrees"):
+                    replace(item, professional_options=("伪造专业",))
+
     def project(self, document):
         student = profile()
         query_plan = plan(student)

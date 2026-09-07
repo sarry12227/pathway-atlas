@@ -96,7 +96,7 @@
 
 **在哪里查看最新版？**
 
-[GitHub 主源](https://github.com/sarry12227/pathway-atlas)与[Gitee 镜像](https://gitee.com/sarry1/pathway-atlas)同步维护。当前为 **v0.1.6 公开预览**；第三方目录可能有缓存，已收录不等于已更新，逐项状态见[分发记录](DISTRIBUTION.md)。
+[GitHub 主源](https://github.com/sarry12227/pathway-atlas)与[Gitee 镜像](https://gitee.com/sarry1/pathway-atlas)同步维护。当前为 **v0.1.7 公开预览**；第三方目录可能有缓存，已收录不等于已更新，逐项状态见[分发记录](DISTRIBUTION.md)。
 
 ## 技术与部署
 
