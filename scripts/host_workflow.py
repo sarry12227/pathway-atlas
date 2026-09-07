@@ -1,4 +1,4 @@
-"""Host-owned planning workflow: real receipts in, recoverable report files out.
+"""Host-owned planning workflow: real receipts in, report text and files out.
 
 All arguments and files are prepared by the Agent, never by the family. Network
 discovery stays with the host; this module owns the previously manual plumbing.
@@ -300,6 +300,15 @@ class PlanningWorkflow:
             temp_path.unlink(missing_ok=True)
         return destination
 
+    def report_text(self) -> str:
+        """Return complete chat source text from the authenticated calculation.
+
+        Replaying the publication keeps text available for DOCX exports and
+        resumed sessions without trusting a mutable report attachment.
+        """
+        _session, publication = self.context.publish(format="markdown")
+        return publication.rendered_bytes.decode("utf-8")
+
     def status(self, *, limit=3):
         if type(limit) is not int or not 1 <= limit <= 100:
             raise ValueError("task display limit must be between 1 and 100")
@@ -362,7 +371,8 @@ def main(argv=None):
         if args.command == "finish":
             result = workflow.finish(format=args.format)
             print(json.dumps({"session_id": workflow.session.session_id, "report": str(result),
-                              "format": args.format, "sources": workflow.public_sources()}, ensure_ascii=False))
+                              "format": args.format, "report_text": workflow.report_text(),
+                              "sources": workflow.public_sources()}, ensure_ascii=False))
         else:
             print(json.dumps(workflow.status(limit=args.limit), ensure_ascii=False))
         return 0

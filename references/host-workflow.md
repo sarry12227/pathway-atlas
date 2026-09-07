@@ -69,11 +69,24 @@ optional format or adapter capability is unavailable; retain the Markdown path o
 record the affected task unavailable. Re-run any command with the same workspace
 and session after process loss; the facade replays its journal and typed receipts.
 
+`finish` returns `report_text`: the complete UTF-8 Markdown report body rebuilt
+from the authenticated calculation checkpoint, for both Markdown and DOCX exports.
+This is the host's source material for its detailed, reader-friendly final answer
+in the conversation. A `report` path is an optional attachment location; a file
+link or a short summary alone does not complete delivery. If a tool truncates the
+JSON output, the Agent reads the full returned report itself before explaining it.
+
+Follow SKILL.md and references/conversation-output.md: explain all conclusions,
+school and major choices, pathway decisions, priority actions, staged plans,
+risks and evidence gaps directly in chat. Translate internal labels into readable
+Chinese while preserving every decision, number and uncertainty. File export
+success is separate from completion of that user-facing explanation.
+
 `finish` also returns `sources`: the original public URL, publisher, tier,
 publication date and retrieval date for each authenticated `source_id`. Use
-those links in the family's final explanation alongside the matching reported
-claims. The report's source IDs are identifiers, not sufficient citations by
-themselves; do not ask the family to open the internal evidence bundle.
+those links next to the corresponding numbers, policies and recommendations in
+the conversation. Source IDs alone are not sufficient citations. Never ask the
+family to open internal evidence files to understand the conclusion.
 
 ## Complete normalized twenty-answer file
 

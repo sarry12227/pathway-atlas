@@ -493,7 +493,8 @@
     "scripts/adapters/public_text.py",
     "scripts/adapters/school_fit_bridge.py",
     "references/host-workflow.md",
-    "references/questionnaire.md"
+    "references/questionnaire.md",
+    "references/conversation-output.md"
   ],
   "required_release_prefixes": [
     "tests/fixtures/evidence",

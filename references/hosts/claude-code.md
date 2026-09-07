@@ -25,6 +25,13 @@ Capability loss changes coverage only; it never relaxes the linked policy. The l
 
 When an active QueryPlan pathway has missing, masked, partial, or conflicting policy evidence, pass the typed pathway observation through calculation instead of dropping that pathway. Preserve only real source IDs; a source-free missing observation stays source-free and must not acquire a policy year, target rank, deadline, or qualification conclusion.
 
+After `finish`, use its complete `report_text` and `sources` to deliver the detailed
+reader-facing conclusions directly in the conversation, following SKILL.md and
+references/conversation-output.md. Explain every school/pathway decision, its
+reason, constraints, next actions and uncertainty. Keep the report file as an
+optional attachment at the end; a file path, download link or short summary is
+not a completed user-facing delivery.
+
 ## Safety boundary
 
 A text-only session follows the standard or offline fallback instead of inventing vision. Browser and search tools discover or read public content. Retrieved attachments cross `scripts.downloader`; QR adapters receive decoded text rather than images. Never silently use a third-party OCR service. External OCR or QR processing requires explicit user authorization and evidence disclosure; the default is local/host-native processing or a missing fact.

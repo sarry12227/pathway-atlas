@@ -90,7 +90,8 @@ class ProjectMetadataTest(unittest.TestCase):
         data = tomllib.loads((ROOT / "pyproject.toml").read_text("utf-8"))
 
         self.assertEqual(data["project"]["name"], "pathway-atlas")
-        self.assertEqual(data["project"]["version"], "0.1.0")
+        self.assertRegex(data["project"]["version"], r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
+        self.assertIn(f'## v{data["project"]["version"]} —', (ROOT / "CHANGELOG.md").read_text("utf-8"))
         self.assertEqual(data["project"]["requires-python"], ">=3.10")
         self.assertEqual(data["project"].get("dependencies", []), [])
 

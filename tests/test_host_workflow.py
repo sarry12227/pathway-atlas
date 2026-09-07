@@ -134,6 +134,9 @@ class HostWorkflowTest(unittest.TestCase):
             artifact = root / "reports" / (session_id + ".md")
             self.assertTrue(artifact.is_file(), run.stdout)
             content = artifact.read_text(encoding="utf-8")
+            # The host receives the complete evidence-backed text to explain in chat.
+            self.assertEqual(published["report_text"], content)
+            self.assertNotIn(str(root), published["report_text"])
             self.assertIn("当前最需要做", content)
             self.assertIn("多元", content)
             original = artifact.read_bytes()
@@ -141,11 +144,40 @@ class HostWorkflowTest(unittest.TestCase):
             result = host_workflow.PlanningWorkflow.resume(root, session_id).finish()
             self.assertEqual(result.read_bytes(), original)
 
+            # Text delivery is rebuilt from the authenticated session, not a mutable file.
+            artifact.write_text("changed attachment", encoding="utf-8")
+            replayed = host_workflow.PlanningWorkflow.resume(root, session_id)
+            self.assertEqual(replayed.report_text(), content)
+
+    def test_docx_finish_keeps_the_complete_text_available_for_chat(self):
+        import importlib.util
+        if importlib.util.find_spec("docx") is None:
+            self.skipTest("optional DOCX capability unavailable")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            workflow = host_workflow.PlanningWorkflow.start(root, _profile(), _report(), confirmed=True)
+            task = next(t for t in workflow.pending() if t.kind == "batch_admission")
+            workflow.complete(task.task_id, (_admission_bridge(workflow.profile, workflow.plan, task),))
+            workflow.unavailable([t.task_id for t in workflow.pending()], reason="source_threshold_not_met")
+            expected = workflow.finish().read_text(encoding="utf-8")
+            run = subprocess.run(
+                [sys.executable, "-m", "scripts.host_workflow", "finish", "--workspace", str(root),
+                 "--session", workflow.session.session_id, "--format", "docx"],
+                capture_output=True, text=True, encoding="utf-8",
+            )
+            self.assertEqual(run.returncode, 0, run.stderr)
+            published = json.loads(run.stdout)
+            self.assertEqual(published["report_text"], expected)
+            self.assertEqual(published["format"], "docx")
+            self.assertTrue(Path(published["report"]).is_file())
+
     def test_unfinished_research_cannot_publish(self):
         with tempfile.TemporaryDirectory() as tmp:
             workflow = host_workflow.PlanningWorkflow.start(Path(tmp), _profile(), _report(), confirmed=True)
             with self.assertRaisesRegex(ValueError, "research"):
                 workflow.finish()
+            with self.assertRaises(ValueError):
+                workflow.report_text()
 
 
 if __name__ == "__main__":
