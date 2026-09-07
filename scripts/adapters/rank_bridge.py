@@ -894,6 +894,7 @@ def bridge_rank_evidence(
         profile.subject_mode,
         profile.subject_group,
         profile.secondary_subjects,
+        province=profile.province,
     )
     if (
         plan.province != profile.province

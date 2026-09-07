@@ -13,8 +13,14 @@ from typing import Any
 
 import yaml
 
+try:
+    import tomllib
+except ModuleNotFoundError:
+    import tomli as tomllib
+
 
 ROOT = Path(__file__).resolve().parents[1]
+PROJECT_VERSION = tomllib.loads((ROOT / "pyproject.toml").read_text("utf-8"))["project"]["version"]
 CI_WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
 SOURCE_HEALTH_WORKFLOW = ROOT / ".github" / "workflows" / "source-health.yml"
 SOURCE_HEALTH_TEMPLATE = ROOT / ".github" / "ISSUE_TEMPLATE" / "source-health.yml"
@@ -162,7 +168,7 @@ def _workflow_errors(document: dict[str, Any]) -> list[str]:
     release_steps = [
         step
         for step in steps
-        if step.get("run") == "python scripts/release_check.py --ci --expected-version 0.1.0"
+        if step.get("run") == f"python scripts/release_check.py --ci --expected-version {PROJECT_VERSION}"
     ]
     if len(release_steps) != 1:
         errors.append("release-gate")
@@ -694,7 +700,7 @@ class WorkflowTest(unittest.TestCase):
                 "python scripts/validate_data.py tests/fixtures/provinces/demo-33",
                 "python scripts/validate_evidence.py tests/fixtures/evidence/three-source-consensus",
                 "python scripts/compliance_scan.py --tracked",
-                "python scripts/release_check.py --ci --expected-version 0.1.0",
+                f"python scripts/release_check.py --ci --expected-version {PROJECT_VERSION}",
             ],
         )
         release_step = run_steps[-1]

@@ -592,6 +592,7 @@ def build_pathway_atlas_model(
         planning_profile.subject_mode,
         planning_profile.subject_group,
         planning_profile.secondary_subjects,
+        province=planning_profile.province,
     )
     rank_scenario = (
         unavailable_rank_scenario("research_evidence_unavailable")

@@ -871,6 +871,7 @@ def _validate_profile_plan_context(profile: Any, plan: Any) -> None:
             profile.subject_mode,
             profile.subject_group,
             profile.secondary_subjects,
+            province=profile.province,
         )
     except (AttributeError, TypeError, ValueError):
         raise SessionTransitionError(

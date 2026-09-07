@@ -88,6 +88,8 @@ offline 仅消费已认证的用户提供本地材料，不声称当前或实时
 
 ## 恢复与降级
 
+选科以用户确认的真实组合为准：浙江 `3+3` 支持包含“技术”的七选三，不能替换为化学或删去科目来通过校验。选科合法与专业可报是两个判断；逐校逐专业核对当年认证要求，不得由“有物理”推断理工专业普遍可报，也不得由“没有化学/生物”笼统排除全部医学或生化方向。引擎报错时保留画像与已认证进度，继续可独立完成的资料核验；依赖失败步骤的数值和资格结论保持待核验，不用常识绕过引擎补算或承诺。
+
 工具调用未杀死进程时用门面的 `next` 查看 stage；进程死亡或宿主重启后，用原 `--workspace` 与 `--session` 再次运行 `next`、`ingest`、`unavailable` 或 `finish`。门面的 `PlanningWorkflow.resume` 内部调用 `journal.load(session_id)`，以 `PlanningSessionReplayContext` 作为唯一恢复上下文，并由 context 方法完成 `finalize_evidence`、`calculate` 和 `publish`。`status` 快照、session digest、manifest digest 或调用方重建的 JSON 都不能恢复 completed receipt，也不能替代 factory replay。
 
 宿主在发布完成前保留同一私有 journal 与 validated evidence bundle；journal 加载失败时停止依赖该 receipt 的推进并给出受控 degradation，不从头重跑已认证步骤，不重新向用户索取信息，不得让用户提供内部 JSON、本地路径或文件路径。

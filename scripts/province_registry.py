@@ -573,16 +573,27 @@ def canonical_subject_selection_key(
     return "+".join(ordered)
 
 
+def discovery_subjects_33(*, province: str | None = None) -> tuple[str, ...]:
+    """Return the stable 3+3 order, including Zhejiang's seventh subject."""
+
+    return _SUBJECTS_33 + (("技术",) if province in ("浙江", "浙江省") else ())
+
+
 def canonical_discovery_subject_key(
     mode: str,
     primary: str,
     secondary: tuple[str, ...] | list[str],
+    *,
+    province: str | None = None,
 ) -> str:
-    """Validate profile subjects using only the stable examination mode.
+    """Validate subjects using the stable mode and province-specific vocabulary.
 
     Public research planning must not load a caller-authored ``province.json``.
     This stable discovery projection intentionally knows no score, admission,
-    or recommendation thresholds.
+    or recommendation thresholds. Zhejiang adds 技术 to the six-subject 3+3
+    vocabulary. Omitted province retains the original six-subject contract;
+    public callers must pass their validated province. Append new subjects so
+    existing canonical keys and query identities do not change.
     """
 
     if mode not in _MODES:
@@ -604,6 +615,7 @@ def canonical_discovery_subject_key(
         )
         return "+".join((primary_value, *ordered_secondary))
     selected = {primary_value, *secondary_values}
-    if any(item not in _SUBJECTS_33 for item in selected):
+    subjects = discovery_subjects_33(province=province)
+    if any(item not in subjects for item in selected):
         raise SubjectSelectionError("3+3 选科不在稳定科目词表中")
-    return "+".join(item for item in _SUBJECTS_33 if item in selected)
+    return "+".join(item for item in subjects if item in selected)

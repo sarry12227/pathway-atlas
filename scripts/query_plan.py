@@ -779,6 +779,7 @@ class ResearchContext:
             discovery.mode,
             profile.subject_group,
             profile.secondary_subjects,
+            province=discovery.province,
         )
         trace = _pathway_trace(profile)
         requested = tuple(item.pathway_id for item in trace if item.decision != "exclude")

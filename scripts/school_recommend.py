@@ -1491,6 +1491,9 @@ def personalize_school_recommendations(
     excluded: dict[str, tuple[DecisionReason, ...]] = {}
     eligible_rows: list[dict[str, Any]] = []
     selected_subjects = frozenset(profile.secondary_subjects)
+    if profile.subject_mode == "3+3":
+        # The first serialized subject has no special status in 3+3.
+        selected_subjects |= {profile.subject_group}
     allowed_institution_types = set(profile.constraints.institution_types)
     for school_name in sorted(by_school):
         school_rows = by_school[school_name]
@@ -1571,7 +1574,7 @@ def personalize_school_recommendations(
                     "认证选科要求与已确认选科不相符",
                     subject_sources,
                     input_fields=_school_subject_input_fields(
-                        school_rows, include_subject_group=False
+                        school_rows, include_subject_group=profile.subject_mode == "3+3"
                     ),
                     evidence_status=subject_status,
                 ),
@@ -1638,7 +1641,7 @@ def personalize_school_recommendations(
         rank=central_rank,
         target_province=profile.province,
         subject_group=subject_selection_key or profile.subject_group,
-        secondary_subjects=frozenset(profile.secondary_subjects),
+        secondary_subjects=selected_subjects,
         target_major_categories=profile.target_majors,
         target_cities=profile.target_regions,
         target_schools=profile.target_schools,

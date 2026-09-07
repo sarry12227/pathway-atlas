@@ -28,7 +28,7 @@ if __package__:
     from .contracts import EvidenceStatus
     from .decision_policy import DecisionPolicySnapshot
     from .planning_profile import PlanningProfile
-    from .province_registry import ProvinceConfig, canonical_discovery_subject_key
+    from .province_registry import ProvinceConfig, canonical_discovery_subject_key, discovery_subjects_33
     from .query_plan import QueryPlan, validate_query_plan_payload
     from .validate_data import (
         RuntimeCalculationPolicy,
@@ -63,7 +63,7 @@ else:  # pragma: no cover - flat scripts-path compatibility
     from contracts import EvidenceStatus  # type: ignore
     from decision_policy import DecisionPolicySnapshot  # type: ignore
     from planning_profile import PlanningProfile  # type: ignore
-    from province_registry import ProvinceConfig, canonical_discovery_subject_key  # type: ignore
+    from province_registry import ProvinceConfig, canonical_discovery_subject_key, discovery_subjects_33  # type: ignore
     from query_plan import QueryPlan, validate_query_plan_payload  # type: ignore
     from validate_data import (  # type: ignore
         RuntimeCalculationPolicy,
@@ -189,7 +189,7 @@ def _runtime_config(
         primary = ("物理", "历史")
         secondary = ("化学", "生物", "政治", "地理")
     else:
-        primary = ("物理", "化学", "生物", "政治", "历史", "地理")
+        primary = discovery_subjects_33(province=plan.province)
         secondary = ()
     calculation = RuntimeCalculationPolicy(
         policy_id=policy.policy_id,
@@ -426,6 +426,7 @@ def build_research_snapshot(
         profile.subject_mode,
         profile.subject_group,
         profile.secondary_subjects,
+        province=profile.province,
     )
     if (
         profile.province != plan.province
