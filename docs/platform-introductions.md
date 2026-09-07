@@ -6,6 +6,16 @@
 
 多元星途 · PathwayAtlas
 
+## Logo 与品牌表达
+
+陪你看清选择。
+
+统一使用[已确认的暖色 Logo](../assets/brand/pathway-atlas-logo.png)：展开的书页中，三条路径汇向同一束星光。原始 PNG 为1254×1254，约958 KiB；不重绘、不拉伸，也不叠加平台文案。
+
+需要图片地址的详情页使用[GitHub 原图](https://raw.githubusercontent.com/sarry12227/pathway-atlas/main/assets/brand/pathway-atlas-logo.png)。仓库 README 使用相对地址，使 GitHub 与 Gitee 各自从本仓库加载。平台若有独立的技能图标或封面字段，上传同一 PNG；作者账户头像不是项目 Logo，不随项目品牌变更。
+
+ClawHub 目录图标限512 KiB，使用同一成图的[WebP 格式副本](../assets/brand/pathway-atlas-logo.webp)，约100 KiB，由 `agents/openai.yaml` 指定。副本保持原图的1254×1254尺寸、完整构图和透明度，以最高质量编码压缩；它不是逐像素无损文件。仓库正文保留字节完全一致的已确认 PNG。仅接受文本的技能上传包排除二进制图片，正文引用公开图片地址，独立图标由平台上传入口处理。
+
 ## 仓库简介
 
 多元星途：一题一问，帮学生和家长看清学校、专业与多元升学选择。查证公开资料，在对话中讲清理由、限制和下一步行动。

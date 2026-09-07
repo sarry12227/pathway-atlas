@@ -22,14 +22,14 @@
   ],
   "binary_release_manifest": [
     {
-      "path": "assets/brand/pathway-atlas-horizontal.png",
-      "sha256": "acd47314ced46aadf05e782d70d9bd87f781b82636e46cb288c0231e732dbcc8",
+      "path": "assets/brand/pathway-atlas-logo.png",
+      "sha256": "ec14043003e517138e19b97f2d46c186af7cf6afd01bc1079358557e0429b2c7",
       "classification": "rights-reviewed",
       "rights_doc": "LICENSE"
     },
     {
-      "path": "assets/brand/pathway-atlas-mark.png",
-      "sha256": "39dbf6bb3fee69ff0cb4a7962b513a950f638e653cfb17dc1fd60e22e10f1777",
+      "path": "assets/brand/pathway-atlas-logo.webp",
+      "sha256": "97966a38454ce22f05d27b950d2cab9f70c8f642d9cf204545adb94d3292ef06",
       "classification": "rights-reviewed",
       "rights_doc": "LICENSE"
     },
@@ -252,7 +252,7 @@
         "secret",
         "student_pii"
       ],
-      "file_sha256": "655039755dafcf353284d54bdab8eced46ca4c0ca096c5d02f16705911854c9e",
+      "file_sha256": "d7ccffbd6aabb54d54cb6526aaa98379678a9e2d58c53c1b24e9b12b9d167e4b",
       "reason": "synthetic negative fixture"
     },
     {

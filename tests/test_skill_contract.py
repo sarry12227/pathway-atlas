@@ -207,7 +207,7 @@ class SkillContractTest(unittest.TestCase):
         self.assertIn("内部路径", recovery)
 
     def test_all_references_are_reachable_once(self):
-        links = tuple(re.findall(r"\[[^]]+\]\(([^)]+)\)", self.body))
+        links = tuple(re.findall(r"(?<!!)\[[^]]+\]\(([^)]+)\)", self.body))
         expected = {
             "https://github.com/sarry12227/pathway-atlas#readme",
             "references/research-recovery.md",

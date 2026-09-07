@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import subprocess
 import unittest
-import xml.etree.ElementTree as ElementTree
 from pathlib import Path
 
 
@@ -54,45 +54,20 @@ class BrandIdentityTest(unittest.TestCase):
 
     def test_readme_uses_primary_brand_lockup(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
-        self.assertIn("assets/brand/pathway-atlas-horizontal.svg", readme)
+        self.assertIn("assets/brand/pathway-atlas-logo.png", readme)
         self.assertIn("# 多元星途 · PathwayAtlas", readme)
+        self.assertIn("陪你看清选择", readme)
         self.assertIn("点亮多种升学路径，走出个性升学星途。", readme)
 
     def test_brand_assets_are_safe_and_parseable(self) -> None:
-        svg_names = (
-            "pathway-atlas-mark.svg",
-            "pathway-atlas-horizontal.svg",
-            "pathway-atlas-monochrome.svg",
+        data = (BRAND / "pathway-atlas-logo.png").read_bytes()
+        self.assertEqual(data[:8], b"\x89PNG\r\n\x1a\n")
+        self.assertEqual(data[25], 2, "Keep the approved opaque RGB PNG")
+        self.assertEqual(
+            hashlib.sha256(data).hexdigest(),
+            "ec14043003e517138e19b97f2d46c186af7cf6afd01bc1079358557e0429b2c7",
+            "Keep the owner-approved warm book-and-paths artwork unchanged",
         )
-        for name in svg_names:
-            with self.subTest(name=name):
-                data = (BRAND / name).read_bytes()
-                root = ElementTree.fromstring(data)
-                self.assertTrue(root.tag.endswith("svg"))
-                self.assertNotIn(b"<script", data.lower())
-                self.assertNotIn(CURRENT_OLD_BRAND.encode("utf-8"), data)
-                external_values = [
-                    value
-                    for element in root.iter()
-                    for value in element.attrib.values()
-                    if value.lower().startswith(("http://", "https://"))
-                ]
-                self.assertEqual(external_values, [])
-                ids = {element.attrib.get("id") for element in root.iter()}
-                self.assertTrue(
-                    {"path-origin", "evidence-node", "guiding-star"}.issubset(ids),
-                    f"{name} must encode the progression semantics",
-                )
-
-                if name != "pathway-atlas-monochrome.svg":
-                    for color in (b"#94070A", b"#14213D", b"#C9A227"):
-                        self.assertIn(color, data)
-
-        for name in ("pathway-atlas-mark.png", "pathway-atlas-horizontal.png"):
-            with self.subTest(name=name):
-                data = (BRAND / name).read_bytes()
-                self.assertEqual(data[:8], b"\x89PNG\r\n\x1a\n")
-                self.assertEqual(data[25], 6, "PNG must use RGBA color type")
 
     def test_current_public_surfaces_have_no_legacy_identifier(self) -> None:
         findings: list[str] = []

@@ -4,11 +4,11 @@
 请使用你当前环境的 Skill 安装能力，从 GitHub `https://github.com/sarry12227/pathway-atlas` 安装或更新 `pathway-atlas`（多元星途）到最新版；如果 GitHub 无法访问，请改用 Gitee 镜像 `https://gitee.com/sarry1/pathway-atlas`。若没有专用安装工具，请将完整仓库克隆或下载到当前 Agent 可识别的 Skills 目录，保留已有咨询记录，确认根目录存在 `SKILL.md` 且其中 `name` 为 `pathway-atlas`，再按当前环境支持的方式重新加载并调用它。成功加载后，沿用我已提供的信息，每轮只问一道题并展示当前选项，等待我回答；我确认个人情况后，再检索和核验公开资料。最后直接在对话中详细说明有依据的结论、理由、优先行动和待核验事项，文件作为补充。若无法安装或加载，请如实说明具体阻碍和最少下一步，不要声称已调用。
 ```
 
-<p align="center"><img src="assets/brand/pathway-atlas-horizontal.svg" alt="多元星途 PathwayAtlas" width="100%"></p>
+<p align="center"><img src="assets/brand/pathway-atlas-logo.png" alt="多元星途 PathwayAtlas：展开的书页中，三条路径汇向星光。陪你看清选择。" width="420"></p>
 
 # 多元星途 · PathwayAtlas
 
-**点亮多种升学路径，走出个性升学星途。**
+**陪你看清选择。** 点亮多种升学路径，走出个性升学星途。
 
 多元星途（PathwayAtlas）是给学生和家长用的开源 AI 升学规划 Skill。它让支持 Skill 的 AI 一步一步了解孩子的情况，查证公开招生信息，把选学校、选专业和多元升学路径整理成看得懂、能行动的规划。
 
@@ -96,7 +96,7 @@
 
 **在哪里查看最新版？**
 
-[GitHub 主源](https://github.com/sarry12227/pathway-atlas)与[Gitee 镜像](https://gitee.com/sarry1/pathway-atlas)同步维护。当前为 **v0.1.5 公开预览**；第三方目录可能有缓存，已收录不等于已更新，逐项状态见[分发记录](DISTRIBUTION.md)。
+[GitHub 主源](https://github.com/sarry12227/pathway-atlas)与[Gitee 镜像](https://gitee.com/sarry1/pathway-atlas)同步维护。当前为 **v0.1.6 公开预览**；第三方目录可能有缓存，已收录不等于已更新，逐项状态见[分发记录](DISTRIBUTION.md)。
 
 ## 技术与部署
 

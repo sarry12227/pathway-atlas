@@ -5,6 +5,8 @@ description: Use when 学生、家长或老师询问“这个分数能上哪个�
 
 # 多元星途 · PathwayAtlas
 
+![多元星途 PathwayAtlas：陪你看清选择](https://raw.githubusercontent.com/sarry12227/pathway-atlas/main/assets/brand/pathway-atlas-logo.png)
+
 看清有哪些升学选择，知道下一步怎么走。面向学生和家长，通过一题一问了解个人情况，查证公开资料，在对话中讲清学校、专业、路径选择的理由、限制和准备行动；资料不足时明确缺口，给出有依据的部分结论或准备建议。
 
 无需先懂招生术语。安装后说“请使用多元星途帮我做升学规划”，即可逐步开始；完整介绍与可复制安装提示词见[README：了解价值与开始使用](https://github.com/sarry12227/pathway-atlas#readme)。
