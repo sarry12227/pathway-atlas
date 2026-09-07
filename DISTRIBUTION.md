@@ -2,7 +2,7 @@
 
 本页记录 `pathway-atlas` 的公开主源、镜像与第三方目录状态。GitHub `main` 是唯一可信发布源；Gitee 镜像同一提交。历史正式分发包固定到 `v0.1.0`（`5711107e45d3f679f60538d8e1904a465e887ccf`），不随 main 修改。平台安装包只做已列明的文件筛选与打包元数据适配，不维护不同的运行代码。
 
-main 的 `0.1.4` 完善取证恢复、XLS/PDF适配和零证据准备版交付，保留浙江“技术”选科、对话正文结论及逐题引导。下表逐行记录各平台最近一次单独核验的版本；条目已收录不表示该平台已更新到 main 最新版。腾讯后续更新包使用平台版本 `1.0.5`，对应主源 `0.1.4`，需要所有者在已有条目中上传。
+main 的 `0.1.5` 优化新手介绍与安装调用提示词，保留 `0.1.4` 的取证恢复、XLS/PDF适配和准备版交付。完整介绍以 README 为准，部分平台展示 SKILL.md 的简介与正文，两处均同步维护。下表逐行记录各平台最近一次单独核验的版本；条目已收录不表示缓存已刷新。腾讯后续更新包使用平台版本 `1.0.6`，对应主源 `0.1.5`，需要所有者在已有条目中上传。
 
 状态只使用以下五种取值：`pending`（尚未提交或验证）、`submitted`（已提交，等待公开收录）、`indexed`（已直接验证公开详情页）、`rejected`（平台明确拒绝）、`unavailable`（平台或官方提交入口不可用）。`submitted` 不等同于已经公开收录；已有旧版本的条目也不代表本次更新已公开。
 
@@ -16,7 +16,7 @@ main 的 `0.1.4` 完善取证恢复、XLS/PDF适配和零证据准备版交付�
 | skillhub.club | https://www.skillhub.club | Official ClawHub synchronization | v0.1.0 | pending | — | 2026-09-06 | 官方说明同步 ClawHub。直接发布 CLI 的 100 KiB 单文件限制会跳过两个必要模块，因此等待完整上游收录。 |
 | SkillHub.cn | https://skillhub.cn | Owner website version update | 1.0.1 (source v0.1.0) | submitted | https://skillhub.cn/skills/user_d9d3e443/pathway-atlas | 2026-09-06 | 所有者确认上传成功，API 已记录 latest 标签 1.0.1；公开文件接口尚未提供该版，当前仍返回旧版。 |
 | SkillsCat | https://skills.cat | Official repository submission | v0.1.0 / 5711107 | indexed | https://skills.cat/skills/sarry12227/pathway-atlas | 2026-09-06 | 官方提交已受理；公开搜索、详情页与 registry 均已验证，SKILL.md 内容与交付包完全一致。 |
-| ClawHub | https://clawhub.ai | Official CLI registry publish | v0.1.3 / 16f9eb3 | submitted | — | 2026-09-07 | 官方 dry-run 返回 unchanged、latestVersion 0.1.3，180 个文件的指纹与提交包一致；本次未将公共下载状态视为已验证。已获版权所有者对 ClawHub 的额外 MIT-0 授权。 |
+| ClawHub | https://clawhub.ai | Official CLI registry publish | v0.1.4 / 9e04754 | submitted | — | 2026-09-07 | 官方 owner inspect 返回 latestVersion 0.1.4 与对应SKILL正文；尚未把匿名下载视为已验证。已获版权所有者对 ClawHub 的额外 MIT-0 授权。 |
 
 ## 安装包与平台差异
 
@@ -27,6 +27,8 @@ main 的 `0.1.4` 完善取证恢复、XLS/PDF适配和零证据准备版交付�
 - main 在发布后修正了测试临时目录的跨系统兼容性，并把 CI 与发布任务的有限超时调整为 90 分钟。该变更不改变运行代码，也不改写 v0.1.0 标签或原发布附件。
 
 ## 核验原则
+
+完整介绍、短介绍及各页面的文案来源见[平台介绍文案](docs/platform-introductions.md)。skills.sh 的仓库分组由根 `skills.sh.json` 提供，详情页仍使用 SKILL.md；第三方页面需要另行核对缓存刷新。
 
 - indexed 必须有可公开访问的详情页、名称、来源及安装方式的直接验证；提交成功、登录成功与审核通过分别记录。
 - 平台筛选后的运行文件必须逐字节等于固定主源；只允许记录在本页的包装差异。完整开发与测试内容以 GitHub/Gitee 为准。

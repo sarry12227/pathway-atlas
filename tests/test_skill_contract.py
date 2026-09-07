@@ -209,6 +209,7 @@ class SkillContractTest(unittest.TestCase):
     def test_all_references_are_reachable_once(self):
         links = tuple(re.findall(r"\[[^]]+\]\(([^)]+)\)", self.body))
         expected = {
+            "https://github.com/sarry12227/pathway-atlas#readme",
             "references/research-recovery.md",
             "references/conversation-output.md",
             "references/questionnaire.md",
@@ -222,7 +223,8 @@ class SkillContractTest(unittest.TestCase):
         self.assertEqual(set(links), expected)
         self.assertEqual(len(links), len(set(links)))
         for link in links:
-            self.assertTrue((ROOT / link).is_file(), link)
+            if link != "https://github.com/sarry12227/pathway-atlas#readme":
+                self.assertTrue((ROOT / link).is_file(), link)
 
 
 if __name__ == "__main__":

@@ -495,6 +495,8 @@
     "references/host-workflow.md",
     "references/questionnaire.md",
     "references/conversation-output.md",
+    "docs/platform-introductions.md",
+    "skills.sh.json",
     "references/research-recovery.md",
     "scripts/adapters/xls.py",
     "scripts/adapters/pdf_table.py"
