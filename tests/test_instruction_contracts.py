@@ -692,6 +692,7 @@ class InstructionContractTest(unittest.TestCase):
             cwd=ROOT,
             capture_output=True,
             text=True,
+            encoding="utf-8",
             check=False,
         )
         self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
