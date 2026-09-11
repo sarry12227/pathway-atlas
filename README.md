@@ -96,7 +96,9 @@
 
 **在哪里查看最新版？**
 
-[GitHub 主源](https://github.com/sarry12227/pathway-atlas)与[Gitee 镜像](https://gitee.com/sarry1/pathway-atlas)同步维护。当前为 **v0.2.1 公开预览**；第三方目录可能有缓存，已收录不等于已更新，逐项状态见[分发记录](DISTRIBUTION.md)。
+[GitHub 主源](https://github.com/sarry12227/pathway-atlas)与[Gitee 镜像](https://gitee.com/sarry1/pathway-atlas)同步维护。当前为 **v0.2.3 公开预览**；第三方目录可能有缓存，已收录不等于已更新，逐项状态见[分发记录](DISTRIBUTION.md)。
+
+院校推荐采用统一的[全国层次参考](references/national-opportunity-order.md)，分数和位次按考生所在省份换算。例如综评先比较上纽，再比较同层的北外与昆杜，随后向深北莫下探；港澳先比较相近学校层次，再在同层优先香港。相邻层次帮助拓展机会，同层学校保留专业适配更好的主选与备选。
 
 ## 技术与部署
 

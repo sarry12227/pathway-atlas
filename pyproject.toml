@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pathway-atlas"
-version = "0.2.2"
+version = "0.2.3"
 description = "Step-by-step college planning: compare schools, majors and pathways with evidence and clear next steps"
 readme = "README.md"
 license = { file = "LICENSE" }

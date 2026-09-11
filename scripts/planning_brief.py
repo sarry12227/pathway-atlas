@@ -13,6 +13,7 @@ from statistics import median
 from scripts.adapters.public_text import PublicTextAdapterError, PublicTextField, bind_public_text
 from scripts.path_recommend import validate_public_output_text
 from scripts.planning_profile import PlanningProfile
+from scripts.opportunity_order import align_qualitative_pathways, reference_position, sort_reference
 
 
 POLICY_VERSION = "planning-reference-v1"
@@ -488,15 +489,15 @@ def _candidates(profile, payload, sources, positioning, research_year):
                     admissions_provinces=admissions_provinces,
                     tier_reason=tier_reason)
         groups[kind][tier].append(item)
+    for kind in PATHWAY_NAMES:
+        align_qualitative_pathways(kind, groups[kind])
     pools = {kind: dict(tiers) for kind, tiers in groups.items()}
     for kind, tiers in groups.items():
         seen = set()
         for tier, items in tiers.items():
             # Stable ties preserve the host's fit/priority ordering, including
             # qualitative targets without a numerical admission threshold.
-            items.sort(key=lambda item: (
-                0 if kind != "hong_kong_macao" or item["location_province"] in {"香港", "香港特别行政区"} else 1,
-                abs((item["threshold_rank"] or 0) - (center or 0))))
+            sort_reference(kind, items, center)
             chosen = []
             for item in items:
                 if item["school"] not in seen:
@@ -511,6 +512,12 @@ def _candidates(profile, payload, sources, positioning, research_year):
             # one tier cannot consume another tier's primary or backup slot.
             for tier in TIERS:
                 for item in pools[kind][tier]:
+                    primary = tiers[tier][0] if tiers[tier] else None
+                    if primary and not primary['personal_tier'] and not item['personal_tier']:
+                        current = reference_position(kind, primary['school'], primary['major'])
+                        backup = reference_position(kind, item['school'], item['major'])
+                        if current and backup and current[0] != backup[0]:
+                            continue
                     if item["school"] not in seen:
                         seen.add(item["school"])
                         alternatives[kind][tier].append(item)
@@ -523,6 +530,8 @@ def _threshold_text(item, *, pathway=False):
     if item["threshold_basis"] == "planning_benchmark":
         basis = "普通批参照，不能代表本路径入围线" if pathway else "目标参照"
     if item["threshold_rank"] is None:
+        if item.get('reference_comparison'):
+            return "按全国院校层次列为相对目标"
         return "按项目相对选拔难度列为目标梯度，历史门槛待补"
     return f"{basis}约{item['threshold_rank']}位"
 

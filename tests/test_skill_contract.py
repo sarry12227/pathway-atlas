@@ -217,6 +217,7 @@ class SkillContractTest(unittest.TestCase):
             "references/school-report-estimation.md",
             "references/deep-verification.md",
             "references/pathway-comparison.md",
+            "references/national-opportunity-order.md",
             "references/questionnaire.md",
             "references/source-policy.md",
             "references/retrieval-playbook.md",
