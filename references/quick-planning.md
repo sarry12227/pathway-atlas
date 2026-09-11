@@ -7,7 +7,7 @@
 1. 沿用确认的学校、年级、校排、人数、最好/常态表现、选科、外语、预算和专业。用户已有回答不重问。
 2. **主路线是网上喜报**：[喜报估算](school-report-estimation.md)涵盖学校发布、第三方文章和抖音分享的分数段人数、上线率、层次人数。可读一份即可作注明出处的参考，不套深度三来源门槛，不要求现成“校排—省排”表。本校不足按往年、明确可比的同城学校回退；同时读本省最近完整一分一段表，将喜报分数/人数转成校位/省位边界。
 3. 用估算位次筛本省、已选专业的代表校，目标冲3/稳4/保5。学校名称去重，专业组/专业优先于整校最低线；已知选科不符的专业剔除。地域、语种、费用等限制分别比较；未核实的条件可保留为条件候选，已明确不符的剔除。
-4. 对强基、综评、港澳各找冲1/稳1/保1的典型项目：先解释是什么、怎样培养，再给适配建议。强基若学科兴趣或成绩明显不匹配，明确暂不优先并说明要达到什么条件；不编出低门槛“保底强基”。其他路径只展开与画像相关的可行或有条件可行方向。
+4. 按[全国路径比较](pathway-comparison.md)为强基、综评寻找面向生源省的全国候选；港澳同档香港优先、澳门补位。每条路径先给冲1/稳1/保1及同档备选，再说明参考分数为什么可以考虑、是什么及怎样培养，最后讲不适配点和准备代价。保留四所或更多候选供比较，不将专业兴趣、英语发展中的软差异提前当作整条路径的阻断；真实的招生省份、选科硬条件仍核对。
 5. 构造本页的来源绑定输入，运行 `brief`，按返回 `report_text` 在对话中交付。数字和学校排序由程序生成，不由Agent随意改写。
 
 默认首轮以**最多24次原文读取、约8分钟研究**作为交付预算；同一失败动作最多重试一次，某个工具确定不可用后本轮换路线，不在每个任务上重复失败。来源选择、搜索回退、喜报粗估和继续生成是Agent已被委托的工作，不发“是否继续／是否先找官方／请提供校排换算表”的选择题。达到预算或定位与代表校足够时，立即执行 `brief` 并交付已有结果；候选缺额写出数量和原因，不为填满名单无限补洞。未研究的深度任务保持pending，不批量伪报unavailable。用户明确要求更深核验时，再按原研究流程继续。
@@ -58,7 +58,8 @@ python -m scripts.host_workflow brief --workspace <private-workspace> --session 
 | `kind` | `ordinary` / `strong_foundation` / `comprehensive_evaluation` / `hong_kong_macao` |
 | `school`, `major` | 来源中的学校和具体专业/项目，不自造简称或专业 |
 | `province`, `location_province`, `year` | 招生面向省、学校所在地、门槛基准年；普通批默认学校所在地为用户本省 |
-| `matches_preferences` | 对应画像`target_majors`中已选的大类/方向，可语义匹配但列出原偏好名称；无明确偏好才允许空数组 |
+| `admissions_provinces` | 原文明确的招生省份数组，配`citations.admissions_provinces`；原文明示全国时可用`["全国"]`。程序排除生源省不在范围内的项目；未取得范围可省略/null并保留资格待核实 |
+| `matches_preferences` | 对应画像`target_majors`中已选的大类/方向，可语义匹配但列出原偏好名称；普通批有偏好时须匹配，强基/综评/港澳可为空并作为后置适配提醒 |
 | `threshold_rank` | 对应专业录取或项目入围参考位次；无数字则null |
 | `threshold_score` | 原投档表只有分数时填写，并提供`citations.threshold_score`；程序用对应年份`score_table`或`historical_score_tables`的精确分数行换算位次，不要求人工另造位次列 |
 | `threshold_basis` | `admission`专业录取 / `shortlist`项目入围 / `planning_benchmark`普通批能力参照 / `unavailable` |
@@ -67,8 +68,8 @@ python -m scripts.host_workflow brief --workspace <private-workspace> --session 
 | `fit_reason`, `cautions` | 本人匹配理由和影响决策的限制各一句，联系专业、语言、预算和准备；不填保证录取、稳拿满分等承诺 |
 | `cultivation`, `selection` | 简短的原文培养/选拔描述；可为null，先展示该类路径一般介绍，具体校级细则待核验 |
 | `citation`或`citations` | 支持实际学校/专业/数字/科目和已填写培养选拔字段的原文定位 |
-| `benchmark_tier` | 仅在个人位次或项目门槛暂缺时使用`冲/稳/保`描述目标梯度；正文自动标明未判断个人录取把握 |
+| `benchmark_tier`, `tier_reason` | 个人位次或项目门槛暂缺时用`冲/稳/保`描述目标梯度并解释比较依据；路径仅有`planning_benchmark`普通批参照时，也可用这两个字段作独立的路径分档，不能将普通批位次直接等同项目门槛 |
 
 有个人位次时：门槛在乐观边界以内且好于中心为冲，中心至保守边界为稳，保守边界以外为保；不满足乐观边界的超远目标不挤占推荐数量。按门槛距离选择典型校，每类学校去重。此规则是规划分组，不是录取概率模型。强基/综评的普通批参照必须用`planning_benchmark`，正文明确不能代表该项目入围线；港澳同样不能用普通批线伪装实际独立招生线。
 
-`brief`输出`report_text, positioning, ordinary, pathways, sources, delivery`及附带`report`路径，模式固定`planning_reference`；`authenticated_research=false`明确不是深度认证。来源摘录与结果保存在私有工作区以便复查，原journal与研究任务不变。交付时按[固定正文](conversation-output.md)直接使用文本。
+`brief`输出`report_text, positioning, ordinary, pathways, pathway_alternatives, sources, delivery`及附带`report`路径；三条路径各保留冲稳保主选与每档至多一个备选，港澳同档香港优先。模式固定`planning_reference`；`authenticated_research=false`明确不是深度认证。来源摘录与结果保存在私有工作区以便复查，原journal与研究任务不变。交付时按[固定正文](conversation-output.md)直接使用文本。

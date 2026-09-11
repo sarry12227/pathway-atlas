@@ -392,6 +392,7 @@ def _position(profile, payload, sources, research_year):
 
 def _candidates(profile, payload, sources, positioning, research_year):
     groups = {kind: {tier: [] for tier in TIERS} for kind in ("ordinary", *PATHWAY_NAMES)}
+    alternatives = {kind: {tier: [] for tier in TIERS} for kind in PATHWAY_NAMES}
     selected_subjects = set(profile.subject_group.split("+")) | set(profile.secondary_subjects)
     center = positioning["central_rank"]
     for raw in payload.get("candidates", []):
@@ -405,10 +406,19 @@ def _candidates(profile, payload, sources, positioning, research_year):
             raise ValueError("candidate fit must be explicit")
         if raw["fit"] == "blocked" or (kind == "ordinary" and raw["location_province"] != profile.province):
             continue
+        scope_link = None
+        admissions_provinces = raw.get("admissions_provinces")
+        if admissions_provinces is not None:
+            if (not isinstance(admissions_provinces, list) or not admissions_provinces
+                    or not all(isinstance(p, str) and p.strip() for p in admissions_provinces)):
+                raise ValueError("admissions_provinces requires a nonempty source-bound province list")
+            scope_link = sources.field(raw, "admissions_provinces", admissions_provinces, year=year)
+            if profile.province not in admissions_provinces and "全国" not in admissions_provinces:
+                continue
         preferences = raw["matches_preferences"]
         if not isinstance(preferences, list) or not set(preferences) <= set(profile.target_majors):
             raise ValueError("major preference matches must refer to the confirmed profile")
-        if profile.target_majors and not preferences:
+        if kind == "ordinary" and profile.target_majors and not preferences:
             continue
         required = raw.get("required_subjects")
         if required is not None and (not isinstance(required, list) or not all(isinstance(s, str) for s in required)):
@@ -422,6 +432,8 @@ def _candidates(profile, payload, sources, positioning, research_year):
         if threshold_basis not in {"admission", "shortlist", "planning_benchmark", "unavailable"}:
             raise ValueError("candidate threshold basis must be explicit")
         links = [sources.field(raw, field, item[field], year=year) for field in ("school", "major")]
+        if scope_link:
+            links.append(scope_link)
         for field in ("cultivation", "selection"):
             if raw.get(field):
                 item[field] = _text(raw[field], field)
@@ -451,7 +463,15 @@ def _candidates(profile, payload, sources, positioning, research_year):
         if threshold is not None and threshold_basis == "unavailable":
             raise ValueError("a threshold number requires its real basis")
         citation = " ".join(dict.fromkeys(links))
-        if center is not None and threshold is not None:
+        target_tier = raw.get("benchmark_tier")
+        tier_reason = _text(raw["tier_reason"], "pathway tier reason") if raw.get("tier_reason") else None
+        reasoned_target = (kind != "ordinary" and threshold_basis == "planning_benchmark"
+                           and target_tier in TIERS and tier_reason is not None)
+        if reasoned_target:
+            # Ordinary-admission benchmarks are not the pathway's own entry
+            # thresholds; retain a disclosed comparative planning judgment.
+            tier = target_tier
+        elif center is not None and threshold is not None:
             lower, upper = positioning["strategy_bounds"]
             if threshold < lower:
                 continue
@@ -461,16 +481,22 @@ def _candidates(profile, payload, sources, positioning, research_year):
             if tier not in TIERS:
                 raise ValueError("unpositioned examples require a target tier")
         item.update(threshold_rank=threshold, threshold_basis=threshold_basis,
-                    fit="conditional" if required is None else raw["fit"],
+                    fit="conditional" if required is None or (profile.target_majors and not preferences) else raw["fit"],
                     year=year, citation=citation, matches_preferences=list(preferences),
-                    required_subjects=required, personal_tier=center is not None and threshold is not None)
+                    required_subjects=required, personal_tier=center is not None and threshold is not None and not reasoned_target,
+                    location_province=_text(raw["location_province"], "school location"),
+                    admissions_provinces=admissions_provinces,
+                    tier_reason=tier_reason)
         groups[kind][tier].append(item)
+    pools = {kind: dict(tiers) for kind, tiers in groups.items()}
     for kind, tiers in groups.items():
         seen = set()
         for tier, items in tiers.items():
             # Stable ties preserve the host's fit/priority ordering, including
             # qualitative targets without a numerical admission threshold.
-            items.sort(key=lambda item: abs((item["threshold_rank"] or 0) - (center or 0)))
+            items.sort(key=lambda item: (
+                0 if kind != "hong_kong_macao" or item["location_province"] in {"香港", "香港特别行政区"} else 1,
+                abs((item["threshold_rank"] or 0) - (center or 0))))
             chosen = []
             for item in items:
                 if item["school"] not in seen:
@@ -480,7 +506,68 @@ def _candidates(profile, payload, sources, positioning, research_year):
                 if len(chosen) == limit:
                     break
             tiers[tier] = chosen
-    return groups
+        if kind in alternatives:
+            # Reserve every primary before picking backups, so a duplicate in
+            # one tier cannot consume another tier's primary or backup slot.
+            for tier in TIERS:
+                for item in pools[kind][tier]:
+                    if item["school"] not in seen:
+                        seen.add(item["school"])
+                        alternatives[kind][tier].append(item)
+                        break
+    return groups, alternatives
+
+
+def _threshold_text(item, *, pathway=False):
+    basis = "历史专业录取参考" if item["threshold_basis"] == "admission" else "历史入围参考"
+    if item["threshold_basis"] == "planning_benchmark":
+        basis = "普通批参照，不能代表本路径入围线" if pathway else "目标参照"
+    if item["threshold_rank"] is None:
+        return "按项目相对选拔难度列为目标梯度，历史门槛待补"
+    return f"{basis}约{item['threshold_rank']}位"
+
+
+def _render_pathway(kind, groups, alternatives, positioning, decision):
+    """Show the opportunity ladder before the score rationale and suitability."""
+    lines, displayed = [""], []
+    for tier in TIERS:
+        lines += [f"**{tier}1所**", ""]
+        items = groups[tier]
+        if items:
+            item = items[0]
+            lines.append(f"1. **{item['school']}｜{item['major']}**：{_threshold_text(item, pathway=True)}。{item['citation']}")
+            displayed.append((tier, item))
+        else:
+            lines.append("本档已有0所，缺1所；本轮全国候选中尚未形成可列目标，继续保留其他档位。")
+        for item in alternatives[tier]:
+            lines.append(f"同档备选：**{item['school']}｜{item['major']}**，{_threshold_text(item, pathway=True)}。{item['citation']}")
+            displayed.append((tier, item))
+        lines.append("")
+    center = positioning["central_rank"]
+    if center is not None and displayed:
+        score = positioning["score"]
+        reference = (f"按{positioning['reference_year']}年口径大致{score}分、约{center}位" if score is not None
+                     else f"当前省排参考约{center}位")
+        assessment = f"以{reference}为当前规划位置，{PATHWAY_NAMES[kind]}可以纳入考虑，按上面的冲、稳、保梯度安排准备"
+        if not all(item["personal_tier"] for _, item in displayed):
+            assessment += "；部分档位结合项目相对选拔难度作比较判断，不等于已核实的个人入围线"
+    elif displayed:
+        assessment = "先按项目相对选拔难度列出冲、稳、保目标；个人分数定位补齐后复核分数匹配"
+    else:
+        assessment = "本轮未形成可列的项目目标，暂不认定分数已匹配该路径"
+    lines += ["**分数判断**：" + assessment + "。保档表示相对下探的准备选择，不代表保录。", "",
+              *INTRODUCTIONS[kind], "", "**适配与准备提醒**", "", _text(decision, "pathway decision").rstrip("。；") + "。"]
+    for tier, item in displayed:
+        explanation = item["fit_reason"].rstrip("。；")
+        if item["tier_reason"]:
+            explanation = item["tier_reason"].rstrip("。；") + "；" + explanation
+        if not item["matches_preferences"]:
+            explanation += "；该项目与已选专业方向的契合度需进一步比较"
+        lines += [f"- **{item['school']}（{tier}）**：{explanation}。",
+                  f"  培养：{item['cultivation'].rstrip('。；')}；选拔：{item['selection'].rstrip('。；')}。",
+                  f"  需留意：{item['cautions'].rstrip('。；')}。"]
+    lines.append("")
+    return lines
 
 
 def _render_groups(groups, *, counts, personal_rank, pathway=False):
@@ -496,10 +583,7 @@ def _render_groups(groups, *, counts, personal_rank, pathway=False):
         lines.append(f"**{tier}{count}所**")
         lines.append("")
         for index, item in enumerate(items, 1):
-            basis = "历史专业录取参考" if item["threshold_basis"] == "admission" else "历史入围参考"
-            if item["threshold_basis"] == "planning_benchmark":
-                basis = "普通批参照，不能代表本路径入围线" if pathway else "目标参照"
-            threshold = f"{basis}约{item['threshold_rank']}位" if item["threshold_rank"] is not None else "录取/入围门槛尚待补齐"
+            threshold = _threshold_text(item, pathway=pathway) if item["threshold_rank"] is not None else "录取/入围门槛尚待补齐"
             conditional = "；条件待核实" if item["fit"] == "conditional" else ""
             if not personal_rank or not item["personal_tier"]:
                 conditional += "；目标梯度，未判断个人录取把握"
@@ -526,7 +610,7 @@ def build_planning_brief(profile: PlanningProfile, payload: dict, *, research_ye
         raise ValueError("brief subject selection differs from the confirmed profile")
     sources = _Sources(payload.get("sources", []), research_year)
     positioning = _position(profile, payload, sources, research_year)
-    groups = _candidates(profile, payload, sources, positioning, research_year)
+    groups, alternatives = _candidates(profile, payload, sources, positioning, research_year)
     score, maximum = positioning["exam_score"], positioning["exam_max_score"]
     lines = ["# 多元星途｜本次升学参考规划", "", "## 一、成绩定位", "",
              f"本次考试：{score if score is not None else '未提供'}/{maximum if maximum is not None else '未知满分'}分。"]
@@ -551,10 +635,9 @@ def build_planning_brief(profile: PlanningProfile, payload: dict, *, research_ye
         lines.append("已知高考位次不再估算；分档采用位次上下20%的规划窗口，不表示本人位次有20%误差。")
     lines += _render_groups(groups["ordinary"], counts=ORDINARY_COUNTS, personal_rank=center is not None)
     for numeral, (kind, title) in zip(("三", "四", "五"), PATHWAY_NAMES.items()):
-        lines += [f"## {numeral}、{title}", "", *INTRODUCTIONS[kind], ""]
+        lines += [f"## {numeral}、{title}"]
         decision = payload.get("pathway_decisions", {}).get(kind, "先保留为准备方向，具体资格和投入顺序按已读项目判断")
-        lines += ["本次判断：" + _text(decision, "pathway decision") + "。", ""]
-        lines += _render_groups(groups[kind], counts=dict.fromkeys(TIERS, 1), personal_rank=center is not None, pathway=True)
+        lines += _render_pathway(kind, groups[kind], alternatives[kind], positioning, decision)
     lines += ["## 六、其他路径", ""]
     others = payload.get("other_pathways", [])
     if not others:
@@ -573,6 +656,7 @@ def build_planning_brief(profile: PlanningProfile, payload: dict, *, research_ye
     return {"policy_version": POLICY_VERSION, "profile_digest": profile.digest,
             "positioning": positioning, "ordinary": groups["ordinary"],
             "pathways": {kind: groups[kind] for kind in PATHWAY_NAMES},
+            "pathway_alternatives": alternatives,
             "report_text": "\n".join(lines),
             "sources": [{key: source[key] for key in ("source_id", "url", "title", "year")}
                         for sid, source in sources.records.items() if sid in sources.used],
