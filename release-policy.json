@@ -490,6 +490,8 @@
     "scripts/host_workflow.py",
     "scripts/planning_brief.py",
     "references/quick-planning.md",
+    "references/school-report-estimation.md",
+    "references/deep-verification.md",
     "scripts/questionnaire_intake.py",
     "scripts/planning_session.py",
     "scripts/adapters/public_text.py",

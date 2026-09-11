@@ -76,6 +76,7 @@ def questions(intake):
 class SkillContractTest(unittest.TestCase):
     def setUp(self):
         self.frontmatter, self.body = parse_skill()
+        self.deep = (ROOT / "references/deep-verification.md").read_text(encoding="utf-8")
 
     def test_frontmatter_implicitly_routes_real_parent_questions(self):
         self.assertEqual(set(self.frontmatter), {"name", "description"})
@@ -98,13 +99,13 @@ class SkillContractTest(unittest.TestCase):
         for workflow_word in ("preflight", "QueryPlan", "JSON", "DOCX"):
             self.assertNotIn(workflow_word, description)
 
-    def test_body_is_one_six_stage_state_machine_runbook(self):
+    def test_entrypoint_routes_optional_deep_state_machine(self):
         headings = tuple(re.findall(r"^## (.+)$", self.body, re.M))
         self.assertEqual(headings, STAGES)
         self.assertLessEqual(len(self.body.splitlines()), 220)
         self.assertEqual(self.body.count("scripts/planning_session.py"), 1)
         for command in ("init", "confirm", "next", "ingest", "finalize", "compute", "status"):
-            self.assertIn(f"`{command}`", self.body)
+            self.assertIn(f"`{command}`", self.body + self.deep)
 
     def test_internal_bank_preserves_twenty_anonymous_topics(self):
         intake = section(self.body, "画像确认")
@@ -146,7 +147,7 @@ class SkillContractTest(unittest.TestCase):
         self.assertIn("fresh evidence bundle", self.body)
 
     def test_research_loop_opens_sources_and_tracks_four_year_fallback(self):
-        research = section(self.body, "研究循环")
+        research = section(self.deep, "研究循环")
         self.assertLess(research.index("`next`"), research.index("`ingest`"))
         self.assertLess(research.index("`ingest`"), research.index("`next` 循环"))
         self.assertIn("必须打开原网页或附件", research)
@@ -161,9 +162,9 @@ class SkillContractTest(unittest.TestCase):
         self.assertIn("虚构 `province.json`", research)
 
     def test_completed_results_cross_factory_outcomes_not_bare_digests(self):
-        research = section(self.body, "研究循环")
-        evidence = section(self.body, "证据最终化")
-        report = section(self.body, "计算发布")
+        research = section(self.deep, "研究循环")
+        evidence = section(self.deep, "证据最终化")
+        report = section(self.deep, "计算发布")
 
         self.assertIn("build_task_evidence_outcome", research)
         self.assertIn("evidence_outcome=", research)
@@ -172,10 +173,10 @@ class SkillContractTest(unittest.TestCase):
         self.assertIn("build_report_publication_outcome", report)
         for stage in (research, evidence, report):
             self.assertIn("裸 digest", stage)
-        self.assertIn("同一宿主进程", self.body)
+        self.assertIn("同一宿主进程", self.deep)
 
     def test_evidence_tiers_degrade_without_abandoning_a_decision(self):
-        evidence = section(self.body, "证据最终化")
+        evidence = section(self.deep, "证据最终化")
         for status in ("official", "corroborated", "reference", "partial", "conflict", "missing"):
             self.assertIn(f"`{status}`", evidence)
         self.assertIn("两个独立 B", evidence)
@@ -184,7 +185,7 @@ class SkillContractTest(unittest.TestCase):
         self.assertIn("仍继续检索 B/C", evidence)
 
     def test_report_makes_school_pathway_and_action_decisions(self):
-        report = section(self.body, "计算发布")
+        report = section(self.body, "计算发布") + section(self.deep, "计算发布")
         for phrase in (
             "冲、稳、保、观察",
             "典型学校",
@@ -213,6 +214,8 @@ class SkillContractTest(unittest.TestCase):
             "references/research-recovery.md",
             "references/conversation-output.md",
             "references/quick-planning.md",
+            "references/school-report-estimation.md",
+            "references/deep-verification.md",
             "references/questionnaire.md",
             "references/source-policy.md",
             "references/retrieval-playbook.md",

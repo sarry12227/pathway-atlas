@@ -25,6 +25,20 @@ Create a private workspace and a UTF-8 normalized-answer file, then start once:
 python -m scripts.host_workflow start --workspace <private-workspace> --answers <private-workspace>/answers.json --confirmed [--host-capability search] [--host-capability browse] [--host-capability vision]
 ```
 
+`--answers` accepts the normalized mapping with keys `1` through `20`.
+If the host already has the user's confirmed `PlanningProfile.to_dict()` v3
+export, use `--profile <private-workspace>/profile.json` instead. For recovery
+from older host calls, `--answers` also detects this exported profile shape.
+Its digest and mode are checked; never rebuild answered questions just to change
+the input format. An existing session should be resumed, not initialized again.
+
+`start` and `next` return `report_generated=false`: they have not generated a
+report. `first_delivery` is workflow guidance, not proof of a brief run.
+`brief` must succeed with `report_generated=true` and nonempty `report_text`,
+which the host then delivers in chat. A downloaded spreadsheet or saved session
+does not satisfy delivery. Routine source choices and fallbacks do not require
+the user to choose whether the host should continue.
+
 For the default first delivery, read [quick planning](quick-planning.md), prepare its
 source-linked input from a bounded round of research, and run:
 
@@ -46,7 +60,7 @@ the current bounded task list with:
 python -m scripts.host_workflow next --workspace <private-workspace> --session <session-id> --limit 3
 ```
 
-Every non-`finish` command returns the same status shape: `pending` is the total
+Every command other than `brief` and `finish` returns the same status shape: `pending` is the total
 number of unfinished tasks, while `next` contains only the requested display
 slice. The default limit is 3 and the accepted range is 1 through 100. Hidden
 pending tasks remain in the journal. The slice is ordered by newest year first,

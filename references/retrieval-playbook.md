@@ -2,7 +2,7 @@
 
 ## 统一规范入口
 
-所有 publisher tier、independence、deduplication、admission、conflict 和 evidence-state 决策只使用[信源规范](source-policy.md)。本流程只规定执行顺序、有限边界和完成标准；能力损失改变 coverage，不改变 truth rules。默认宿主按 [host workflow guide](host-workflow.md) 运行 `scripts.host_workflow` 的 `start`、`next`、`ingest`、`unavailable`、`finish`；该门面以 `scripts/planning_session.py` 管理一次可恢复会话，并在内部完成 `init`、`confirm`、factory-only receipt、journal replay、evidence、calculation 与 publication。状态是这些命令返回的 JSON，不存在单独的 `status` 子命令；用户不接触 JSON、命令或内部路径。
+本页只用于用户明确要求的深度核验。默认喜报参考按快速规划使用 `brief`，无需执行本页完整矩阵或精确采纳门槛。以下所有 publisher tier、independence、deduplication、admission、conflict 和 evidence-state 决策只使用[信源规范](source-policy.md)。本流程只规定执行顺序、有限边界和完成标准；能力损失改变 coverage，不改变 truth rules。深度核验时宿主按 [host workflow guide](host-workflow.md) 运行 `scripts.host_workflow` 的 `start`、`next`、`ingest`、`unavailable`、`finish`；该门面以 `scripts/planning_session.py` 管理一次可恢复会话，并在内部完成 `init`、`confirm`、factory-only receipt、journal replay、evidence、calculation 与 publication。状态是这些命令返回的 JSON，不存在单独的 `status` 子命令；用户不接触 JSON、命令或内部路径。
 
 实现不变量仍是 completed bridge→receipt→ingest 留在同一宿主进程，`build_task_evidence_outcome` 的 `evidence_outcome=` 不能由调用方状态或裸 digest 代替。Agent 只准备已打开的公开材料、候选元数据与 adapter 配置；门面拥有 receipt、evidence bundle 和 journal。
 

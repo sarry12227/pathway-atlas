@@ -31,7 +31,7 @@ description: Use when 学生、家长或老师询问“这个分数能上哪个�
 
 画像确认前不得运行 preflight、查询计划或检索，也不得计算、推荐或判断。逐题收集全部结束后，总结已知值、明确未知值和硬约束，请用户明确确认。确认后的匿名画像是后续推理、检索、计算和输出的唯一完整上下文；用户修改画像时建立新版本并使受影响的下游状态失效。
 
-没有官方位次时，主动使用本校历史出口与校排、往年或明确可比学校锚点生成参考定位，并反查相应年份一分一段得到高考参考分数。高一、高二也应得到典型学校和准备路径，不以“还没高考，不能推荐大学”结束服务。若确实没有校准资料，继续输出来源支持的学校目标梯度，并明确个人折算尚缺的具体依据。校内月考、期中或校模考的 `scope` 为 `school`；`province_official` 只用于明确的正式省级高考成绩，不能把同满分的校考裸分直接当高考分。
+没有官方位次时，主动检索本校喜报中的分数段人数、上线率、层次人数，包括第三方与抖音分享，结合校排、往年或明确可比学校形成参考定位，并反查相应年份一分一段得到高考参考分数。高一、高二也应得到典型学校和准备路径，不以“还没高考，不能推荐大学”结束服务。若确实没有校准资料，继续输出来源支持的学校目标梯度，并明确个人折算尚缺的具体依据。校内月考、期中或校模考的 `scope` 为 `school`；`province_official` 只用于明确的正式省级高考成绩，不能把同满分的校考裸分直接当高考分。
 
 完成标准：20 题都有明确答案或明确未知状态，且用户已确认匿名画像。
 
@@ -39,47 +39,23 @@ description: Use when 学生、家长或老师询问“这个分数能上哪个�
 
 仅在画像确认后，按 `references/host-workflow.md` 由宿主在私有工作区运行 `python -m scripts.host_workflow start --workspace … --answers … --confirmed`。`start` 在门面内部完成原状态机的 `init`、`confirm`、能力预检、canonical QueryPlan 绑定和 journal checkpoint；用户不创建目录或输入命令。选择能力映射：[generic](references/hosts/generic.md)、[Codex](references/hosts/codex.md)、[Claude Code](references/hosts/claude-code.md) 或 [Kimi](references/hosts/kimi.md)。
 
-只把当前真实可调用的 search、browse、vision 作为重复的 `--host-capability` 参数传给 `start`；`local_exec` 与 `file_output` 是单独记录的 workflow gates。preflight 机器档位只有 `full`、`standard`、`offline`；能力损失只能降低 coverage，不能改变证据规则。随后用 `python -m scripts.host_workflow next --workspace … --session …` 读取下一批任务；`status` 由该命令的 JSON 返回。退出码 `2` 表示输入、提取或证据无效且最后 checkpoint 已保留，退出码 `3` 表示可选能力不可用。
+只把当前真实可调用的 search、browse、vision 作为重复的 `--host-capability` 参数传给 `start`；`local_exec` 与 `file_output` 是单独记录的 workflow gates。preflight 机器档位只有 `full`、`standard`、`offline`；能力损失只能降低 coverage，不能改变证据规则。已有确认后的v3画像JSON时使用 `--profile …`，不重新拼20题；`--answers`也识别导出的v3画像。已经有会话则沿用原session。`start`/`next`的 `report_generated=false` 只代表本命令未生成报告；不得把 `first_delivery` 配置当成已运行 `brief`。退出码 `2` 表示输入、提取或证据无效且最后 checkpoint 已保留，退出码 `3` 表示可选能力不可用。
 
-完成标准：会话处于 `query_plan_ready`，返回 session ID 与 typed next tasks，保存全部 degradation，不向用户暴露绝对路径或原始异常。
+完成标准：仅初始化成功，会话处于 `query_plan_ready`，返回 session ID 与 typed next tasks，保存全部 degradation，不向用户暴露绝对路径或原始异常。
 
 预检后按[研究恢复与准备版交付](references/research-recovery.md)实测已有取证能力。`browse` 包括可读原文的宿主工具与安全HTTP读取，不等于Chrome；只有 `browse` 也可从受信官方入口开展 `standard` 研究。没有某个搜索API或PDF库时先换已有工具，不把用户修环境当作继续条件。
 
 ## 研究循环
 
-**默认使用快速规划的一轮研究与 `brief`。** 首轮达到约8分钟、24次原文读取预算或已有足够定位与代表校时就形成正文；不等待72个任务全部处理，不为同一缺口循环自证。已确认的兴趣、选科、语种与预算可用于规划判断，推估明确标为参考。下面的 `next → ingest → finish` 是用户要求深入核验时的流程，未做的深度任务保持pending，不能伪报unavailable。
+**默认使用快速规划的一轮研究与 `brief`。喜报优先找人数和比例，不因第三方或社交平台而停止。** 首轮达到约8分钟、24次原文读取预算或已有足够定位与代表校时就形成正文；不等待72个任务全部处理，不为同一缺口循环自证。已确认的兴趣、选科、语种与预算可用于规划判断，推估明确标为参考。下面的 `next → ingest → finish` 是用户要求深入核验时的流程，未做的深度任务保持pending，不能伪报unavailable。
 
-### 可选深度核验
-
-用 `next` 返回的 typed `QueryTask` 按[检索流程](references/retrieval-playbook.md)逐项搜索、打开并保存公开材料。宿主写入 `references/host-workflow.md` 定义的 submission 后，运行 `python -m scripts.host_workflow ingest --workspace … --session … --task … --submission …`，即调用 `ingest`；无法完成则运行同一门面的 `unavailable` 并给出真实 reason。每次之后反复调用 `next` 循环，直到没有 pending task。门面拥有 journal、evidence bundle、completed outcomes 和恢复上下文；Agent 只准备公开材料及其提取配置，不手工拼接 receipt、digest 或 journal JSON。
-
-每个任务保持 `ProvinceConfig.mode`、规范化 `subject_group`、`required_extraction_fields`、`availability`、`freshness` 和有界 `max_candidates`，不得另设固定 Top-N。搜索仅发现候选；必须打开原网页或附件，不能把搜索摘要当事实。按实际格式选择 HTML、XLS/XLSX、PDF、OCR 或 QR adapter 提取，下载只走 secure downloader，并保存 year、method、locator、source provenance、coverage 与 warnings。
-
-所有年度数据按 `Y → Y-1 → Y-2 → Y-3` 查询。最新年度没有、缺失或未公布时依次逐年回查，最多向前查三年；每种数据类型独立选择最近可比年份，不能因一项缺失停止整份规划。至少覆盖一分一段表、投档位次、招生计划、招生章程、学费、选科要求、多元路径政策、服务期与违约条款。当前年度只有第三方资料而上一年度有官方资料时同时保留：前者标当年参考，后者标历史基线；制度或口径变化导致不可比时停止数值聚合并说明原因。
-
-普通批投档只经 `scripts.adapters.admission_bridge` 组合 exact adapter row、对应 `QueryTask`、`ValidatedAdmissionRow` 和 extraction coverage，整行绑定委托 `admission_row_hash`，`coverage_status` 与 evidence status 分开。位次与路径分别使用 typed rank/pathway bridge；public prose 使用 quote/span 绑定的 `public_text` adapter，省略字段保持 missing。不得手工拼事实或虚构 `province.json`。
-
-门面的 `ingest` 在同一宿主进程内执行 bridge→receipt→ingest：它用 exact adapter 产生的 typed bridge 调用 `scripts.planning_session.build_task_evidence_outcome(profile, query_plan, task, bridges)`，再以 `session.ingest_task(..., evidence_outcome=task_evidence_outcome)` 和内部 checkpoint 完成该任务。这里的 `evidence_outcome=`、factory-only receipt、完整 origin replay 和裸 digest 无授权能力是实现不变量；Agent 不调用这些底层步骤。
-
-offline 仅消费用户提供或本会话先前保存且已认证的本地材料，不声称当前或实时验证；没有静默联网回退。每个 task 最终必须 `ingest` 为 completed，或用受控 unavailable reason 结束。
-
-查询矩阵不是“所有年份全部抓取成功”的承诺。先核验各族最新年份；读取 `research_summary` 与 `older_year_resolution`，对已获合格较新证据的同族历史任务，按门面提示显式记录 `newer_comparable_year_accepted`。浏览器分支失败不影响其他读取方式，某格式失败不影响其他任务；同一确定故障在本轮只做初次尝试和至多一次重试，不能为每个任务重复启动失效工具。
-
-完成标准：`next` 不再返回查询任务，每个 task 恰有一个可重放 outcome。
+对话中只报告影响选择的新发现，不反复汇报HTTP、参数、矩阵或“必须停下来”。资料来源、换工具、往年回退与代理估算由Agent自主完成，不让用户选择是否继续。只有真正需要用户决定的个人偏好或缺失关键身份信息才追问。预算到时执行 `brief` 并交付七部分正文，不停在Excel、会话存档或等待用户回来。
 
 ## 证据最终化
 
-本节仅用于深度 `finish`。默认 `brief` 使用实际读取的公共原文与精确引用检查，输出 `planning_reference`，不冒称完成本节认证；公开原文足够支持参考学校或路径时不等待全部字段齐全。
+默认参考使用可读喜报与精确摘录。单份第三方文章、抖音分享或用户提供的公开喜报可形成带出处、方法、区间的估算；不套“三个独立C来源”门槛，不要求现成校排—省排表。详见[喜报估算](references/school-report-estimation.md)。
 
-按[信源规范](references/source-policy.md)执行发布者分级、独立性、去重、采纳和冲突处理；冲突不得取平均或挑选方便值。A 级原始来源可形成 `official`；没有 A 时，两个独立 B 一致可形成 `corroborated`，三个独立 C 一致可形成 `reference`。官方来源缺失、不可得或未找到时仍继续检索 B/C；未达到门槛的单源第三方只能作为发现线索或“观察”理由。
-
-所有任务 completed 或 unavailable 后运行 `python -m scripts.host_workflow finish --workspace … --session … --format markdown`。门面先完成 `python scripts/validate_data.py` / `python scripts/validate_evidence.py` 对应的验证语义，再在内部调用 `scripts.planning_session.build_evidence_manifest_outcome(...)` 和 `session.finalize_evidence(evidence_outcome, ...)` 跨越 `finalize` gate并保存 checkpoint。形成 authenticated snapshot 之前不得给出数字或开始计算；未达到采纳门槛时保留 `partial`、`conflict` 或 `missing`，不降低门槛。manifest 裸 digest 不具有效力。
-
-已确认画像或 canonical QueryPlan 中处于 `include` / `discover` 的路径不得因政策 `missing`、`masked`、`partial` 或 `conflict` 从报告消失。通过 typed pathway observation 保留“观察 + 待核验”：只携带真实存在的来源编号与原证据状态，明确缺口及政策/资格核验动作；没有来源时来源编号保持为空。不得为观察项编造政策内容、院校、资格结论、目标位次、政策年份、报名时间线或来源编号。相同计划目标已有可重放的 accepted policy 时，由原正式推荐逻辑替代观察项。
-
-完成标准：fresh evidence bundle 与研究快照已认证；依赖缺失事实的输出具有明确 unavailable reason。
-
-所有任务均真实标为 unavailable、没有公开事实时，也正常执行 `finish`；空证据包的认证仅证明记录和缺口一致，不意味着学生已有认证的位次或资格结论。不得绕过门面凭经验补数。
+只有用户明确要求更深认证时才读取[深度认证](references/deep-verification.md)、[信源规范](references/source-policy.md)和[深度检索流程](references/retrieval-playbook.md)，继续原 `next → ingest → finish` 链路。
 
 ## 计算发布
 
@@ -97,15 +73,13 @@ offline 仅消费用户提供或本会话先前保存且已认证的本地材料
 
 `brief` 的固定模板为默认正文约束，主持Agent可作简短过渡，不改数值、数量、排序和资格状态，不再追加同样长的重复解释。无法运行代码时也严格照这七部分交付，并如实说明是宿主整理的参考，不能声称运行了引擎。
 
-用户要求深度报告时，`finish` 继续内部 `compute` gate：调用 `scripts.planning_session.build_calculation_outcome(...)` 和 `scripts.planning_session.build_report_publication_outcome(...)`，保存校验结果并原子发布；调用方提供的 calculation/report 裸 digest 不具有效力。Markdown/DOCX及完整证据审计作为附件，主对话仍按上面七部分先呈现已有结论。深度报告保留原披露：“本结果由 AI 基于公开数据整理，仅供升学规划参考，不构成录取承诺或正式升学建议。政策、招生计划和录取结果请以当年主管部门及招生高校最终公布内容为准。”
-
-完成标准：用户直接读到成绩定位、本省典型学校、三类重点路径和其他可行选择、现阶段行动。没有校准数字时仍给来源支持的目标梯度，不能退化为只讲不能判断；没有事实来源时明确相应缺额，也不编学校或资格。匿名输出；用户明确授权前，不发布、上传或push产物。
+完成标准：真实执行 `brief`，收到 `report_generated=true` 与非空 `report_text`，随后用户直接读到成绩定位、本省典型学校、三类重点路径和其他可行选择、现阶段行动。没有校准数字时仍给来源支持的目标梯度，不能退化为只讲不能判断；没有事实来源时明确相应缺额，也不编学校或资格。匿名输出；用户明确授权前，不发布、上传或push产物。
 
 ## 恢复与降级
 
-选科以用户确认的真实组合为准：浙江 `3+3` 支持包含“技术”的七选三，不能替换为化学或删去科目来通过校验。选科合法与专业可报是两个判断；逐校逐专业核对当年认证要求，不得由“有物理”推断理工专业普遍可报，也不得由“没有化学/生物”笼统排除全部医学或生化方向。引擎报错时保留画像与已认证进度，继续可独立完成的资料核验；依赖失败步骤的数值和资格结论保持待核验，不用常识绕过引擎补算或承诺。
+选科以用户确认的真实组合为准：浙江 `3+3` 支持包含“技术”的七选三，不能替换为化学或删去科目来通过校验。选科合法与专业可报是两个判断；逐校逐专业核对当年认证要求，不得由“有物理”推断理工专业普遍可报，也不得由“没有化学/生物”笼统排除全部医学或生化方向。引擎报错时保留画像与已认证进度，继续可独立完成的资料核验。快速参考可使用喜报模型形成注明假设的估算；深度认证失败不能否定该估算，也不能伪称认证通过。
 
-工具调用未杀死进程时用门面的 `next` 查看 stage；进程死亡或宿主重启后，用原 `--workspace` 与 `--session` 再次运行 `next`、`ingest`、`unavailable` 或 `finish`。门面的 `PlanningWorkflow.resume` 内部调用 `journal.load(session_id)`，以 `PlanningSessionReplayContext` 作为唯一恢复上下文，并由 context 方法完成 `finalize_evidence`、`calculate` 和 `publish`。`status` 快照、session digest、manifest digest 或调用方重建的 JSON 都不能恢复 completed receipt，也不能替代 factory replay。
+工具调用未杀死进程时用门面的 `next` 查看 stage；进程死亡或宿主重启后，用原 `--workspace` 与 `--session` 再次运行 `brief`；用户要求深度核验时才运行 `next`、`ingest`、`unavailable` 或 `finish`。门面的 `PlanningWorkflow.resume` 内部调用 `journal.load(session_id)`，以 `PlanningSessionReplayContext` 作为唯一恢复上下文，并由 context 方法完成 `finalize_evidence`、`calculate` 和 `publish`。`status` 快照、session digest、manifest digest 或调用方重建的 JSON 都不能恢复 completed receipt，也不能替代 factory replay。
 
 宿主在发布完成前保留同一私有 journal 与 validated evidence bundle；journal 加载失败时停止依赖该 receipt 的推进并给出受控 degradation，不从头重跑已认证步骤，不重新向用户索取信息，不得让用户提供内部 JSON、本地路径或文件路径。
 

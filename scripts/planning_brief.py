@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from bisect import bisect_left
 import math
+from statistics import median
 
 from scripts.adapters.public_text import PublicTextAdapterError, PublicTextField, bind_public_text
 from scripts.path_recommend import validate_public_output_text
@@ -121,13 +122,179 @@ def _score_rows(profile, table, sources, research_year):
     rows, links = [], []
     for row in table["rows"]:
         score = _number(row["score"], "gaokao score", minimum=0, maximum=900)
-        rank = _number(row["rank"], "gaokao rank")
+        rank = _number(row["rank"], "gaokao rank", minimum=0)
         links.append(sources.cite(row, (score, rank), year=year))
         rows.append((rank, score))
-    rows.sort()
-    if len(rows) < 2 or len({r for r, _ in rows}) != len(rows) or any(b[1] >= a[1] for a, b in zip(rows, rows[1:])):
-        raise ValueError("score table must have distinct increasing ranks and decreasing scores")
+    # Empty score bands have zero new candidates and legitimately repeat the
+    # cumulative rank, including zero at the top. Keep these for score lookup;
+    # rank lookup takes the highest score at a repeated cumulative boundary.
+    rows.sort(key=lambda row: -row[1])
+    if (len(rows) < 2 or len({score for _, score in rows}) != len(rows)
+            or any(b[0] < a[0] for a, b in zip(rows, rows[1:]))):
+        raise ValueError("score table must have distinct decreasing scores and nondecreasing cumulative ranks")
     return year, rows, links
+
+
+def _school_report_estimate(profile, latest, model, payload, sources, research_year):
+    """Turn reported cumulative counts into explicit planning scenarios.
+
+    A retained social report is usable here without the deep consensus gate.
+    Its counts are observations; the rank curve remains a disclosed estimate.
+    """
+    scenarios, links, gaps, seen_curves = [], [], [], set()
+    tables = list(payload.get("historical_score_tables", []))
+    if payload.get("score_table"):
+        tables.append(payload["score_table"])
+    expected_group = profile.subject_group if profile.subject_mode == "3+1+2" else "综合"
+    kinds = {"school_publication": "学校发布", "third_party": "第三方转述",
+             "social_video": "社交平台喜报", "user_material": "用户提供的公开喜报"}
+    reports = model.get("reports", [])
+    if len(reports) > 12:
+        raise ValueError("use at most twelve retained school reports")
+    for report in reports:
+        year = _year(report["year"], research_year)
+        school = _text(report["school"], "report school")
+        if report["source_kind"] not in kinds:
+            raise ValueError("school report source kind must describe its origin")
+        comparison = report["comparability"]
+        if comparison == "same_school":
+            if school != profile.high_school:
+                raise ValueError("school report belongs to another school")
+        elif comparison == "regional_comparable":
+            _text(report["comparability_reason"], "school proxy reason")
+        else:
+            raise ValueError("school report comparability must be explicit")
+        if report["subject_group"] != expected_group:
+            raise ValueError("school report cohort does not match the subject group")
+        cohort = report.get("cohort_size")
+        reported_school = _text(report.get("reported_school", school), "reported school name")
+        if reported_school != school:
+            _text(report.get("school_identity_basis"), "school alias identity basis")
+        values = [reported_school]
+        if cohort is not None:
+            cohort = _number(cohort, "report cohort", maximum=100000)
+            values.append(cohort)
+        links.append(sources.cite(report, values, year=year))
+        # Historical cohort changes are normalized by the student's percentile.
+        scale = cohort / latest.cohort_size if cohort and latest.cohort_size else 1
+        x = latest.rank * scale
+        points, anchor_notes = [], []
+        for metric in report.get("metrics", []):
+            kind = metric["kind"]
+            if kind == "top_score":
+                sources.cite(metric, (metric["score"],), year=year)
+                gaps.append("仅有最高分，继续寻找分数段人数、上线人数或同档学校喜报")
+                continue
+            if kind not in {"score_count", "score_rate", "tier_count", "tier_rate"}:
+                raise ValueError("unsupported school report metric")
+            if kind.endswith("_rate"):
+                if cohort is None:
+                    gaps.append("上线率缺同口径人数，保留为定性材料")
+                    continue
+                rate = _number(metric["rate_percent"], "report rate", maximum=100)
+                count = cohort * rate / 100
+                amount = rate
+            else:
+                count = _number(metric["count"], "cumulative count", maximum=100000)
+                amount = count
+            if cohort is not None and count > cohort:
+                raise ValueError("report count exceeds the report cohort")
+            if kind.startswith("score_"):
+                score = _number(metric["score"], "report score", minimum=0, maximum=900)
+                links.append(sources.cite(metric, (score, amount), year=year))
+                matching = [table for table in tables if table["year"] == year]
+                if len(matching) > 1:
+                    raise ValueError("provide one score table per reference year")
+                if not matching:
+                    gaps.append(f"{year}年喜报等待同年一分一段表，学校和路径继续交付")
+                    continue
+                _, rows, table_links = _score_rows(profile, matching[0], sources, research_year)
+                ranks = [rank for rank, row_score in rows if row_score == score]
+                if not ranks or ranks[0] == 0:
+                    gaps.append(f"已读表未覆盖喜报{score:g}分，保留其他锚点")
+                    continue
+                rank_values = ranks
+                links.extend(table_links)
+                note = f"{score:g}分累计{count:g}人"
+            else:
+                label = _text(metric["label"], "report tier label")
+                links.append(sources.cite(metric, (label, amount), year=year))
+                benchmark = metric["benchmark"]
+                _text(benchmark["basis"], "tier benchmark basis")
+                benchmark_year = _year(benchmark["year"], research_year)
+                rank_values = []
+                for row in benchmark["ranks"]:
+                    rank = _number(row["province_rank"], "tier benchmark rank")
+                    links.append(sources.cite(row, (rank,), year=benchmark_year))
+                    rank_values.append(rank)
+                if not rank_values:
+                    gaps.append("层次人数缺代表校门槛参照，保留其他锚点")
+                    continue
+                note = f"{label}累计{count:g}人（层次位次为代表校参照）"
+            points.append((count, median(rank_values), min(rank_values), max(rank_values)))
+            anchor_notes.append(note)
+        if not points:
+            continue
+        points.sort()
+        if len({point[0] for point in points}) != len(points) or any(b[1] <= a[1] for a, b in zip(points, points[1:])):
+            gaps.append("一份喜报的累计人数不单调或重叠，按独立口径整理后再用")
+            continue
+        signature = (year, school, cohort, tuple(points))
+        if signature in seen_curves:
+            continue
+        seen_curves.add(signature)
+        # One count boundary carries information about the cohort; top-score-only
+        # input does not. Limit proportional/extrapolated scenarios to nearby ranks.
+        curve = [(point[0], point[1]) for point in points]
+        extrapolated = len(curve) == 1 or not curve[0][0] <= x <= curve[-1][0]
+        if extrapolated:
+            near = min(curve, key=lambda point: abs(point[0] - x))
+            if near[0] <= 1 or not 0.5 <= x / near[0] <= 2:
+                gaps.append("当前校排离现有喜报人数边界过远，继续用同档学校或目标梯度")
+                continue
+            if len(curve) == 1:
+                center = round(near[1] * x / near[0])
+                method = "单个累计人数锚点按校位比例作粗估"
+            else:
+                (x0, y0), (x1, y1) = curve[:2] if x < curve[0][0] else curve[-2:]
+                center = round(y0 + (x - x0) * (y1 - y0) / (x1 - x0))
+                method = "相邻人数锚点作有限外推"
+        else:
+            center = _interpolate(x, curve)
+            method = "分数段/层次累计人数锚点插值"
+        if center is None or center < 1:
+            gaps.append("当前锚点无法形成正向省排估计")
+            continue
+        margin = _number(model.get("margin_fraction", 0.2), "planning margin", minimum=0.1, maximum=0.8)
+        if (extrapolated or cohort is None or latest.cohort_size is None or comparison == "regional_comparable"
+                or any(metric["kind"].startswith("tier_") for metric in report.get("metrics", []))):
+            margin = max(margin, 0.5 if len(curve) == 1 else 0.4)
+        spread = max(max(abs(p[1] - p[2]), abs(p[3] - p[1])) / p[1] for p in points)
+        margin = max(margin, spread)
+        bounds = [max(1, math.floor(center * (1 - margin))), math.ceil(center * (1 + margin))]
+        for school_rank in (profile.best_rank, profile.usual_rank):
+            if school_rank is not None and len(curve) > 1:
+                rank = _interpolate(school_rank * scale, curve)
+                if rank is not None:
+                    bounds = [min(bounds[0], rank), max(bounds[1], rank)]
+        cohort_note = "按历届与本届同组人数比例对齐校位" if cohort and latest.cohort_size else "历届人数未齐，暂按同规模假设"
+        notes = [f"{year}年{kinds[report['source_kind']]}：" + "、".join(anchor_notes), method, cohort_note]
+        if comparison == "regional_comparable":
+            notes.append("同档学校代理：" + report["comparability_reason"])
+        notes.append(f"±{margin:.0%}为规划浮动假设，不是统计置信区间")
+        scenarios.append({"year": year, "school": school, "central_rank": center,
+                          "rank_bounds": bounds, "basis": "；".join(notes)})
+    if not scenarios:
+        return {"basis": "；".join(dict.fromkeys(gaps)) or "尚无可用喜报人数锚点", "citations": list(dict.fromkeys(links))}
+    newest = max(item["year"] for item in scenarios)
+    active = [item for item in scenarios if item["year"] == newest]
+    center = round(median(item["central_rank"] for item in active))
+    bounds = [min(item["rank_bounds"][0] for item in scenarios), max(item["rank_bounds"][1] for item in scenarios)]
+    basis = model["basis"] + "；" + active[0]["basis"]
+    if len(scenarios) > 1:
+        basis += "；不同年份或转述保留为独立情景，中心取最新年份情景中位数，范围覆盖全部情景，不合并成官方事实"
+    return {"central_rank": center, "rank_bounds": bounds, "basis": basis,
+            "scenarios": scenarios, "citations": list(dict.fromkeys(links))}
 
 
 def _position(profile, payload, sources, research_year):
@@ -141,7 +308,7 @@ def _position(profile, payload, sources, research_year):
               "method": "unavailable", "basis": "暂无可比校准资料", "citations": []}
     model = payload.get("calibration", {"method": "unavailable", "basis": "暂无可比校准资料"})
     method = model["method"]
-    if method not in {"school_rank", "official_rank", "official_score", "unavailable"}:
+    if method not in {"school_rank", "school_report", "official_rank", "official_score", "unavailable"}:
         raise ValueError("unsupported calibration method")
     result["basis"] = _text(model["basis"], "calibration basis")
     if method == "unavailable":
@@ -158,13 +325,21 @@ def _position(profile, payload, sources, research_year):
                 raise ValueError("official score mapping requires the matching current-year table")
             _, rows, _ = _score_rows(profile, table, sources, research_year)
             matches = [rank for rank, score in rows if score == latest.score]
-            if len(matches) != 1:
+            if len(matches) != 1 or matches[0] == 0:
                 raise ValueError("the actual gaokao score has no exact row in the score table")
             center = matches[0]
         else:
             center = latest.rank
         bounds = [center, center]
         basis = "用户确认的当年正式高考位次" if method == "official_rank" else "用户确认的当年高考分数对应同分累计位次参考"
+    elif method == "school_report":
+        if latest.scope != "school":
+            raise ValueError("school reports require a school-scope rank")
+        estimate = _school_report_estimate(profile, latest, model, payload, sources, research_year)
+        result.update(estimate)
+        if estimate.get("central_rank") is None:
+            return result
+        center, bounds, basis = estimate["central_rank"], estimate["rank_bounds"], estimate["basis"]
     else:
         if latest.scope != "school":
             raise ValueError("school_rank requires a school-scope rank")
@@ -196,7 +371,7 @@ def _position(profile, payload, sources, research_year):
                     bounds = [min(bounds[0], rank), max(bounds[1], rank)]
         basis = (f"{year}年学校出口锚点按校排插值；{result['basis']}；"
                  f"上下浮动{margin:.0%}为规划敏感性假设，非统计置信区间，不假定未来成绩自动提高")
-    strategy_bounds = bounds if method == "school_rank" else [max(1, math.floor(center * 0.8)), math.ceil(center * 1.2)]
+    strategy_bounds = bounds if method in {"school_rank", "school_report"} else [max(1, math.floor(center * 0.8)), math.ceil(center * 1.2)]
     result.update(central_rank=center, rank_bounds=bounds, strategy_bounds=strategy_bounds, method=method, basis=basis)
     table = payload.get("score_table")
     if table:
@@ -258,6 +433,21 @@ def _candidates(profile, payload, sources, positioning, research_year):
         if threshold is not None:
             _number(threshold, "threshold rank")
             links.append(sources.field(raw, "threshold_rank", threshold, year=year))
+        elif raw.get("threshold_score") is not None:
+            score = _number(raw["threshold_score"], "admission score", minimum=0, maximum=900)
+            links.append(sources.field(raw, "threshold_score", score, year=year))
+            tables = list(payload.get("historical_score_tables", []))
+            if payload.get("score_table"):
+                tables.append(payload["score_table"])
+            matching = [table for table in tables if table["year"] == year]
+            if len(matching) > 1:
+                raise ValueError("provide one score table per admission year")
+            if matching:
+                _, rows, table_links = _score_rows(profile, matching[0], sources, research_year)
+                ranks = [rank for rank, value in rows if value == score]
+                if ranks and ranks[0] > 0:
+                    threshold = ranks[0]
+                    links.extend(table_links)
         if threshold is not None and threshold_basis == "unavailable":
             raise ValueError("a threshold number requires its real basis")
         citation = " ".join(dict.fromkeys(links))
@@ -278,7 +468,9 @@ def _candidates(profile, payload, sources, positioning, research_year):
     for kind, tiers in groups.items():
         seen = set()
         for tier, items in tiers.items():
-            items.sort(key=lambda item: (abs((item["threshold_rank"] or 0) - (center or 0)), item["school"], item["major"]))
+            # Stable ties preserve the host's fit/priority ordering, including
+            # qualitative targets without a numerical admission threshold.
+            items.sort(key=lambda item: abs((item["threshold_rank"] or 0) - (center or 0)))
             chosen = []
             for item in items:
                 if item["school"] not in seen:

@@ -621,7 +621,8 @@ class InstructionContractTest(unittest.TestCase):
                 links.append((path.name, target))
         self.assertEqual(
             links,
-            [("source-policy.md", "retrieval-playbook.md")]
+            [("source-policy.md", "school-report-estimation.md"),
+             ("source-policy.md", "retrieval-playbook.md")]
             + [
                 ("retrieval-playbook.md", "source-policy.md"),
                 ("retrieval-playbook.md", "host-workflow.md"),

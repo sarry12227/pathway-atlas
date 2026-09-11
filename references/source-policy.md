@@ -2,7 +2,9 @@
 
 ## 规范边界
 
-本文件是 publisher tier、独立性、去重、证据状态和事实采纳的唯一规范来源。Agent 用这里的有限规则解释决策；`scripts/source_policy.py`、`scripts/evidence.py`、各 adapter 与 validator 是可执行权威。发现文档与运行时不一致时，停止采纳并修复契约，不能用文字覆盖运行时结果。
+**先区分交付用途。默认 `brief` 的喜报参考估算，单份可读的学校喜报、第三方文章、抖音分享、截图或视频转写即可作为观察输入；不要求凑齐三个C级来源，也不要求学校或考试院提供现成校排—省排表。** 保存原文、发布者/出处、年份、人数口径；程序用累计分数段人数、上线率或层次人数推导锚点，明确估算方法与浮动。第三方转述保持第三方身份，估算不标为官方认证。学校在抖音的经确认官方账号也不因平台而自动降为C。输入方法见[喜报估算](school-report-estimation.md)。
+
+下面的 publisher tier、独立性、去重及精确事实采纳表只用于用户明确要求的**深度认证 `ingest → finish`**。它们不是默认规划能否估算、是否继续或是否给学校名单的前置门槛。默认参考由 `scripts/planning_brief.py` 执行原文引用检查和推算；深度认证由 `scripts/source_policy.py`、`scripts/evidence.py`、各 adapter 与 validator 执行。发现文档与运行时不一致时，核对所属模式并修复契约，不能将一个模式的门槛套给另一个。
 
 检索的先后次序与逐步完成标准由 retrieval playbook 定义；该流程引用本规范，不另行定义门槛。
 
@@ -31,7 +33,7 @@
 
 当前有效等级的任何精确分歧都形成 `conflict`。保留各 claim 与来源，停止该事实的精确采纳；不取平均、不选方便值，也不静默降到较低等级寻找一个顺眼结果。C-only 事实即使达到门槛也只形成 `reference`，不能标成 `official`。
 
-少于门槛、publisher identity 或 citation 缺失、当前年份未经验证、字段为 partial/masked，均形成相应的 `missing`、`partial` 或 `masked` 状态，不能进入精确计算。
+深度认证中，少于门槛、publisher identity 或 citation 缺失、当前年份未经验证、字段为 partial/masked，均形成相应的 `missing`、`partial` 或 `masked` 状态，不能进入精确计算。这不禁止同一可读喜报在 `brief` 中作披露假设的参考估算。
 
 ## 独立性与去重
 
@@ -73,7 +75,7 @@
 | uncertain-cell | uncertain | 禁止 | 保留 confidence/warning，等待可验证替代 |
 | incomplete-page-or-sheet | partial | 禁止 | 清空无法确认的 coverage bounds 并记录缺页或缺 sheet |
 
-不插值、不把屏蔽数字当端点、不把抓取缺口当真实空档。只有 adapter 输出的 exact value 位于完整、已验证 coverage 内，才可进入采纳表。
+上述深度精确采纳不插值、不把屏蔽数字当端点、不把抓取缺口当真实空档。`brief` 中“600分以上120人”的600和120是可读的分数边界与累计人数，可以构造粗略校位锚点；它不等于第120名恰好考600分。`6xx分`或被遮住的人数仍不能补造。
 
 ## 引用、时效与重放
 

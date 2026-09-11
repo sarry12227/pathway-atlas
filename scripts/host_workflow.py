@@ -357,7 +357,7 @@ class PlanningWorkflow:
         else:
             with record.open("xb") as output:
                 output.write(body)
-        return {**result, "report": str(destination), "session_id": self.session.session_id,
+        return {**result, "report_generated": True, "report": str(destination), "session_id": self.session.session_id,
                 "research_summary": self.research_summary()}
 
     def report_text(self) -> str:
@@ -463,7 +463,9 @@ def main(argv=None):
     parser.add_argument("command", choices=("start", "next", "brief", "ingest", "unavailable", "finish"))
     parser.add_argument("--workspace", type=Path, required=True)
     parser.add_argument("--session")
-    parser.add_argument("--answers", type=Path)
+    profile_input = parser.add_mutually_exclusive_group()
+    profile_input.add_argument("--answers", type=Path, help="normalized answers 1–20, or an exported confirmed v3 profile")
+    profile_input.add_argument("--profile", type=Path, help="already confirmed PlanningProfile v3 JSON")
     parser.add_argument("--submission", type=Path)
     parser.add_argument("--confirmed", action="store_true")
     parser.add_argument("--host-capability", action="append", default=[])
@@ -475,10 +477,27 @@ def main(argv=None):
     args = parser.parse_args(argv)
     try:
         if args.command == "start":
-            if args.answers is None:
-                raise ValueError("host-normalized answers are required")
-            answers = json.loads(args.answers.read_text(encoding="utf-8"))
-            profile = build_profile_from_questionnaire({int(k): v for k, v in answers.items()})
+            selected = args.profile or args.answers
+            if selected is None:
+                raise ValueError("provide normalized --answers or an already confirmed --profile")
+            data = json.loads(selected.read_text(encoding="utf-8-sig"))
+            if not isinstance(data, dict):
+                raise ValueError("answers/profile input must be a JSON object")
+            if args.profile or data.get("schema_version") == "3.0":
+                data = dict(data)
+                claimed_digest = data.pop("digest", None)
+                claimed_mode = data.pop("mode", None)
+                profile = PlanningProfile.create(data)
+                if claimed_digest is not None and claimed_digest != profile.digest:
+                    raise ValueError("confirmed profile digest disagrees; reconfirm changed profile")
+                if claimed_mode is not None and claimed_mode != profile.mode:
+                    raise ValueError("confirmed profile mode disagrees")
+            else:
+                try:
+                    answers = {int(k): v for k, v in data.items()}
+                except ValueError:
+                    raise ValueError("--answers needs keys 1–20; use --profile for a confirmed v3 profile") from None
+                profile = build_profile_from_questionnaire(answers)
             workflow = PlanningWorkflow.start(
                 args.workspace, profile, detect_capabilities(set(args.host_capability)), confirmed=args.confirmed,
             )
@@ -503,7 +522,8 @@ def main(argv=None):
                               "sources": workflow.public_sources(), "delivery": workflow.delivery(),
                               "research_summary": workflow.research_summary()}, ensure_ascii=False))
         else:
-            print(json.dumps(workflow.status(limit=args.limit), ensure_ascii=False))
+            print(json.dumps({**workflow.status(limit=args.limit), "command": args.command,
+                              "report_generated": False}, ensure_ascii=False))
         return 0
     except ModuleNotFoundError:
         print("host-workflow: optional capability unavailable; Markdown remains available", file=sys.stderr)
