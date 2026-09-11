@@ -8,12 +8,14 @@ from __future__ import annotations
 
 from bisect import bisect_left
 import math
+import re
 from statistics import median
 
 from scripts.adapters.public_text import PublicTextAdapterError, PublicTextField, bind_public_text
 from scripts.path_recommend import validate_public_output_text
 from scripts.planning_profile import PlanningProfile
 from scripts.opportunity_order import align_qualitative_pathways, reference_position, sort_reference
+from scripts.exam_cutoffs import estimate_cutoff_score, rank_at_score
 
 
 POLICY_VERSION = "planning-reference-v1"
@@ -298,21 +300,135 @@ def _school_report_estimate(profile, latest, model, payload, sources, research_y
             "scenarios": scenarios, "citations": list(dict.fromkeys(links))}
 
 
+def _cutoff_position(profile, latest, model, payload, sources, research_year, result):
+    exam = model.get("exam", {})
+    group = profile.subject_group if profile.subject_mode == "3+1+2" else "综合"
+    if (latest is None or latest.score is None or exam.get("confirmed") is not True
+            or exam.get("province") != profile.province or exam.get("subject_group") != group
+            or exam.get("date") != latest.exam_date or exam.get("scope") != latest.scope
+            or exam.get("max_score") != latest.max_score
+            or exam.get("score_basis") not in {"原始分", "赋分", "原始分与赋分"}
+            or exam.get("score_basis") != profile.score_basis
+            or model.get("gaokao_province") != profile.province
+            or model.get("gaokao_subject_group") != group
+            or model.get("gaokao_score_basis") != exam.get("score_basis")
+            or model.get("gaokao_max_score") != latest.max_score):
+        result["basis"] = "划线尚未确认，或考试、科类、满分、计分口径未对齐"
+        return result
+    name = _text(exam["name"], "cutoff exam name")
+    origins = {"parent_image": "家长图片确认", "parent_text": "家长文字确认", "school_publication": "学校划线材料"}
+    if exam.get("source_kind") not in origins:
+        raise ValueError("cutoff source kind must identify its real origin")
+    year = _year(model["year"], research_year)
+    lines = {}
+    for line in exam.get("lines", []):
+        label = _text(line["label"], "exam cutoff label")
+        if label in lines:
+            raise ValueError("duplicate exam cutoff label")
+        lines[label] = None if line.get("score") is None else _number(line["score"], "exam cutoff", minimum=0, maximum=latest.max_score)
+        if exam["source_kind"] == "school_publication" and lines[label] is not None:
+            result["citations"].append(sources.cite(line, (label, lines[label])))
+    if len(lines) > 12 or len(model.get("anchors", [])) > 12:
+        raise ValueError("use at most twelve total-score cutoffs")
+    pairs, notes, seen = [], [], set()
+    teacher_reported = False
+    for anchor in model.get("anchors", []):
+        label = _text(anchor["exam_label"], "exam cutoff label")
+        if label in seen or label not in lines:
+            raise ValueError("cutoff correspondence must name a unique recorded line")
+        seen.add(label)
+        if lines[label] is None:
+            continue
+        target_label = _text(anchor["gaokao_label"], "gaokao cutoff label")
+        target = _number(anchor["gaokao_score"], "gaokao cutoff", minimum=0, maximum=model["gaokao_max_score"])
+        basis = _text(anchor["basis"], "cutoff correspondence basis")
+        kind = anchor["reference_kind"]
+        if kind == "teacher_reported":
+            statement = _text(anchor["parent_statement"], "parent-reported teacher statement")
+            if ((label not in statement and target_label not in statement)
+                    or re.search(r"(?<![\d.+\-−])" + re.escape(f"{target:g}") + r"(?![\d.])", statement) is None):
+                raise ValueError("teacher statement must retain the reported reference score")
+            teacher_reported = True
+        elif kind in {"official_cutoff", "published_benchmark"}:
+            result["citations"].append(sources.cite(anchor, (target_label, target), year=year))
+        else:
+            raise ValueError("cutoff reference kind must describe the correspondence")
+        pairs.append((lines[label], target))
+        notes.append(f"{label}{lines[label]:g}→{target_label}{target:g}分（{basis}）")
+    estimate = estimate_cutoff_score(latest.score, pairs, latest.max_score, model.get("margin_points", 10))
+    if estimate is None:
+        result["basis"] = "划线缺少可对应的高考参照，或本次分数离已知线过远"
+        return result
+    result.update(score=estimate["score"], score_bounds=estimate["score_bounds"], reference_year=year,
+                  method="exam_cutoffs", cutoff_calculation=estimate)
+    result["basis"] = (f"{name}，{origins[exam['source_kind']]}；{estimate['calculation']}；"
+                       + "、".join(notes) + f"；±{estimate['margin_points']:g}分为规划浮动假设，非统计置信区间")
+    if teacher_reported:
+        result["basis"] += "；含家长转述的老师对应参照，未独立核验"
+    tables = list(payload.get("historical_score_tables", []))
+    if payload.get("score_table"):
+        tables.append(payload["score_table"])
+    matching = [table for table in tables if table["year"] == year]
+    if len(matching) > 1:
+        raise ValueError("provide one score table per cutoff reference year")
+    if matching:
+        _, rows, links = _score_rows(profile, matching[0], sources, research_year)
+        result["citations"].extend(links)
+        center, approximated = rank_at_score(estimate["score"], rows)
+        lower, lo_approx = rank_at_score(estimate["score_bounds"][1], rows)
+        upper, hi_approx = rank_at_score(estimate["score_bounds"][0], rows)
+        if center is not None:
+            result["central_rank"] = center
+            result["rank_bounds"] = [lower, upper]
+            result["strategy_bounds"] = ([lower, upper] if lower is not None and upper is not None
+                else [max(1, math.floor(center * 0.8)), math.ceil(center * 1.2)])
+            if lower is None or upper is None:
+                result["basis"] += "；表格未覆盖完整分数范围，选校暂用位次±20%规划窗口，不伪报范围位次"
+        if approximated or lo_approx or hi_approx:
+            result["basis"] += "；省排插值来自已读分数行，非官方精确同分位次"
+    if result["central_rank"] is None:
+        result["basis"] += f"；省排待{year}年同省同科类一分一段表覆盖"
+    result["citations"] = list(dict.fromkeys(result["citations"]))
+    return result
+
+
 def _position(profile, payload, sources, research_year):
     observations = sorted(profile.rank_observations, key=lambda obs: obs.exam_date)
     latest = observations[-1] if observations else None
+    model = payload.get("calibration", {"method": "unavailable", "basis": "暂无可比校准资料"})
+    method = model["method"]
+    if latest is not None and method in {"school_rank", "school_report"}:
+        same_exam = [obs for obs in observations if obs.exam_date == latest.exam_date and obs.scope == "school"]
+        if len(same_exam) == 1:
+            latest = same_exam[0]
     result = {"exam_score": latest.score if latest else None,
               "exam_max_score": latest.max_score if latest else None,
               "central_rank": None, "rank_bounds": None,
               "strategy_bounds": None,
               "score": None, "score_bounds": None, "reference_year": None,
               "method": "unavailable", "basis": "暂无可比校准资料", "citations": []}
-    model = payload.get("calibration", {"method": "unavailable", "basis": "暂无可比校准资料"})
-    method = model["method"]
-    if method not in {"school_rank", "school_report", "official_rank", "official_score", "unavailable"}:
+    if method not in {"school_rank", "school_report", "official_rank", "official_score", "exam_cutoffs", "unavailable"}:
         raise ValueError("unsupported calibration method")
     result["basis"] = _text(model["basis"], "calibration basis")
     if method == "unavailable":
+        return result
+    if method == "exam_cutoffs":
+        # Additional joint ranks for the same exam must not hide its school row.
+        exam = model.get("exam", {})
+        matching = [obs for obs in observations if latest is not None
+                    and obs.exam_date == latest.exam_date == exam.get("date")
+                    and obs.scope == exam.get("scope")]
+        if len(matching) == 1:
+            latest = matching[0]
+            result.update(exam_score=latest.score, exam_max_score=latest.max_score)
+        result = _cutoff_position(profile, latest, model, payload, sources, research_year, result)
+        fallback = payload.get("fallback_calibration")
+        if result["score"] is None and fallback:
+            if fallback["method"] not in {"school_rank", "school_report", "unavailable"}:
+                raise ValueError("cutoff fallback must use school calibration or unavailable")
+            alternative = _position(profile, {**payload, "calibration": fallback}, sources, research_year)
+            alternative["basis"] = result["basis"] + "；已转用：" + alternative["basis"]
+            return alternative
         return result
     if latest is None or (latest.rank is None and method != "official_score"):
         result["basis"] = "已有学校资料，但本次校排尚不明确；先给典型目标梯度"
@@ -630,12 +746,17 @@ def build_planning_brief(profile: PlanningProfile, payload: dict, *, research_ye
             year = positioning["reference_year"]
             lines.append(f"按{year}年已公布高考口径作规划参考：**对应高考大致约{positioning['score']}分，折合{profile.province}省排约{center}位**。")
             if positioning["score_bounds"]:
-                lines.append(f"分数参考范围：{positioning['score_bounds'][0]}–{positioning['score_bounds'][1]}分；省排参考范围：{lo}–{hi}位。")
+                rank_range = f"{lo}–{hi}位" if lo is not None and hi is not None else "表格尚未覆盖完整范围"
+                lines.append(f"分数参考范围：{positioning['score_bounds'][0]}–{positioning['score_bounds'][1]}分；省排参考范围：{rank_range}。")
         else:
             lines.append(f"**折合省排中心参考约{center}位，范围{lo}–{hi}位**；对应分数待同口径一分一段表补齐，院校与路径先按位次推进。")
         lines.append(f"估算依据：{positioning['basis']}。" + " ".join(positioning["citations"]))
         if profile.exam_year != research_year:
             lines.append(f"这是现阶段用于选校和安排准备的历史口径定位，不是对{profile.exam_year}年实际高考结果的保证。")
+    elif positioning["score"] is not None:
+        lines.append(f"按{positioning['reference_year']}年参照划线折算：**对应高考大致约{positioning['score']}分**，参考范围{positioning['score_bounds'][0]}–{positioning['score_bounds'][1]}分；省排待同口径一分一段表补齐。")
+        lines.append(f"估算依据：{positioning['basis']}。" + " ".join(positioning["citations"]))
+        lines.append("以下先给有来源的学校目标梯度及路径，待省排补齐后更新个人冲稳保。")
     else:
         lines.append(f"个人高考分数和省排暂缺可比校准：{positioning['basis']}。下面先给有来源的典型学校目标梯度和路径；这些档位不是已测得的个人冲稳保，不把校内裸分直接当高考分。")
     lines += ["", "## 二、本省普通批：冲3所、稳4所、保5所", "",
