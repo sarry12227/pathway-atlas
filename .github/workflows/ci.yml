@@ -55,4 +55,4 @@ jobs:
       - name: Scan tracked repository content
         run: python scripts/compliance_scan.py --tracked
       - name: Run final release gate
-        run: python scripts/release_check.py --ci --expected-version 0.2.3
+        run: python scripts/release_check.py --ci --expected-version 0.2.4
