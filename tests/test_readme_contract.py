@@ -23,7 +23,7 @@ FIXTURES = ROOT / "tests" / "fixtures"
 FIXED_README_PREFIX = """一句话让AI调用此skill：
 
 ```bash
-请使用你当前环境的 Skill 安装能力，从 GitHub `https://github.com/sarry12227/pathway-atlas` 安装或更新 `pathway-atlas`（多元星途）到最新版；如果 GitHub 无法访问，请改用 Gitee 镜像 `https://gitee.com/sarry1/pathway-atlas`。若没有专用安装工具，请将完整仓库克隆或下载到当前 Agent 可识别的 Skills 目录，保留已有咨询记录，确认根目录存在 `SKILL.md` 且其中 `name` 为 `pathway-atlas`，再按当前环境支持的方式重新加载并调用它。成功加载后，沿用我已提供的信息，每轮只问一道题并展示当前选项，等待我回答；我确认个人情况后，再检索和核验公开资料。最后直接在对话中详细说明有依据的结论、理由、优先行动和待核验事项，文件作为补充。若无法安装或加载，请如实说明具体阻碍和最少下一步，不要声称已调用。
+请使用你当前环境的 Skill 安装能力，从 GitHub `https://github.com/sarry12227/pathway-atlas` 安装或更新 `pathway-atlas`（多元星途）到最新版；如果 GitHub 无法访问，请改用 Gitee 镜像 `https://gitee.com/sarry1/pathway-atlas`。若没有专用安装工具，请将完整仓库克隆或下载到当前 Agent 可识别的 Skills 目录，保留已有咨询记录，确认根目录存在 `SKILL.md` 且其中 `name` 为 `pathway-atlas`，再按当前环境支持的方式重新加载并调用它。成功加载后，沿用我已提供的信息，每轮只问一道题并展示当前选项，等待我回答；我确认个人情况后，再检索和核验公开资料。确认后默认先做快速参考规划，依次在对话中给出本次分数、高考参考分数与省排、本省冲3稳4保5、强基/综评/港澳各冲1稳1保1及培养介绍、其他可行路径和现阶段行动；说明估算依据与限制，文件作为补充。若无法安装或加载，请如实说明具体阻碍和最少下一步，不要声称已调用。
 ```
 """
 INTRODUCTION = (

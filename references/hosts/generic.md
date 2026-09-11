@@ -1,4 +1,6 @@
 # Generic host capability mapping
+
+Default delivery: after profile confirmation and start, follow [quick planning](../quick-planning.md) and call `brief`. Render its `report_text` directly in the fixed seven-part order: score/rank, local 3/4/5 schools, three pathway families with 1/1/1 examples, other feasible pathways, current actions. The deep research matrix need not finish before this planning reference. The stage mappings and receipt rules below describe optional deep verification with `finish`; do not apply their all-tasks-completed requirement to `brief`.
 - When starting or resuming discovery, extraction, or evidence work, read the [retrieval playbook](../retrieval-playbook.md).
 - Before classifying, deduplicating, admitting, or resolving a source conflict, read the [source policy](../source-policy.md).
 - When a tool, source or parser fails, read the [research recovery guide](../research-recovery.md) and continue within the verified evidence limits.

@@ -1,7 +1,7 @@
 # Host workflow command guide
 
-This is the default host path after the family confirms the complete anonymous
-profile. Every command, JSON file, saved source and returned path stays inside a
+This facade serves the confirmed anonymous profile. Default delivery uses the
+quick planning branch; the full receipt loop below is optional deep verification. Every command, JSON file, saved source and returned path stays inside a
 host-owned private workspace. The family sees questions, confirmation, progress,
 evidence limits and the final report; it never authors or locates these inputs.
 
@@ -24,6 +24,20 @@ Create a private workspace and a UTF-8 normalized-answer file, then start once:
 ```text
 python -m scripts.host_workflow start --workspace <private-workspace> --answers <private-workspace>/answers.json --confirmed [--host-capability search] [--host-capability browse] [--host-capability vision]
 ```
+
+For the default first delivery, read [quick planning](quick-planning.md), prepare its
+source-linked input from a bounded round of research, and run:
+
+```text
+python -m scripts.host_workflow brief --workspace <private-workspace> --session <session-id> --submission <private-workspace>/brief.json
+```
+
+Deliver the returned `report_text` in its fixed order. `delivery.mode` is
+`planning_reference`; it is not an authenticated deep-research receipt. This
+command preserves the journal, completed evidence and pending research tasks.
+Do not mark unattempted deep tasks unavailable just to deliver a brief.
+
+For optional deep verification, continue the following loop.
 
 Read `session_id` and `next` from stdout JSON. Keep both internal. Resume and get
 the current bounded task list with:

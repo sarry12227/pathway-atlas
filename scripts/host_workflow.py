@@ -334,6 +334,32 @@ class PlanningWorkflow:
             temp_path.unlink(missing_ok=True)
         return destination
 
+    def brief(self, submission):
+        """Deliver a bounded planning reference without closing deep research."""
+        from scripts.planning_brief import build_planning_brief
+        result = build_planning_brief(self.profile, submission, research_year=self.plan.research_year)
+        identity = _digest({"submission": submission, "result": result})[7:23]
+        directory = _directory(self.root, "reports")
+        destination = directory / f"{self.session.session_id}.brief-{identity}.md"
+        content = result["report_text"].encode("utf-8")
+        if destination.exists():
+            if destination.is_symlink() or destination.read_bytes() != content:
+                raise ValueError("brief destination already contains a different artifact")
+        else:
+            with destination.open("xb") as output:
+                output.write(content)
+        # Keep the source submission in the private workspace, not in a receipt.
+        record = directory / f"{self.session.session_id}.brief-{identity}.json"
+        body = json.dumps({"submission": submission, "result": result}, ensure_ascii=False, sort_keys=True).encode("utf-8")
+        if record.exists():
+            if record.is_symlink() or record.read_bytes() != body:
+                raise ValueError("brief source record disagrees")
+        else:
+            with record.open("xb") as output:
+                output.write(body)
+        return {**result, "report": str(destination), "session_id": self.session.session_id,
+                "research_summary": self.research_summary()}
+
     def report_text(self) -> str:
         """Return complete chat source text from the authenticated calculation.
 
@@ -404,6 +430,15 @@ class PlanningWorkflow:
             "next": [t.to_dict() for t in pending[:limit]],
             "research_summary": self.research_summary(),
             "older_year_resolution": self._older_year_resolution(pending),
+            "first_delivery": {
+                "command": "brief",
+                "mode": "planning_reference",
+                "requires_deep_task_closure": False,
+                "original_page_budget": 24,
+                "research_minutes": 8,
+                "ordinary_counts": {"冲": 3, "稳": 4, "保": 5},
+                "pathway_counts": {"冲": 1, "稳": 1, "保": 1},
+            },
         }
         if self.session.stage is SessionStage.CALCULATION_COMPLETE:
             result["delivery"] = self.delivery()
@@ -425,7 +460,7 @@ class PlanningWorkflow:
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("start", "next", "ingest", "unavailable", "finish"))
+    parser.add_argument("command", choices=("start", "next", "brief", "ingest", "unavailable", "finish"))
     parser.add_argument("--workspace", type=Path, required=True)
     parser.add_argument("--session")
     parser.add_argument("--answers", type=Path)
@@ -457,7 +492,11 @@ def main(argv=None):
             if len(args.task) != 1 or args.submission is None:
                 raise ValueError("ingest requires one task and a host source submission")
             workflow.ingest(args.task[0], json.loads(args.submission.read_text(encoding="utf-8")))
-        if args.command == "finish":
+        if args.command == "brief":
+            if args.submission is None:
+                raise ValueError("brief requires a host source submission")
+            print(json.dumps(workflow.brief(json.loads(args.submission.read_text(encoding="utf-8"))), ensure_ascii=False))
+        elif args.command == "finish":
             result = workflow.finish(format=args.format)
             print(json.dumps({"session_id": workflow.session.session_id, "report": str(result),
                               "format": args.format, "report_text": workflow.report_text(),

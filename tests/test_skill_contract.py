@@ -212,6 +212,7 @@ class SkillContractTest(unittest.TestCase):
             "https://github.com/sarry12227/pathway-atlas#readme",
             "references/research-recovery.md",
             "references/conversation-output.md",
+            "references/quick-planning.md",
             "references/questionnaire.md",
             "references/source-policy.md",
             "references/retrieval-playbook.md",

@@ -186,8 +186,9 @@ class InstructionContractTest(unittest.TestCase):
         )
         intro = text.split("## Intake boundary", 1)[0]
         intro_lines = [line for line in intro.splitlines()[1:] if line.strip()]
-        self.assertEqual(len(intro_lines), 3)
-        self.assertTrue(all(line.startswith("- ") for line in intro_lines))
+        self.assertEqual(len(intro_lines), 4)
+        self.assertTrue(intro_lines[0].startswith("Default delivery:"))
+        self.assertTrue(all(line.startswith("- ") for line in intro_lines[1:]))
         intake = section(text, "## Intake boundary")
         for marker in (
             "parse_numbered_questionnaire",
@@ -198,7 +199,7 @@ class InstructionContractTest(unittest.TestCase):
         ):
             self.assertIn(marker, intake)
         links = re.findall(r"\[[^\]]+\]\(([^)]+)\)", text)
-        self.assertEqual(links, ["../retrieval-playbook.md", "../source-policy.md", "../research-recovery.md"])
+        self.assertEqual(links, ["../quick-planning.md", "../retrieval-playbook.md", "../source-policy.md", "../research-recovery.md"])
         for target in links:
             self.assertTrue((path.parent / target).is_file(), target)
             self.assertNotIn(Path(target).name, {"web-search-playbook.md", "gaokao-provinces.md"})
@@ -627,7 +628,8 @@ class InstructionContractTest(unittest.TestCase):
             ]
             + [("retrieval-playbook.md", "source-policy.md")] * 3
             + [("retrieval-playbook.md", "research-recovery.md"),
-               ("host-workflow.md", "research-recovery.md")],
+               ("host-workflow.md", "research-recovery.md"),
+               ("host-workflow.md", "quick-planning.md")],
         )
 
     def test_public_command_probes_named_by_playbook_execute(self):
@@ -659,7 +661,7 @@ class InstructionContractTest(unittest.TestCase):
         )
         self.assertEqual(
             set(commands),
-            {"start", "next", "ingest", "unavailable", "finish"},
+            {"start", "next", "brief", "ingest", "unavailable", "finish"},
         )
         self.assertNotIn("status", commands)
         normalized = " ".join(self.host_workflow.split())
@@ -693,7 +695,7 @@ class InstructionContractTest(unittest.TestCase):
         )
         self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
         for marker in (
-            "{start,next,ingest,unavailable,finish}",
+            "{start,next,brief,ingest,unavailable,finish}",
             "--limit LIMIT",
             "--newer-task NEWER_TASK",
             "--submission SUBMISSION",

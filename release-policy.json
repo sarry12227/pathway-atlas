@@ -488,6 +488,8 @@
     "tests/test_docx_semantic_parity.py",
     "tests/test_workflows.py",
     "scripts/host_workflow.py",
+    "scripts/planning_brief.py",
+    "references/quick-planning.md",
     "scripts/questionnaire_intake.py",
     "scripts/planning_session.py",
     "scripts/adapters/public_text.py",
