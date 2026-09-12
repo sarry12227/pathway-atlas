@@ -186,9 +186,10 @@ class InstructionContractTest(unittest.TestCase):
         )
         intro = text.split("## Intake boundary", 1)[0]
         intro_lines = [line for line in intro.splitlines()[1:] if line.strip()]
-        self.assertEqual(len(intro_lines), 4)
-        self.assertTrue(intro_lines[0].startswith("Default delivery:"))
-        self.assertTrue(all(line.startswith("- ") for line in intro_lines[1:]))
+        self.assertEqual(len(intro_lines), 5)
+        self.assertTrue(intro_lines[0].startswith("Start with the current student question"))
+        self.assertTrue(intro_lines[1].startswith("Default delivery:"))
+        self.assertTrue(all(line.startswith("- ") for line in intro_lines[2:]))
         intake = section(text, "## Intake boundary")
         for marker in (
             "parse_numbered_questionnaire",
@@ -199,7 +200,7 @@ class InstructionContractTest(unittest.TestCase):
         ):
             self.assertIn(marker, intake)
         links = re.findall(r"\[[^\]]+\]\(([^)]+)\)", text)
-        self.assertEqual(links, ["../quick-planning.md", "../retrieval-playbook.md", "../source-policy.md", "../research-recovery.md"])
+        self.assertEqual(links, ["../../SKILL.md", "../quick-planning.md", "../retrieval-playbook.md", "../source-policy.md", "../research-recovery.md"])
         for target in links:
             self.assertTrue((path.parent / target).is_file(), target)
             self.assertNotIn(Path(target).name, {"web-search-playbook.md", "gaokao-provinces.md"})
@@ -629,6 +630,7 @@ class InstructionContractTest(unittest.TestCase):
             ]
             + [("retrieval-playbook.md", "source-policy.md")] * 3
             + [("retrieval-playbook.md", "research-recovery.md"),
+               ("host-workflow.md", "../SKILL.md"),
                ("host-workflow.md", "research-recovery.md"),
                ("host-workflow.md", "quick-planning.md")],
         )

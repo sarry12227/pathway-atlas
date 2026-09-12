@@ -77,6 +77,7 @@ class SkillContractTest(unittest.TestCase):
     def setUp(self):
         self.frontmatter, self.body = parse_skill()
         self.deep = (ROOT / "references/deep-verification.md").read_text(encoding="utf-8")
+        self.host = (ROOT / "references/host-workflow.md").read_text(encoding="utf-8")
 
     def test_frontmatter_implicitly_routes_real_parent_questions(self):
         self.assertEqual(set(self.frontmatter), {"name", "description"})
@@ -103,9 +104,10 @@ class SkillContractTest(unittest.TestCase):
         headings = tuple(re.findall(r"^## (.+)$", self.body, re.M))
         self.assertEqual(headings, STAGES)
         self.assertLessEqual(len(self.body.splitlines()), 220)
-        self.assertEqual(self.body.count("scripts/planning_session.py"), 1)
+        self.assertNotIn("scripts/planning_session.py", self.body)
+        self.assertEqual(self.host.count("scripts/planning_session.py"), 1)
         for command in ("init", "confirm", "next", "ingest", "finalize", "compute", "status"):
-            self.assertIn(f"`{command}`", self.body + self.deep)
+            self.assertIn(f"`{command}`", self.body + self.host + self.deep)
 
     def test_internal_bank_preserves_twenty_anonymous_topics(self):
         intake = section(self.body, "画像确认")
@@ -124,14 +126,14 @@ class SkillContractTest(unittest.TestCase):
         self.assertIn("[内部题库](references/questionnaire.md)", intake)
         self.assertEqual(questions(intake), ())
         self.assertIn("不得重复询问已提供的信息", intake)
-        self.assertIn("画像确认前不得运行 preflight、查询计划或检索，也不得计算、推荐或判断", intake)
+        self.assertIn("学生的查询计划、资料检索、成绩计算与院校推荐在画像确认后开始", intake)
+        self.assertIn("维护测试使用独立测试资料", intake)
         self.assertIn("确认后的匿名画像", intake)
         self.assertIn("唯一完整上下文", intake)
-        self.assertIn("parse_numbered_questionnaire", intake)
-        self.assertIn("build_profile_from_questionnaire", intake)
-        self.assertIn("additional_observations", intake)
-        self.assertIn("city_joint", intake)
-        self.assertIn("province_joint", intake)
+        for detail in ("parse_numbered_questionnaire", "build_profile_from_questionnaire",
+                       "additional_observations", "city_joint", "province_joint"):
+            self.assertNotIn(detail, intake)
+            self.assertIn(detail, self.host)
         self.assertIn("不得从选科、活动或“没有限制”补造", intake)
 
     def test_user_never_authors_internal_state_or_paths(self):
@@ -142,9 +144,9 @@ class SkillContractTest(unittest.TestCase):
         ):
             self.assertIn(phrase, self.body)
         self.assertIn("宿主内部", self.body)
-        self.assertIn("v3 `PlanningProfile`", self.body)
-        self.assertIn("canonical QueryPlan", self.body)
-        self.assertIn("fresh evidence bundle", self.body)
+        self.assertRegex(self.host, r"v3\s+`PlanningProfile`")
+        self.assertIn("canonical QueryPlan", self.host)
+        self.assertIn("fresh evidence bundle", self.host)
 
     def test_research_loop_opens_sources_and_tracks_four_year_fallback(self):
         research = section(self.deep, "研究循环")
@@ -220,6 +222,7 @@ class SkillContractTest(unittest.TestCase):
             "references/national-opportunity-order.md",
             "references/exam-cutoff-calibration.md",
             "references/questionnaire.md",
+            "references/host-workflow.md",
             "references/source-policy.md",
             "references/retrieval-playbook.md",
             "references/hosts/generic.md",

@@ -1,9 +1,19 @@
 # Host workflow command guide
 
+Use the first-response and quiet-preparation rules in [SKILL.md](../SKILL.md)
+before this command guide. Ask the current student question first; perform
+necessary authorized setup or wrapper maintenance while awaiting the answer
+when the host actually supports background work. Keep one intake draft and
+track real jobs internally. Without asynchronous execution, ask first and do
+necessary preparation in later turns; do not invent a running background job.
+Only a verified blocker requiring the user's action warrants an interruption.
+Successful preparation resumes the existing flow without another start choice.
+
 This facade serves the confirmed anonymous profile. Default delivery uses the
 quick planning branch; the full receipt loop below is optional deep verification. Every command, JSON file, saved source and returned path stays inside a
-host-owned private workspace. The family sees questions, confirmation, progress,
-evidence limits and the final report; it never authors or locates these inputs.
+host-owned private workspace. The family sees the current question, profile
+confirmation, decision-relevant findings and the final report. Routine setup,
+test output, wrapper changes and tool diagnostics stay internal.
 
 For failed tools, inaccessible pages, missing parsers or evidence gaps, use the
 [research recovery guide](research-recovery.md). Probe actual source reading;
@@ -14,10 +24,45 @@ official sources and their public navigation while disclosing limited discovery.
 Only when no source-reading route works should live evidence collection stop;
 search snippets alone cannot establish facts. Explicit `offline` stays offline.
 
+## Normalize the confirmed intake
+
+Keep all twenty topic keys regardless of conversational question order. After
+collection, `scripts.questionnaire_intake.build_profile_from_questionnaire(...)`
+accepts a Python mapping with **integer keys 1–20** and produces a v3
+`PlanningProfile`. `parse_numbered_questionnaire(...)` is only compatibility
+import for a complete numbered document volunteered by the user, not an intake
+prerequisite. JSON answer files use string keys; the `start --answers` CLI
+converts them internally. Prefer `--profile` if a confirmed v3 export exists.
+
+For topic 8, preserve school rank as the primary observation and keep each joint
+exam rank in `additional_observations`: `scope` is `city_joint` or
+`province_joint`, and `source` is `joint_exam_report`. Do not replace several
+observations with one. Topic 20 readiness keys are `english_readiness`,
+`interview_readiness` and `physical_readiness`; unanswered readiness, strengths
+or research experience remain `unknown` or empty. Read `ProvinceConfig.mode`
+from the trusted province registry and use the canonical subject key. Do not
+hard-code province modes or change the student's selected subjects.
+
+`scripts/host_workflow.py` calls `scripts/planning_session.py` to retain one
+state and replay typed receipts across processes. It only consumes the confirmed
+profile, canonical QueryPlan and fresh evidence bundle. Maintenance checks may
+run before confirmation on isolated test data; student-specific planning and
+research begin only after the user confirms the collected profile.
+
 ## Command loop
 
 Run the Python module commands with the installed Skill root as the command's
 working directory. Keep all session files in the separate private workspace.
+
+After profile confirmation, `start` performs `init`, `confirm`, capability
+preflight, canonical QueryPlan binding and a journal checkpoint internally.
+Pass only truly callable `search`, `browse` and `vision` capabilities;
+`local_exec` and `file_output` are separate workflow gates. Preflight tiers are
+`full`, `standard` and `offline`; reduced capability lowers coverage, not evidence
+standards. Exit code `2` means invalid input, extraction or evidence with the
+last checkpoint retained; `3` means an optional capability is unavailable.
+Successful initialization reaches `query_plan_ready` and returns the session ID
+and typed next tasks. These are internal readiness details, not a report.
 
 Create a private workspace and a UTF-8 normalized-answer file, then start once:
 
@@ -31,6 +76,16 @@ export, use `--profile <private-workspace>/profile.json` instead. For recovery
 from older host calls, `--answers` also detects this exported profile shape.
 Its digest and mode are checked; never rebuild answered questions just to change
 the input format. An existing session should be resumed, not initialized again.
+
+For recovery, reuse the original workspace and session with `brief`. Use `next`
+to inspect the stage and resume `ingest`, `unavailable` or `finish` only for
+requested deep verification. `PlanningWorkflow.resume` calls
+`journal.load(session_id)` with `PlanningSessionReplayContext` as the sole replay
+context; its methods handle `finalize_evidence`, `calculate` and `publish`.
+`status` snapshots, session/manifest digests and caller-rebuilt JSON do not
+restore completed receipts or replace factory replay. Keep the same private
+journal and validated evidence bundle; preserve the last valid checkpoint if
+loading fails, without re-asking already answered questions.
 
 `start` and `next` return `report_generated=false`: they have not generated a
 report. `first_delivery` is workflow guidance, not proof of a brief run.

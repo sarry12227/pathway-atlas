@@ -1,5 +1,7 @@
 # Claude Code host capability mapping
 
+Start with the current student question using the [SKILL entrypoint](../../SKILL.md). Necessary authorized setup, testing or wrapper maintenance stays quiet and can run while awaiting an answer when the host supports it. Track actual background work, retain one intake draft and resume without another start choice; only a blocker requiring user action interrupts. The mappings below are used when their capability is needed, not recited before intake.
+
 Default delivery: after profile confirmation and start, follow [quick planning](../quick-planning.md) and call `brief`. Render its `report_text` directly in the fixed seven-part order: score/rank, local 3/4/5 schools, three pathway families with 1/1/1 examples, other feasible pathways, current actions. The deep research matrix need not finish before this planning reference. The stage mappings and receipt rules below describe optional deep verification with `finish`; do not apply their all-tasks-completed requirement to `brief`.
 - Only for requested deep verification, when starting or resuming discovery, extraction, or evidence work, read the [retrieval playbook](../retrieval-playbook.md).
 - For deep certification, before classifying, deduplicating, admitting, or resolving a source conflict, read the [source policy](../source-policy.md).
