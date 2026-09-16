@@ -632,6 +632,7 @@ class InstructionContractTest(unittest.TestCase):
             + [("retrieval-playbook.md", "research-recovery.md"),
                ("host-workflow.md", "../SKILL.md"),
                ("host-workflow.md", "research-recovery.md"),
+               ("host-workflow.md", "questionnaire.md"),
                ("host-workflow.md", "quick-planning.md")],
         )
 

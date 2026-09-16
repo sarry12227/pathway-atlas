@@ -26,6 +26,16 @@ search snippets alone cannot establish facts. Explicit `offline` stays offline.
 
 ## Normalize the confirmed intake
 
+Before rendering a grade question, use the July 1 cohort rule in
+[the questionnaire](questionnaire.md), section 年级与高考年份.
+`python -m scripts.questionnaire_intake --grade-options` supplies current
+Asia/Shanghai date-based labels without opening a session or altering any
+profile. It is an intake helper, not a new startup prerequisite. Preserve an
+explicit exam year in topic 4; never derive it from `research_year` or
+recalculate it during session replay. Without execution, apply the same rule
+using the host's reliable current date; without that date, omit years from
+the grade options and ask the expected exam year next.
+
 Keep all twenty topic keys regardless of conversational question order. After
 collection, `scripts.questionnaire_intake.build_profile_from_questionnaire(...)`
 accepts a Python mapping with **integer keys 1–20** and produces a v3

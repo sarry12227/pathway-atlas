@@ -10,6 +10,7 @@ profile fields the questionnaire did not establish.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from datetime import date, datetime, timedelta, timezone
 import re
 from types import MappingProxyType
 from typing import Any
@@ -46,6 +47,25 @@ _JOINT_RANK_SCOPES = frozenset({"city_joint", "province_joint"})
 
 class QuestionnaireIntakeError(ValueError):
     """The host could not form one complete, anonymous twenty-answer set."""
+
+
+def grade_year_options(*, as_of: date | None = None) -> dict[str, Any]:
+    """Suggest current cohort labels; never rewrite a confirmed student profile."""
+    if as_of is None:
+        as_of = datetime.now(timezone(timedelta(hours=8))).date()
+    if type(as_of) is not date:
+        raise ValueError("as_of must be a calendar date")
+    final_year_exam = as_of.year + (as_of.month >= 7)
+    options = [
+        {"grade": grade, "exam_year": final_year_exam + offset,
+         "label": f"{grade}（预计{final_year_exam + offset}年高考）"}
+        for grade, offset in (("高一", 2), ("高二", 1), ("高三", 0))
+    ]
+    options.append({"grade": "其他", "exam_year": None,
+                    "label": "其他／不确定（如已参加高考、复读或社会考生，请补充）"})
+    return {"as_of": as_of.isoformat(), "timezone": "Asia/Shanghai",
+            "question": "孩子目前读几年级？（单选；暑假按即将升入的年级）",
+            "options": options}
 
 
 def parse_numbered_questionnaire(transcript: str) -> Mapping[int, str]:
@@ -312,5 +332,18 @@ def build_profile_from_questionnaire(answers: Mapping[int, object]) -> PlanningP
 __all__ = [
     "QuestionnaireIntakeError",
     "build_profile_from_questionnaire",
+    "grade_year_options",
     "parse_numbered_questionnaire",
 ]
+
+
+if __name__ == "__main__":
+    import argparse
+    import json
+
+    parser = argparse.ArgumentParser(description="Generate one date-aware grade question for the host.")
+    parser.add_argument("--grade-options", action="store_true", required=True)
+    parser.add_argument("--as-of", type=date.fromisoformat, help="Actual consultation date, YYYY-MM-DD; defaults to today in Shanghai.")
+    args = parser.parse_args()
+    # ASCII JSON also decodes reliably on hosts whose Windows console is GBK.
+    print(json.dumps(grade_year_options(as_of=args.as_of), ensure_ascii=True))
