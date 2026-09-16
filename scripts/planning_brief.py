@@ -723,6 +723,30 @@ def _render_groups(groups, *, counts, personal_rank, pathway=False):
     return lines
 
 
+def _position_explanation(positioning):
+    """Describe the route already calculated, without adding another estimate."""
+    method = positioning["method"]
+    if method == "exam_cutoffs" and positioning["score"] is not None:
+        pairs = positioning["cutoff_calculation"]["used_pairs"]
+        if len(pairs) == 2:
+            left, right = pairs
+            explanation = (f"本次考试的{left[0]:g}、{right[0]:g}分划线，分别对应高考参照的"
+                           f"{left[1]:g}、{right[1]:g}分；保留孩子在两条线之间的相对位置来折算分数。")
+        else:
+            line, target = pairs[0]
+            explanation = (f"先看本次成绩与{line:g}分划线相差多少，再把同样的分差加到对应的"
+                           f"高考参照{target:g}分上。")
+        if positioning["central_rank"] is None:
+            return explanation + "省排还需同一年、本省同科类的一分一段表，现阶段先保留分数参考。"
+        return explanation + "再由同一年、本省同科类的一分一段表查找或估算省排。"
+    if method in {"school_rank", "school_report"} and positioning["central_rank"] is not None:
+        explanation = "根据已读到的学校往年成绩与排名资料，估算这次校排大致对应的省排。"
+        if positioning["score"] is None:
+            return explanation + "高考参考分数还需对应年份、同一省份科类的一分一段表，先按省排研究学校。"
+        return explanation + "参考分数再按注明年份、同一省份科类的一分一段表换算，未把本次校考分数直接当高考分。"
+    return None
+
+
 def build_planning_brief(profile: PlanningProfile, payload: dict, *, research_year: int) -> dict:
     """Produce a fixed planning reference from a confirmed profile and read sources."""
     if type(profile) is not PlanningProfile or payload.get("schema_version") != "1.0":
@@ -759,8 +783,15 @@ def build_planning_brief(profile: PlanningProfile, payload: dict, *, research_ye
         lines.append("以下先给有来源的学校目标梯度及路径，待省排补齐后更新个人冲稳保。")
     else:
         lines.append(f"个人高考分数和省排暂缺可比校准：{positioning['basis']}。下面先给有来源的典型学校目标梯度和路径；这些档位不是已测得的个人冲稳保，不把校内裸分直接当高考分。")
+    explanation = _position_explanation(positioning)
+    if explanation:
+        lines.append("**怎样折算**：" + explanation)
     lines += ["", "## 二、本省普通批：冲3所、稳4所、保5所", "",
               "优先匹配已选专业与本省地域；以下档位用于规划，保档也不代表保证录取。"]
+    if center is not None and any(item["personal_tier"] for items in groups["ordinary"].values() for item in items):
+        lower, upper = positioning["strategy_bounds"]
+        lines.append(f"**怎样分档**：位次数越小，通常要求的成绩越高。对有可比历史位次门槛的候选，本次把{lower:g}位至{center:g}位之前列为冲，"
+                     f"{center:g}位至{upper:g}位之前列为稳，{upper:g}位及以后列为保；再按地域、专业和已知报考条件筛选。")
     if positioning["method"] in {"official_rank", "official_score"}:
         lines.append("已知高考位次不再估算；分档采用位次上下20%的规划窗口，不表示本人位次有20%误差。")
     lines += _render_groups(groups["ordinary"], counts=ORDINARY_COUNTS, personal_rank=center is not None)

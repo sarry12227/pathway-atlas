@@ -458,6 +458,36 @@ class PlanningWorkflow:
         return [{key: record.to_dict()[key] for key in keys} for record in snapshot.candidates]
 
 
+def _failure_feedback(error):
+    """Keep diagnostics useful to the host without echoing private input."""
+    if isinstance(error, ModuleNotFoundError):
+        code = "capability_unavailable"
+        message = "有一项辅助功能暂时用不了，我会先尝试现有方式继续处理。"
+        action = "Check the needed capability; try an available reader or chat/Markdown delivery. Do not claim an export exists."
+    elif isinstance(error, StructuredAdapterError):
+        code = "source_unreadable"
+        message = "这份资料暂时没能准确读出，我会换一种方式核对，能确认的内容先继续。"
+        action = "Try an available reader or another readable source within the research budget; never invent extracted values."
+    elif isinstance(error, FileNotFoundError):
+        code = "input_unavailable"
+        message = "暂时没能读到这一步需要的资料，我会先核对现有记录并尝试恢复。"
+        action = "Locate the host-owned input or existing session; preserve the conversation draft. Do not ask the family for an internal path."
+    elif isinstance(error, PermissionError):
+        code = "storage_unavailable"
+        message = "当前资料读取或保存受到限制，我会先尝试其他可用方式。"
+        action = "Check access within existing permissions, retaining the original session. Request user action only for a verified unavoidable access gate."
+    elif isinstance(error, OSError):
+        code = "operation_unavailable"
+        message = "这一步暂时没有完成，我会先处理当前能确认的内容，再尝试恢复。"
+        action = "Inspect the host operation; attempt a bounded available fallback. Verify actual saved progress before claiming recovery."
+    else:
+        code = "input_invalid"
+        message = "有一处资料需要重新核对，我会先检查现有记录，已能确认的内容继续处理。"
+        action = "Check host-prepared inputs and evidence against their contract. Do not change student facts or bypass validation; reconfirm actual profile changes."
+    return {"ok": False, "report_generated": False, "error_code": code,
+            "user_message": message, "host_action": action, "user_action_required": False}
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=("start", "next", "brief", "ingest", "unavailable", "finish"))
@@ -525,11 +555,11 @@ def main(argv=None):
             print(json.dumps({**workflow.status(limit=args.limit), "command": args.command,
                               "report_generated": False}, ensure_ascii=False))
         return 0
-    except ModuleNotFoundError:
-        print("host-workflow: optional capability unavailable; Markdown remains available", file=sys.stderr)
+    except ModuleNotFoundError as error:
+        print(json.dumps(_failure_feedback(error), ensure_ascii=False), file=sys.stderr)
         return 3
     except (ValueError, TypeError, OSError, KeyError, IndexError, StructuredAdapterError) as error:
-        print(f"host-workflow: {type(error).__name__}: {error}; last checkpoint retained", file=sys.stderr)
+        print(json.dumps(_failure_feedback(error), ensure_ascii=False), file=sys.stderr)
         return 2
 
 

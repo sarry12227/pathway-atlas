@@ -68,6 +68,8 @@
 
 上面是可复制的开场方式，不是示例学生的评估结果。**你不用一次回答20题，也不用创建JSON、填写内部文件路径或执行研究命令。**
 
+想先看看怎样回答、会得到什么？按需查看[使用示例与避坑指引](docs/using-pathway-atlas.md)，或阅读[完整的虚构输出样例](docs/examples/fictional-planning.md)；无需在开始前读完。
+
 ## 常见问题
 
 **还没高考、没有省排名，也能开始吗？**
@@ -96,7 +98,7 @@
 
 **在哪里查看最新版？**
 
-[GitHub 主源](https://github.com/sarry12227/pathway-atlas)与[Gitee 镜像](https://gitee.com/sarry1/pathway-atlas)同步维护。当前为 **v0.2.5 公开预览**；第三方目录可能有缓存，已收录不等于已更新，逐项状态见[分发记录](DISTRIBUTION.md)。
+[GitHub 主源](https://github.com/sarry12227/pathway-atlas)与[Gitee 镜像](https://gitee.com/sarry1/pathway-atlas)同步维护。当前为 **v0.2.6 公开预览**；第三方目录可能有缓存，已收录不等于已更新，逐项状态见[分发记录](DISTRIBUTION.md)。
 
 院校推荐采用统一的[全国层次参考](references/national-opportunity-order.md)，分数和位次按考生所在省份换算。例如综评先比较上纽，再比较同层的北外与昆杜，随后向深北莫下探；港澳先比较相近学校层次，再在同层优先香港。相邻层次帮助拓展机会，同层学校保留专业适配更好的主选与备选。
 

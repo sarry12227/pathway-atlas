@@ -59,10 +59,22 @@ preflight, canonical QueryPlan binding and a journal checkpoint internally.
 Pass only truly callable `search`, `browse` and `vision` capabilities;
 `local_exec` and `file_output` are separate workflow gates. Preflight tiers are
 `full`, `standard` and `offline`; reduced capability lowers coverage, not evidence
-standards. Exit code `2` means invalid input, extraction or evidence with the
-last checkpoint retained; `3` means an optional capability is unavailable.
+standards. Exit code `2` means invalid input, extraction, evidence or host
+operation; `3` means an optional capability is unavailable. Neither code proves
+that a checkpoint or report was written. Verify saved state before claiming it.
 Successful initialization reaches `query_plan_ready` and returns the session ID
 and typed next tasks. These are internal readiness details, not a report.
+
+Expected runtime failures emit one JSON object to stderr with `ok=false`,
+`report_generated=false`, `error_code`, `user_message`, `host_action` and
+`user_action_required=false`. The latter means the exception alone does not
+establish a need for family intervention. Execute `host_action` privately using
+the recovery guide, preserving validation boundaries and existing data. If a
+limitation affects the delivered result, use the short Chinese `user_message`
+and the actual next step; do not paste the JSON into chat. A genuinely verified
+user-only access gate can still require minimal action. Routine failures do not
+require the family to choose a recovery route. Argument/help output remains a
+developer interface, not a family-facing answer.
 
 Create a private workspace and a UTF-8 normalized-answer file, then start once:
 
