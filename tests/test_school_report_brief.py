@@ -224,14 +224,17 @@ class SchoolReportBriefTest(unittest.TestCase):
         self.assertIn("现阶段行动", result["report_text"])
 
     def test_confirmed_serialized_profile_starts_and_real_brief_marks_generated(self):
+        from tests.test_intake_progress import resolved_intake
         profile, payload = report_fixture()
         root = Path(__file__).resolve().parents[1]
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)
             profile_file = workspace / "profile.json"
             profile_file.write_text(json.dumps(profile.to_dict(), ensure_ascii=False), encoding="utf-8")
+            intake_file = workspace / "intake.json"
+            intake_file.write_text(json.dumps(resolved_intake(profile), ensure_ascii=True), encoding="utf-8")
             started = subprocess.run([sys.executable, "-m", "scripts.host_workflow", "start",
-                "--workspace", directory, "--profile", str(profile_file), "--confirmed"],
+                "--workspace", directory, "--profile", str(profile_file), "--intake", str(intake_file), "--confirmed"],
                 cwd=root, capture_output=True, encoding="utf-8", timeout=30)
             self.assertEqual(started.returncode, 0, started.stderr)
             status = json.loads(started.stdout)

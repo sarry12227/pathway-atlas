@@ -17,7 +17,7 @@ $ python -m scripts.planning_session --help
 
 ## 1. 能力预检
 
-画像 `confirm` 后，宿主把完整 normalized20 answers 保存在私有文件，并调用 `python -m scripts.host_workflow start --workspace … --answers … --confirmed`。只把运行时真实可用的 search、browse、vision 作为重复的 `--host-capability` 参数传入；门面探测 optional modules，创建 replay journal，保存画像、capability report 和 canonical QueryPlan。不得另造能力名或档位别名，也不要求用户运行命令或提供路径。
+画像 `confirm` 后，宿主把完整 normalized20 answers 保存在私有文件，并调用 `python -m scripts.host_workflow start --workspace … --answers … --intake … --confirmed`。只把运行时真实可用的 search、browse、vision 作为重复的 `--host-capability` 参数传入；门面探测 optional modules，创建 replay journal，保存画像、capability report 和 canonical QueryPlan。不得另造能力名或档位别名，也不要求用户运行命令或提供路径。
 
 | 类型 | 有限值 |
 |---|---|
@@ -28,7 +28,7 @@ $ python -m scripts.planning_session --help
 统一 capability 入口只在这里定义；方括号表示仅在当前会话确实可调用该能力时加入对应参数，不是字面参数：
 
 ```text
-python -m scripts.host_workflow start --workspace … --answers … --confirmed [--host-capability search] [--host-capability browse] [--host-capability vision]
+python -m scripts.host_workflow start --workspace … --answers … --intake … --confirmed [--host-capability search] [--host-capability browse] [--host-capability vision]
 python scripts/preflight.py [--host-capability search] [--host-capability browse] [--host-capability vision]
 ```
 

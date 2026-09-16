@@ -227,7 +227,9 @@ class InstructionContractTest(unittest.TestCase):
                 "host-decoded QR payload",
                 "missing",
             ),
-            "local_exec": ("stop before deterministic calculation", "disclose the limitation", "preparation advice"),
+            "local_exec": ("stop before deterministic calculation", "disclose the limitation",
+                           "Complete intake and profile confirmation first", "seven-part reference",
+                           "Label uncomputed values unknown", "never emulate a calculated result"),
             "file_output": ("path-neutral structured handoff", "do not claim", "written"),
             "offline": (
                 "no-live-network",

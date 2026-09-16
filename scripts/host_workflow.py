@@ -31,6 +31,7 @@ from scripts.planning_session import (
 from scripts.preflight import detect_capabilities
 from scripts.query_plan import build_query_plan, load_province_catalog
 from scripts.questionnaire_intake import build_profile_from_questionnaire
+from scripts.intake_progress import IntakeGateError, assess_intake, require_confirmed_intake
 
 
 def _digest(value):
@@ -460,6 +461,11 @@ class PlanningWorkflow:
 
 def _failure_feedback(error):
     """Keep diagnostics useful to the host without echoing private input."""
+    if isinstance(error, IntakeGateError):
+        return {"ok": False, "report_generated": False, "error_code": "intake_incomplete",
+                "user_message": error.progress["next_question"],
+                "host_action": "First rebuild missing coverage from retained real user replies and confirmation; do not re-ask known facts or invent quotes. Then ask only a genuinely missing question or confirm the profile. Do not generate a personal report before readiness.",
+                "user_action_required": False, "intake_progress": error.progress}
     if isinstance(error, ModuleNotFoundError):
         code = "capability_unavailable"
         message = "有一项辅助功能暂时用不了，我会先尝试现有方式继续处理。"
@@ -498,6 +504,7 @@ def main(argv=None):
     profile_input.add_argument("--profile", type=Path, help="already confirmed PlanningProfile v3 JSON")
     parser.add_argument("--submission", type=Path)
     parser.add_argument("--confirmed", action="store_true")
+    parser.add_argument("--intake", type=Path, help="Private field-level intake coverage and profile confirmation")
     parser.add_argument("--host-capability", action="append", default=[])
     parser.add_argument("--task", action="append", default=[])
     parser.add_argument("--reason")
@@ -528,6 +535,9 @@ def main(argv=None):
                 except ValueError:
                     raise ValueError("--answers needs keys 1–20; use --profile for a confirmed v3 profile") from None
                 profile = build_profile_from_questionnaire(answers)
+            if args.intake is None:
+                raise IntakeGateError(assess_intake({"schema_version": "1.0", "responses": {}}))
+            require_confirmed_intake(json.loads(args.intake.read_text(encoding="utf-8-sig")), profile.digest)
             workflow = PlanningWorkflow.start(
                 args.workspace, profile, detect_capabilities(set(args.host_capability)), confirmed=args.confirmed,
             )

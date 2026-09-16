@@ -26,6 +26,21 @@ search snippets alone cannot establish facts. Explicit `offline` stays offline.
 
 ## Normalize the confirmed intake
 
+New CLI sessions require `--intake <private-workspace>/intake.json` in addition
+to `--confirmed`, for both `--answers` and `--profile`. Maintain the per-field
+user response coverage described in the questionnaire. Run
+`python -m scripts.intake_progress --state <private-workspace>/intake.json`
+during collection: `collecting` supplies one missing question; `confirming`
+means show the complete profile; only a real confirmation bound to both the
+current profile digest and progress digest permits `start`. A profile full of
+default unknown values does not establish that the questions were asked.
+Existing initialized sessions resume normally. The low-level Python API is a
+trusted integration boundary, not a workaround for an incomplete CLI intake.
+If the host merely forgot the progress file, restore it from retained genuine
+replies and confirmation first; a missing file does not mean the parent must
+answer the questionnaire again. Error `intake_incomplete` carries the current
+coverage state. Interpret it with the actual conversation before asking.
+
 Before rendering a grade question, use the July 1 cohort rule in
 [the questionnaire](questionnaire.md), section 年级与高考年份.
 `python -m scripts.questionnaire_intake --grade-options` supplies current
@@ -89,7 +104,7 @@ developer interface, not a family-facing answer.
 Create a private workspace and a UTF-8 normalized-answer file, then start once:
 
 ```text
-python -m scripts.host_workflow start --workspace <private-workspace> --answers <private-workspace>/answers.json --confirmed [--host-capability search] [--host-capability browse] [--host-capability vision]
+python -m scripts.host_workflow start --workspace <private-workspace> --answers <private-workspace>/answers.json --intake <private-workspace>/intake.json --confirmed [--host-capability search] [--host-capability browse] [--host-capability vision]
 ```
 
 `--answers` accepts the normalized mapping with keys `1` through `20`.
