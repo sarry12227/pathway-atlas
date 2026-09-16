@@ -2,23 +2,32 @@
 
 本页记录 `pathway-atlas` 的公开主源、镜像与第三方目录状态。GitHub `main` 是唯一可信发布源；Gitee 镜像同一提交。历史正式分发包固定到 `v0.1.0`（`5711107e45d3f679f60538d8e1904a465e887ccf`），不随 main 修改。平台安装包只做已列明的文件筛选与打包元数据适配，不维护不同的运行代码。
 
-主源 `0.2.5` 开场直接问孩子的情况；必要加载、调试、测试与已授权本地维护在等待回答时静默进行，仅在确实需要本人操作时打断，准备完成后直接衔接，无需再选择是否开跑。无后台能力时分轮处理，不虚报任务。此前学校与联考划线收集继续保留，支持图片或逐轮文字，按可比线差或相邻点插值先估高考参考分数、再查省排；无读图能力或无可比划线时回退文字与喜报。全国院校和路径层次统一参照，各省分数分别校准，同层保留适配与备选。强基、综评比较面向生源省的全国候选，港澳同层香港优先。普通批继续优先本省和已选专业。没有可比划线时使用网上喜报进行快速参考：单份可读第三方文章、抖音分享或学校发布的分数段人数、上线率和层次人数均可形成披露出处与假设的校位锚点，估算省排并反查高考分数。固定本省冲3稳4保5、强基/综评/港澳各冲1稳1保1及行动安排，实际运行 `brief` 后直接在聊天中展示。首轮研究有预算，旧证据与深度研究任务继续保留；真实缺额与未校准部分分别说明。此前多专业摘要修复、逐题问答和暖色书页星途 Logo 均保留。完整介绍以 README 为准，部分平台展示 SKILL.md，两处均同步维护。下表逐行记录各平台最近一次单独核验的版本；条目已收录不表示缓存已刷新。腾讯兼容包使用平台版本 `1.1.5`，对应主源 `0.2.5`，需在已有条目中更新，独立技能图标也需单独上传。
+主源 `0.2.6` 新增使用示例与常见误解、通俗运行异常反馈，以及本次估分和分档依据说明。开场直接问孩子的情况；必要加载、调试、测试与已授权本地维护在等待回答时静默进行，仅在确实需要本人操作时打断，准备完成后直接衔接，无需再选择是否开跑。无后台能力时分轮处理，不虚报任务。此前学校与联考划线收集继续保留，支持图片或逐轮文字，按可比线差或相邻点插值先估高考参考分数、再查省排；无读图能力或无可比划线时回退文字与喜报。全国院校和路径层次统一参照，各省分数分别校准，同层保留适配与备选。强基、综评比较面向生源省的全国候选，港澳同层香港优先。普通批继续优先本省和已选专业。没有可比划线时使用网上喜报进行快速参考：单份可读第三方文章、抖音分享或学校发布的分数段人数、上线率和层次人数均可形成披露出处与假设的校位锚点，估算省排并反查高考分数。固定本省冲3稳4保5、强基/综评/港澳各冲1稳1保1及行动安排，有执行能力时实际运行 `brief` 后直接在聊天中展示；无法执行代码时按相同七部分交付真实材料可支持的参考，明确未运行程序。首轮研究有预算，旧证据与深度研究任务继续保留；真实缺额与未校准部分分别说明。此前多专业摘要修复、逐题问答和暖色书页星途 Logo 均保留。完整介绍以 README 为准，部分平台展示 SKILL.md，两处均同步维护。下表逐行记录各平台最近一次单独核验的版本；条目已收录不表示缓存已刷新。腾讯兼容包使用平台版本 `1.1.6`，对应主源 `0.2.6`，需在已有条目中更新，独立技能图标也需单独上传。
 
 状态只使用以下五种取值：`pending`（尚未提交或验证）、`submitted`（已提交，等待公开收录）、`indexed`（已直接验证公开详情页）、`rejected`（平台明确拒绝）、`unavailable`（平台或官方提交入口不可用）。`submitted` 不等同于已经公开收录；已有旧版本的条目也不代表本次更新已公开。
 
 | Platform | Official URL | Method | Version/Commit | Status | Listing URL | Last verified | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| GitHub | https://github.com/sarry12227/pathway-atlas | Public repository and release | 0.2.5 / source 805e523 | indexed | https://github.com/sarry12227/pathway-atlas | 2026-09-12 | 直接提问、静默准备与自动衔接已推送；匿名回读11个关键文件与源提交逐字节一致。历史v0.1.0 Release保留原内容。 |
-| Gitee | https://gitee.com/sarry1/pathway-atlas | Public mirror and tag | 0.2.5 / source 805e523 | indexed | https://gitee.com/sarry1/pathway-atlas | 2026-09-12 | 与GitHub同一源提交；匿名回读11个关键文件逐字节一致。 |
+| GitHub | https://github.com/sarry12227/pathway-atlas | Public repository and release | 0.2.6 / source b86d094 | indexed | https://github.com/sarry12227/pathway-atlas | 2026-09-16 | 通俗反馈、估分分档解释和使用指引已推送；匿名回读12个关键文件与源提交逐字节一致。README开头安装提示词与产品介绍保持原样。历史v0.1.0 Release保留原内容。 |
+| Gitee | https://gitee.com/sarry1/pathway-atlas | Public mirror and tag | 0.2.6 / source b86d094 | indexed | https://gitee.com/sarry1/pathway-atlas | 2026-09-16 | 与GitHub同一源提交；匿名回读12个关键文件逐字节一致。 |
 | SkillsMP | https://skillsmp.com | Public GitHub discovery | cached source | indexed | https://skillsmp.com/creators/sarry12227/pathway-atlas/skill | 2026-09-07 | 已核验公开名称、主源与安装方式；当前图片是作者头像，正文缓存尚未出现新版项目 Logo。官方自动采集，不提供手动上传。 |
 | skills.sh | https://skills.sh | npx skills add discovery | cached source | indexed | https://www.skills.sh/sarry12227/pathway-atlas/pathway-atlas | 2026-09-07 | 公开详情存在；当前未展示项目图，配置无独立 Logo 字段。主源 SKILL 已加新版图，页面缓存尚未刷新。 |
 | skills.homes | https://skills.homes | Official listing inquiry | v0.1.0 | pending | — | 2026-09-06 | 官方 contact 页面仅提供邮件收录咨询；申请草稿已准备，尚未发送。 |
 | skillhub.club | https://www.skillhub.club | Official ClawHub synchronization | v0.1.0 | pending | — | 2026-09-06 | 官方说明同步 ClawHub。直接发布 CLI 的 100 KiB 单文件限制会跳过两个必要模块，因此等待完整上游收录。 |
-| SkillHub.cn | https://skillhub.cn | Owner website version update | prepared 1.1.5 / source 0.2.5 | pending | https://skillhub.cn/skills/user_d9d3e443/pathway-atlas | 2026-09-12 | 1.1.5兼容包已完成字节核验，沿用用户自行上传方式，尚未提交本次更新。 |
+| SkillHub.cn | https://skillhub.cn | Owner website version update | prepared 1.1.6 / source 0.2.6 | pending | https://skillhub.cn/skills/user_d9d3e443/pathway-atlas | 2026-09-16 | 1.1.6兼容包已完成字节核验，沿用用户自行上传方式，尚未提交本次更新。 |
 | SkillsCat | https://skills.cat | Official repository submission | cached source | indexed | https://skills.cat/skills/sarry12227/pathway-atlas | 2026-09-07 | 本次官方 submit 返回条目已存在；公开详情仍为旧正文缓存、作者头像，尚未出现新版项目 Logo。 |
-| ClawHub | https://clawhub.ai | Official registry publish | public latest 0.2.4 / target 0.2.5 | submitted | https://clawhub.ai/sarry12227/pathway-atlas | 2026-09-12 | 204文件包已获单次最终发布成功回执；尚未验证0.2.5公开，不重复提交。额外MIT-0授权沿用版权所有者确认。 |
+| ClawHub | https://clawhub.ai | Official registry publish | public latest 0.2.5 / target 0.2.6 | submitted | https://clawhub.ai/sarry12227/pathway-atlas | 2026-09-16 | 208文件包已获单次最终发布成功回执；尚未验证0.2.6公开，不重复提交。额外MIT-0授权沿用版权所有者确认。 |
 
 ## 安装包与平台差异
+
+使用指引与解释改进包固定到 `b86d094f628e820dc4d5d7266fea30e91330bd92`（主源 `0.2.6`）；作者私有核查记录不进入公开包：
+
+- `pathway-atlas-clawhub-0.2.6.zip`：208文件，SHA-256为`2369186c05f2594b2dda263302330deb4a241b649f74e25e71a2bc1b0c7af36a`。官方文件指纹为`393b12058885ea15a57e02284b7ae064e4f570e9521cdad76b3552f94b439d42`。
+- `pathway-atlas-skillhub-1.1.6-runtime.zip`：102文件，SHA-256为`ac0915cf409d05285ef25a4d46547e62fb9d44c24290f9b790167b011f61b7e2`。78个运行、配置、参考及Skill入口文件与源逐字节相同，仅沿用下述腾讯包装适配。
+
+本次145项相关检查通过，涵盖异常反馈、估分与分档说明、划线与喜报、全国院校比较、固定输出和宿主恢复交付；全仓链接、版本与发布文件扫描通过。8种独立模型回复取样检查交互指令，不等同于真实安装或完整咨询全流程验证。本次未重新运行全量套件，也未将历史测试或平台评测当成新版认证。新增完整输出样例使用虚构学校和材料，不作为招生数据。
+
+以下为历史更新包记录。
 
 直接咨询与静默准备包固定到 `805e5236e48b4229ce8f303b80a765639762bc37`（主源 `0.2.5`）；用户真实聊天记录保留在私有工作区，不进入公开包：
 
