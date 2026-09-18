@@ -21,6 +21,13 @@ ENV/
 *.env
 
 # Runtime workspaces and generated output
+/.scratch/
+/docs/superpowers/
+/tests/
+/dist/
+/build/
+/node_modules/
+/private/
 output/
 work/
 .cache/

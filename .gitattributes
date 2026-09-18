@@ -1,5 +1,4 @@
 * text=auto eol=lf
-tests/fixtures/evidence/** text eol=lf
 
 *.7z -text
 *.doc -text

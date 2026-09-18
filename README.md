@@ -98,7 +98,7 @@
 
 **在哪里查看最新版？**
 
-[GitHub 主源](https://github.com/sarry12227/pathway-atlas)与[Gitee 镜像](https://gitee.com/sarry1/pathway-atlas)同步维护。当前为 **v0.2.9 公开预览**；第三方目录可能有缓存，已收录不等于已更新，逐项状态见[分发记录](DISTRIBUTION.md)。
+[GitHub 主源](https://github.com/sarry12227/pathway-atlas)与[Gitee 镜像](https://gitee.com/sarry1/pathway-atlas)同步维护。当前为 **v0.2.9 公开预览**；仓库保留技能运行、安装和使用所需文件。第三方目录可能有缓存，已收录不等于已更新。
 
 院校推荐采用统一的[全国层次参考](references/national-opportunity-order.md)，分数和位次按考生所在省份换算。例如综评先比较上纽，再比较同层的北外与昆杜，随后向深北莫下探；港澳先比较相近学校层次，再在同层优先香港。相邻层次帮助拓展机会，同层学校保留专业适配更好的主选与备选。
 
@@ -165,13 +165,13 @@
 python -m pip install -e .
 ```
 
-若要运行全部合成演示、测试以及 XLS/XLSX/PDF/DOCX 能力：
+如需 XLS/XLSX/PDF 解析和 DOCX 导出能力：
 
 ```bash
-python -m pip install -e ".[all,test]"
+python -m pip install -e ".[all]"
 ```
 
-可选依赖组与 `pyproject.toml` 保持一致：`documents` 提供 DOCX，`spreadsheets` 提供 XLS/XLSX，`pdf` 提供 pdfplumber 与 pypdf 解析能力，`all` 汇总这三组，`test` 提供测试工具。仓库没有伪装成 OCR 引擎的依赖组；OCR 依赖当前宿主实际执行并核验的可靠视觉提取。
+可选依赖组与 `pyproject.toml` 保持一致：`documents` 提供 DOCX，`spreadsheets` 提供 XLS/XLSX，`pdf` 提供 pdfplumber 与 pypdf 解析能力，`all` 汇总这三组。仓库没有伪装成 OCR 引擎的依赖组；OCR 依赖当前宿主实际执行并核验的可靠视觉提取。
 
 ### 作为 Agent Skill 安装
 
@@ -192,8 +192,6 @@ git clone https://gitee.com/sarry1/pathway-atlas.git <skills-root>/pathway-atlas
 
 安装后检查 `<skills-root>/pathway-atlas/SKILL.md` 的 frontmatter `name` 为 `pathway-atlas`，再重新加载宿主。两条 `git clone` 命令是主源与回退源，不要在同一目标目录重复执行。
 
-公开仓库、镜像和第三方 Skill 目录的逐项核验结果见 [分发状态](DISTRIBUTION.md)。只有能够直接打开并核对来源的详情页才会标记为已收录；等待审核不会写成发布成功。
-
 | 宿主 | 推荐位置或注册方式 | 本仓库适配 | 权威说明 |
 | --- | --- | --- | --- |
 | **Generic Agent** | 使用兼容开放 Agent Skills 规范的 Skill 根目录 | [Generic Agent 映射](references/hosts/generic.md) | [Agent Skills 规范](https://agentskills.io/specification) |
@@ -203,37 +201,18 @@ git clone https://gitee.com/sarry1/pathway-atlas.git <skills-root>/pathway-atlas
 
 重开会话后，可直接复制本页第一行提示词；也可以按宿主文档显式选择 `pathway-atlas`。宿主是否具备搜索、浏览和视觉能力仍需在每次会话中重新预检。
 
-## 合成演示
+## 运行能力检查
 
-以下固定样例均为**虚构测试数据**，不联网、不代表任何真实省份、学校或录取结果。先完成带全部 extras 的安装，然后在仓库根目录运行。
-
-查看当前 shell 的离线能力报告：
+具备执行能力的 Agent 可在技能根目录检查环境能力和问答入口：
 
 ```bash
 python scripts/preflight.py
+python -m scripts.intake_progress
 ```
 
-校验虚构的 `3+1+2` 省份数据与三方 C 级共识证据包：
+这两个命令只检查当前能力并返回起始问题，不代表已完成咨询或生成报告。真实规划仍从学生信息收集、画像确认和资料查证开始。完整的正文形式可查看[虚构输出样例](docs/examples/fictional-planning.md)。
 
-```bash
-python scripts/validate_data.py tests/fixtures/provinces/demo-312
-python scripts/validate_evidence.py tests/fixtures/evidence/three-source-consensus
-```
-
-用同一数据集、匿名画像和证据包生成 Markdown 到标准输出：
-
-```bash
-python scripts/generate_report.py --dataset tests/fixtures/provinces/demo-312 --profile tests/fixtures/profiles/demo.json --evidence tests/fixtures/evidence/three-source-consensus
-```
-
-DOCX 由宿主在完成问卷、检索和证据归一化后，从同一 immutable
-报告模型导出；用户不需要也不应手写画像 JSON、证据包路径或
-`canonical QueryPlan`。`docx_export.py` 的 v3 重放入口是宿主内部工具：
-它只接受当前画像、canonical QueryPlan 与新鲜认证证据包已绑定的上下文。
-在实际会话中直接要求 Agent 使用本 Skill 生成 DOCX；在没有该完整上下文时，
-工具会安全拒绝，而不是用演示 fixture 补造报告。
-
-这个最小证据样例只证明证据门禁和报告降级行为；它没有足够的投档行证据，因此报告会如实显示缺失覆盖，而不会制造院校推荐。`demo-33` 另行覆盖 `3+3` 科目组合。更多离线 QR、OCR、屏蔽值和转载去重场景位于 `tests/fixtures/replay/`。
+需要 Word 时，在实际会话中请 Agent 导出 DOCX。它与 Markdown 使用同一个报告模型；所需文档能力不可用时，保留对话正文与 Markdown 交付。
 
 ### 当前公开 CLI
 
@@ -253,7 +232,6 @@ python scripts/docx_export.py --help
 | [`scripts/generate_report.py`](scripts/generate_report.py) | 从已验证输入生成 Markdown |
 | [`scripts/docx_export.py`](scripts/docx_export.py) | 宿主内部：从 v3 已绑定报告模型生成 DOCX（不要求用户提供 JSON 或路径） |
 | [`scripts/compliance_scan.py`](scripts/compliance_scan.py) | 扫描报告文本的合规风险 |
-| [`scripts/live_smoke.py`](scripts/live_smoke.py) | 维护者可选的有界、只读官方入口健康检查；不更新事实，也不参与确定性正确性 |
 
 ## 证据与报告长什么样
 
@@ -274,17 +252,11 @@ python scripts/docx_export.py --help
 
 - 默认匿名：学生姓名、电话、身份证、住址、通信 ID 和凭证都不是运行所需字段，不进入查询词、证据包、缓存或日志。报告默认使用匿名文件名。
 - 证据默认留在本地临时工作目录；原始网页、附件和生成报告不提交到 Git。使用外部 OCR/QR 服务前还要确认内容不含个人信息。
-- 仓库中的代码和明确标记的虚构测试数据按 [MIT 许可证](LICENSE)提供。MIT 不自动授予第三方数据的再分发权；真实或外部数据仍受其来源条款约束，未确认许可时不随仓库发布。
-- 数据来源、许可审查、更正和删除边界见 [DATA_SOURCES.md](DATA_SOURCES.md)；提交数据或省份规则前请读 [CONTRIBUTING.md](CONTRIBUTING.md)。
+- 仓库代码按 [MIT 许可证](LICENSE)提供。MIT 不自动授予第三方数据的再分发权；真实或外部数据仍受其来源条款约束，未确认许可时不随仓库发布。
+- 数据来源、许可审查、更正和删除边界见 [DATA_SOURCES.md](DATA_SOURCES.md)。
 
 ## 限制与免责声明
 
 **AI 生成仅供参考。本项目不保证录取，不替代省级考试机构、高校招生部门或其他官方渠道的当年政策，也不提供法律、财务或教育决策承诺。**
 
-项目自 v0.1.0 起公开预览，当前版本见上方说明与[变更记录](CHANGELOG.md)。网站可访问性、当年数据是否发布、宿主能力和来源许可会影响可验证范围，仓库不附带全国实时录取数据库。任何正式填报或路径申报都应回到省级考试机构和高校当年官方信息复核。发现安全问题时请按 [SECURITY.md](SECURITY.md) 私下报告；一般问题与改进建议可通过 GitHub Issues 或[贡献指南](CONTRIBUTING.md)提交，切勿附带真实学生数据。
-
-## 测试
-
-```bash
-python -m unittest discover -s tests -v
-```
+项目自 v0.1.0 起公开预览，当前版本见上方说明。网站可访问性、当年数据是否发布、宿主能力和来源许可会影响可验证范围，仓库不附带全国实时录取数据库。任何正式填报或路径申报都应回到省级考试机构和高校当年官方信息复核。发现安全问题时请按 [SECURITY.md](SECURITY.md) 私下报告；一般问题与改进建议可通过 [GitHub Issues](https://github.com/sarry12227/pathway-atlas/issues)提交，切勿附带真实学生数据。
