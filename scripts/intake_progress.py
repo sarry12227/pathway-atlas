@@ -2,9 +2,13 @@
 from __future__ import annotations
 
 import argparse
+import copy
+from collections import Counter
 import hashlib
 import json
 from pathlib import Path
+
+from scripts.intake_questions import QUESTION_CARDS, question_text
 
 
 # One entry per independently answerable field, covering the original 20 topics.
@@ -93,9 +97,13 @@ class IntakeGateError(ValueError):
 
 def assess_intake(state, *, profile_digest=None):
     """Check declared coverage; the host must retain genuine user quotations."""
-    if not isinstance(state, dict) or state.get("schema_version") != "1.0":
-        raise ValueError("intake state must use schema_version 1.0")
-    if set(state) - {"schema_version", "responses", "confirmation"}:
+    if not isinstance(state, dict) or state.get("schema_version") not in {"1.0", "1.1"}:
+        raise ValueError("intake state must use schema_version 1.0 or 1.1")
+    bounded = state["schema_version"] == "1.1"
+    allowed = {"schema_version", "responses", "confirmation"}
+    if bounded:
+        allowed.add("question_history")
+    if set(state) - allowed:
         raise ValueError("unexpected intake state fields")
     responses = state.get("responses")
     if not isinstance(responses, dict) or set(responses) - REQUIRED_FIELDS.keys():
@@ -106,22 +114,84 @@ def assess_intake(state, *, profile_digest=None):
                 or not isinstance(response["quote"], str) or not response["quote"].strip()
                 or len(response["quote"]) > 4000):
             raise ValueError("resolved intake fields require an explicit user response quote")
+    history = state.get("question_history", [])
+    if not isinstance(history, list):
+        raise ValueError("question_history must be a list of actual question replies")
+    ids = {card["id"] for card in QUESTION_CARDS}
+    for turn in history:
+        if (not isinstance(turn, dict) or set(turn) != {"question_id", "quote"}
+                or turn["question_id"] not in ids
+                or not isinstance(turn["quote"], str) or not turn["quote"].strip()
+                or len(turn["quote"]) > 4000):
+            raise ValueError("question history requires a known question and genuine reply")
+    counts = Counter(turn["question_id"] for turn in history)
+    clarifications = sum(count - 1 for count in counts.values())
+    if any(count > 2 for count in counts.values()) or clarifications > 6:
+        raise ValueError("intake clarification budget exceeded")
     missing = [key for key in REQUIRED_FIELDS if key not in responses]
-    digest = hashlib.sha256(json.dumps(responses, ensure_ascii=False, sort_keys=True,
+    deferred, next_card, next_fields, kind = [], None, [], None
+    for card in QUESTION_CARDS:
+        remaining = [key for key in card["fields"] if key in missing]
+        if not remaining:
+            continue
+        count = counts[card["id"]]
+        critical_missing = any(key in card["critical"] for key in remaining)
+        if bounded and count and (count == 2 or clarifications == 6 or not critical_missing):
+            deferred.extend(remaining)
+            continue
+        if next_card is None:
+            next_card = card
+            next_fields = [key for key in remaining if key in card["critical"]] if count else remaining
+            kind = "clarification" if count else "question"
+    actionable = [key for key in missing if key not in deferred]
+    digest_input = {"responses": responses, "question_history": history} if bounded else responses
+    digest = hashlib.sha256(json.dumps(digest_input, ensure_ascii=False, sort_keys=True,
                                       separators=(",", ":")).encode("utf-8")).hexdigest()
     confirmation = state.get("confirmation")
-    confirmed = (not missing and isinstance(profile_digest, str) and bool(profile_digest)
+    confirmed = (not actionable and isinstance(profile_digest, str) and bool(profile_digest)
                  and isinstance(confirmation, dict)
                  and set(confirmation) == {"profile_digest", "progress_digest", "quote"}
                  and confirmation["profile_digest"] == profile_digest
                  and confirmation["progress_digest"] == digest
                  and isinstance(confirmation["quote"], str) and bool(confirmation["quote"].strip()))
-    key = missing[0] if missing else None
-    return {"phase": "collecting" if missing else "ready" if confirmed else "confirming",
+    key = next_fields[0] if next_fields else None
+    return {"phase": "collecting" if actionable else "ready" if confirmed else "confirming",
             "ready_for_planning": bool(confirmed), "progress_digest": digest,
-            "missing_fields": missing, "next_field": key,
-            "next_question": REQUIRED_FIELDS[key]["question"] if key else
-                None if confirmed else "请确认以上孩子的情况是否准确，有需要修改的地方吗？"}
+            "missing_fields": actionable, "deferred_fields": deferred, "next_field": key,
+            "question_id": next_card["id"] if next_card else None,
+            "question_fields": next_fields, "question_kind": kind,
+            "clarifications_used": clarifications, "clarifications_remaining": 6 - clarifications,
+            "next_question": question_text(next_card, next_fields, clarification=kind == "clarification") if next_card else
+                None if confirmed else "以上画像是否准确（包括保留的不确定项）？\nA. 准确，开始规划\nB. 有修改，请说明"}
+
+
+def record_answer(state, question_id, quote, responses):
+    """Append one real reply and host-extracted facts, never infer missing facts."""
+    current = assess_intake(state)
+    if current["phase"] != "collecting" or current["question_id"] != question_id:
+        raise ValueError("record the current unanswered question only")
+    if not isinstance(quote, str) or not quote.strip() or len(quote) > 4000:
+        raise ValueError("a genuine nonempty reply is required")
+    if not isinstance(responses, dict):
+        raise ValueError("responses must contain the facts explicitly supplied in this reply")
+    for response in responses.values():
+        if (not isinstance(response, dict) or not isinstance(response.get("quote"), str)
+                or not response["quote"].strip() or response["quote"] not in quote):
+            raise ValueError("field quotes must come from this actual reply")
+    updated = copy.deepcopy(state)
+    updated["schema_version"] = "1.1"
+    updated.pop("confirmation", None)
+    updated.setdefault("question_history", []).append({"question_id": question_id, "quote": quote})
+    updated["responses"].update(responses)
+    simple = quote.strip().rstrip("。.!！")
+    status = ("unknown" if simple in {"不知道", "不清楚", "不确定", "不了解"} else
+              "skipped" if simple in {"跳过", "不便回答"} else None)
+    if status:
+        for key in current["question_fields"]:
+            if key not in updated["responses"]:
+                updated["responses"][key] = {"status": status, "quote": quote}
+    assess_intake(updated)
+    return updated
 
 
 def require_confirmed_intake(state, profile_digest):
@@ -136,11 +206,25 @@ def main():
     parser.add_argument("--state", type=Path, help="Existing private intake state; omit for an empty intake")
     parser.add_argument("--profile-digest")
     parser.add_argument("--fields", action="store_true", help="Read the internal field catalogue")
+    parser.add_argument("--questions", action="store_true", help="Read thematic prompts, not a parent form")
+    parser.add_argument("--record", type=Path, help="Private JSON with question_id, quote and extracted responses")
     args = parser.parse_args()
     if args.fields:
         print(json.dumps(REQUIRED_FIELDS, ensure_ascii=True))
         return
-    state = json.loads(args.state.read_text(encoding="utf-8-sig")) if args.state else {"schema_version": "1.0", "responses": {}}
+    if args.questions:
+        print(json.dumps(QUESTION_CARDS, ensure_ascii=True))
+        return
+    state = json.loads(args.state.read_text(encoding="utf-8-sig")) if args.state and (args.state.exists() or not args.record) else {
+        "schema_version": "1.1", "responses": {}, "question_history": []}
+    if args.record:
+        if args.state is None:
+            parser.error("--record requires a private --state destination")
+        reply = json.loads(args.record.read_text(encoding="utf-8-sig"))
+        state = record_answer(state, **reply)
+        temporary = args.state.with_suffix(args.state.suffix + ".tmp")
+        temporary.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+        temporary.replace(args.state)
     print(json.dumps(assess_intake(state, profile_digest=args.profile_digest), ensure_ascii=True))
 
 

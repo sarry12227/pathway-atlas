@@ -11,6 +11,17 @@ from tests.test_planning_session_replay_journal import _profile, _report, _admis
 
 
 class HostWorkflowTest(unittest.TestCase):
+    def test_default_handoff_prioritizes_brief_over_deep_task_list(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = host_workflow.PlanningWorkflow.start(Path(tmp), _profile(), _report(), confirmed=True)
+            status = workflow.status()
+            self.assertEqual(status.get("initial_delivery_action"), "collect_sources_then_brief")
+            self.assertTrue(status["first_delivery"]["applies_only_before_first_report"])
+            self.assertFalse(status["first_delivery"]["requires_deep_task_closure"])
+            self.assertTrue(status["first_delivery"].get("includes_setup_and_repair"))
+            self.assertGreater(status["pending"], 0)
+            self.assertEqual(workflow.session.completed_task_ids, ())
+
     def test_all_unavailable_cli_returns_profile_only_text_without_public_sources(self):
         """Synthetic program fixture: missing retrieval must not break text delivery."""
         from scripts.preflight import detect_capabilities

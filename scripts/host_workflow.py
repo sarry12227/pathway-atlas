@@ -423,6 +423,7 @@ class PlanningWorkflow:
             raise ValueError("task display limit must be between 1 and 100")
         pending = sorted(self.pending(), key=lambda task: (-task.year, task.kind, task.task_id))
         result = {
+            "initial_delivery_action": "collect_sources_then_brief",
             "session_id": self.session.session_id,
             "stage": self.session.stage.value,
             "completed": len(self.session.completed_task_ids),
@@ -432,11 +433,16 @@ class PlanningWorkflow:
             "research_summary": self.research_summary(),
             "older_year_resolution": self._older_year_resolution(pending),
             "first_delivery": {
+                "applies_only_before_first_report": True,
                 "command": "brief",
                 "mode": "planning_reference",
                 "requires_deep_task_closure": False,
                 "original_page_budget": 24,
                 "research_minutes": 8,
+                "includes_setup_and_repair": True,
+                "max_attempts_per_failed_action": 2,
+                "switch_after_no_progress_seconds": 90,
+                "budget_exhausted_action": "deliver_supported_seven_section_reference",
                 "ordinary_counts": {"冲": 3, "稳": 4, "保": 5},
                 "pathway_counts": {"冲": 1, "稳": 1, "保": 1},
             },

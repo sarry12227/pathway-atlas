@@ -26,23 +26,29 @@ search snippets alone cannot establish facts. Explicit `offline` stays offline.
 
 ## Normalize the confirmed intake
 
-New CLI sessions require `--intake <private-workspace>/intake.json` in addition
-to `--confirmed`, for both `--answers` and `--profile`. Maintain the per-field
-user response coverage described in the questionnaire. Run
-`python -m scripts.intake_progress --state <private-workspace>/intake.json`
-during collection: `collecting` supplies one missing question; `confirming`
-means show the complete profile; only a real confirmation bound to both the
-current profile digest and progress digest permits `start`. A profile full of
-default unknown values does not establish that the questions were asked.
-Existing initialized sessions resume normally. The low-level Python API is a
-trusted integration boundary, not a workaround for an incomplete CLI intake.
-If the host merely forgot the progress file, restore it from retained genuine
-replies and confirmation first; a missing file does not mean the parent must
-answer the questionnaire again. Error `intake_incomplete` carries the current
-coverage state. Interpret it with the actual conversation before asking.
+New CLI sessions require `--intake <private-workspace>/intake.json` and a real
+profile confirmation. Follow [the bounded questionnaire](questionnaire.md):
+24 thematic prompts, one clarification per theme and six total. The 72 fields
+are storage coverage, not separate conversational turns. `scripts.intake_progress`
+returns `question_id`, `question_fields`, `next_question` and the current phase.
+Use its `--record` action to append one actual reply and host-extracted field
+quotes to a private schema 1.1 state. Reuse volunteered answers across fields.
+Do not resubmit the same reply after a tool timeout; inspect saved state first.
+
+`deferred_fields` are details left uncollected after a covered question; they
+are distinct from explicit unknown, skipped or an unasked topic. Disclose these
+limits in the profile confirmation and map them to unknown values in v3 while
+retaining the raw progress record. A deferred fact is never a positive/negative
+eligibility decision, an exact number or a claim that the parent answered.
+`confirming` means summarize once; bind the actual reply to the profile and
+progress digests. Only `ready_for_planning=true` permits CLI start. Existing
+schema 1.0 confirmed receipts remain valid; in-progress records keep all facts
+and may migrate with retained genuine question history. Initialized sessions
+resume normally. Restore missing internal files from actual dialogue, not by
+asking the family again. The low-level API does not bypass intake requirements.
 
 Before rendering a grade question, use the July 1 cohort rule in
-[the questionnaire](questionnaire.md), section 年级与高考年份.
+the questionnaire above, section 年级与高考年份.
 `python -m scripts.questionnaire_intake --grade-options` supplies current
 Asia/Shanghai date-based labels without opening a session or altering any
 profile. It is an intake helper, not a new startup prerequisite. Preserve an
@@ -88,7 +94,11 @@ standards. Exit code `2` means invalid input, extraction, evidence or host
 operation; `3` means an optional capability is unavailable. Neither code proves
 that a checkpoint or report was written. Verify saved state before claiming it.
 Successful initialization reaches `query_plan_ready` and returns the session ID
-and typed next tasks. These are internal readiness details, not a report.
+and `initial_delivery_action=collect_sources_then_brief`. Follow `first_delivery`
+only before the first report; reuse an existing delivered brief on resume.
+`next` contains optional deep-research tasks, not a requirement for the initial
+report. Its time budget includes setup and repair from user confirmation.
+Initialization details alone are not a report.
 
 Expected runtime failures emit one JSON object to stderr with `ok=false`,
 `report_generated=false`, `error_code`, `user_message`, `host_action` and
