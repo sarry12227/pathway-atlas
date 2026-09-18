@@ -29,7 +29,7 @@ jobs:
           python-version: "3.10"
       - name: Restore the latest minimal persistence state
         id: restore-state
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: source-health-cache/state.json
           key: source-health-state-${{ github.run_id }}
@@ -187,7 +187,7 @@ jobs:
           if-no-files-found: error
           retention-days: 14
       - name: Save this run's minimal persistence state
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: source-health-cache/state.json
           key: source-health-state-${{ github.run_id }}
